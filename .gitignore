@@ -1,0 +1,22 @@
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 发布包（zip 由 Release 托管，不进 git）
+*.zip
+
+# 用户数据与本地日志
+servers.json
+theme.json
+sources.json
+mc_versions_cache.json
+安装日志.txt
+manager.log
+*.log
+
+# 系统/编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
