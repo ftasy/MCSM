@@ -6,13 +6,14 @@ import zipfile
 import time
 
 # 版本号（用来给压缩包命名）
-VERSION = "v0.2"
+VERSION = "v1.6.1"
 # 产品名（MCSM = Minecraft Server Manager）
 APP_NAME = "MCSM"
 OUT_ZIP = f"{APP_NAME}_{VERSION}_安装包.zip"
 
 # 绝对不要打进包里的目录和文件
-EXCLUDE_DIRS = {"__pycache__", ".git", ".idea", ".vscode"}
+EXCLUDE_DIRS = {"__pycache__", ".git", ".idea", ".vscode",
+                "build", "dist"}  # ★ PyInstaller 产物不进源码包
 EXCLUDE_EXTS = {".pyc", ".pyo", ".zip", ".rar", ".7z", ".log"}
 EXCLUDE_FILES = {
     "servers.json",          # 用户服务器列表

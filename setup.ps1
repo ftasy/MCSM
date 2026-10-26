@@ -13,7 +13,35 @@ Add-Type -AssemblyName System.Drawing
 
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $InstallPath) {
-    $InstallPath = Join-Path $env:LOCALAPPDATA "MC服务器管理器"
+    # ★ 智能盘符（默认安装位置）：
+    #   有 D 盘 → D:\MCSM
+    #   没有 D 盘 → 找第一个非 C 盘 → [盘符]:\MCSM
+    #   只有 C 盘 → $env:LOCALAPPDATA\MCSM
+    $chosen = $null
+    try {
+        foreach ($drive in (Get-PSDrive -PSProvider FileSystem)) {
+            if ($drive.Name -eq "D" -and (Test-Path "D:\")) {
+                $chosen = "D:\MCSM"
+                break
+            }
+        }
+    } catch { }
+    if (-not $chosen) {
+        try {
+            foreach ($drive in (Get-PSDrive -PSProvider FileSystem)) {
+                if ($drive.Name -match '^[A-Za-z]$' -and $drive.Name -ne "C" `
+                        -and (Test-Path "$($drive.Name):\")) {
+                    $chosen = "$($drive.Name):\MCSM"
+                    break
+                }
+            }
+        } catch { }
+    }
+    if ($chosen) {
+        $InstallPath = $chosen
+    } else {
+        $InstallPath = Join-Path $env:LOCALAPPDATA "MCSM"
+    }
 }
 $script:Target = $InstallPath
 $script:DoPython = $InstallPython

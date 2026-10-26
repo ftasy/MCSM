@@ -20,3 +20,8 @@ manager.log
 Thumbs.db
 .idea/
 .vscode/
+
+# PyInstaller 打包产物
+build/
+dist/
+build_log.txt

@@ -170,3 +170,106 @@ def validate(path, need, mc_version=None):
                           "     建议装个 Java %d 再选它。"
                           % (major, mc_version, mx, mx))
     return True, "Java %d" % major
+
+
+# =========================================================
+#  V0.4.0：内置 Java 自动下载（Adoptium Temurin JRE）
+# =========================================================
+
+def app_base_dir():
+    """软件根目录：EXE 版 = exe 所在目录；源码版 = 项目根。"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def java_home_dir():
+    """内置 Java 存放目录：<软件根>/java。"""
+    return os.path.join(app_base_dir(), "java")
+
+
+def adoptium_jre(major, on_log=None):
+    """用 Adoptium API 查某个大版本的 JRE 下载直链。
+
+    返回 {"url": zip 直链, "name": 解压目录名}。
+    失败抛 InstallError。
+    """
+    from . import install as _inst
+    api = ("https://api.adoptium.net/v3/assets/latest/%d/hotspot"
+           "?os=windows&arch=x64&image_type=jre" % major)
+    d = _inst._get_json(api, timeout=30)
+    # ★ API 返回的是 assets 数组（不是 {"assets": [...]} 对象）
+    if isinstance(d, list):
+        assets = d
+    elif isinstance(d, dict):
+        assets = (d or {}).get("assets") or []
+    else:
+        assets = []
+    if not assets:
+        raise _inst.InstallError("Adoptium 没有返回可用资产")
+    b = assets[0].get("binary") or {}
+    p = b.get("package") or {}
+    link = p.get("link")
+    name = p.get("name") or ("jdk-%d" % major)
+    if not link:
+        raise _inst.InstallError("Adoptium 没给下载链接")
+    return {"url": link, "name": name}
+
+
+def download_jre(major, on_log=None):
+    """下载并解压 JRE 到 <软件根>/java/。
+
+    返回解压后的 javaw.exe（没有就用 java.exe）绝对路径。
+    这是耗时网络操作，调用方必须放进 Worker 线程。
+    """
+    import zipfile
+    import shutil
+    from . import install as _inst
+
+    def log(m):
+        if on_log:
+            on_log(m)
+
+    info = adoptium_jre(major, on_log=on_log)
+    base = java_home_dir()
+    os.makedirs(base, exist_ok=True)
+
+    zip_path = os.path.join(base, info["name"] + ".zip")
+    log("下载 JRE %d（%s）..." % (major, info["name"]))
+    _inst._download(info["url"], zip_path, timeout=900, on_log=on_log)
+
+    tmp = os.path.join(base, "_tmp_" + info["name"])
+    if os.path.isdir(tmp):
+        shutil.rmtree(tmp, ignore_errors=True)
+    os.makedirs(tmp, exist_ok=True)
+    log("解压中 ...")
+    with zipfile.ZipFile(zip_path) as z:
+        z.extractall(tmp)
+    os.remove(zip_path)
+
+    # 解压产物一般是 <tmp>/jdk-xx.y.z+7/，在它的 bin/ 里找 javaw
+    exe = None
+    for root, _dirs, _files in os.walk(tmp):
+        for name in ("javaw.exe", "java.exe"):
+            p = os.path.join(root, "bin", name)
+            if os.path.isfile(p):
+                exe = p
+                break
+        if exe:
+            break
+    if not exe:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise _inst.InstallError("解压后没找到 javaw.exe，请手动下载 Java")
+
+    # 挪到正式目录（幂等：已存在先删旧的）
+    dest = os.path.join(base, info["name"])
+    if os.path.isdir(dest):
+        shutil.rmtree(dest, ignore_errors=True)
+    shutil.move(tmp, dest)
+    # 解压产物可能多套一层目录（<dest>/jdk-xx/bin/...），递归找
+    for root, _dirs, _files in os.walk(dest):
+        for name in ("javaw.exe", "java.exe"):
+            p = os.path.join(root, "bin", name)
+            if os.path.isfile(p):
+                return p
+    raise _inst.InstallError("Java 已下载但 bin 下没有可执行文件")

@@ -56,10 +56,11 @@ from PySide6.QtWidgets import (
     QWidget)
 
 from .core import (scanner, versions, java as javacore, builder,
-                   migrate, props, backup, install, theme)
+                   migrate, props, backup, install, theme, monitor, modman)
 from .dialogs import (CreateDialog, MigrateDialog, ServerConfigDialog,
                       BackupDialog, ModDialog, DeleteServerDialog,
                       DiagDialog, AnalyzeDialog, Worker, _track)
+from . import updater   # ★ V1.6.0：软件更新检测
 
 DATA_FILE = "servers.json"
 
@@ -94,6 +95,22 @@ class Console(QWidget):
         self.proc = None
         self.proc_name = ""
         self.proc_key = None
+
+        # ★ V1.1.0：控制台配色（可被「显示设置 → 控制台配色」覆盖）
+        self._colors = dict(self.DEFAULT_COLORS)
+
+    def set_colors(self, colors):
+        """应用自定义控制台配色（None / 空 dict = 恢复默认）。"""
+        try:
+            if colors:
+                for k in self.DEFAULT_COLORS:
+                    v = colors.get(k)
+                    if v:
+                        self._colors[k] = v
+            else:
+                self._colors = dict(self.DEFAULT_COLORS)
+        except Exception:
+            self._colors = dict(self.DEFAULT_COLORS)
         
         # ★ 指令历史与补全
         self.history = []
@@ -142,14 +159,24 @@ class Console(QWidget):
                 return True
         return super().eventFilter(obj, event)
 
-    # 日志级别 -> 颜色
-    COLORS = {
-        "error": "#ff6b6b",
-        "warn":  "#ffd166",
-        "ok":    "#06d6a0",
-        "chat":  "#8ecae6",
-        "info":  None,
+    # 日志级别 -> 颜色（★ V1.1.0：可用「显示设置 → 控制台配色」覆盖）
+    DEFAULT_COLORS = {
+        "info":       "#d0d0d0",  # 普通信息（灰）
+        "warn":       "#ffd166",  # 警告（黄）
+        "error":      "#ff6b6b",  # 普通错误（红）
+        "error_bold": "#ff5252",  # 报错堆栈：亮红 + 加粗
+        "ok":         "#4caf50",  # 成功 / 启动完成（亮绿）
+        "chat":       "#4fc3f7",  # 玩家聊天（青蓝）
     }
+
+    # 报错堆栈特征：整行亮红加粗
+    ERR_STACK_RE = re.compile(
+        r"(exception|caused by|\bat net\.minecraft\b|fatal|severe)",
+        re.IGNORECASE)
+    # 玩家聊天：<玩家名> 内容
+    CHAT_RE = re.compile(r"<[A-Za-z0-9_]{1,16}>")
+    # 启动完成
+    DONE_RE = re.compile(r"\bDone\b|启动完成|server started", re.IGNORECASE)
 
     def append(self, text):
         self._append_colored(text.rstrip("\n"))
@@ -187,6 +214,9 @@ class Console(QWidget):
             if lv in ("WARN", "WARNING"):
                 return "warn"
             if lv == "INFO":
+                # 玩家聊天优先（服务端聊天是 INFO 级别）
+                if self.CHAT_RE.search(line):
+                    return "chat"
                 if any(k in low for k in ("error", "exception", "failed",
                                           "failed to", "unable")):
                     return "error"
@@ -195,16 +225,19 @@ class Console(QWidget):
                                           "server started")):
                     return "ok"
                 return "info"
-        # 无前缀的兜底
-        if re.search(r"\b(error|exception|failed|caused by|unable)\b", low):
+        # 无前缀的兜底（V1.0.0：聊天优先于错误关键词，
+        # 否则玩家聊天里带个 "error" 会被误标成红色）
+        if self.CHAT_RE.search(line):
+            return "chat"
+        if self.ERR_STACK_RE.search(low):
+            return "error"
+        if re.search(r"\b(error|failed|unable)\b", low):
             return "error"
         if re.search(r"\b(warn|warning|deprecated)\b", low):
             return "warn"
         if ("done (" in low or "started" in low
                 or "listening" in low or "就绪" in low):
             return "ok"
-        if re.search(r"<[A-Za-z0-9_]{2,16}>", line):
-            return "chat"
         return "info"
 
     def _append_colored(self, text):
@@ -218,11 +251,22 @@ class Console(QWidget):
             if not line.strip():
                 continue
             lv = self._level(line)
-            color = self.COLORS.get(lv) or "#d0d0d0"
+            color = self._colors.get(lv) or self._colors["info"]
+            bold = False
+            # ★ 报错堆栈整行亮红加粗
+            if lv == "error" and self.ERR_STACK_RE.search(line):
+                color = self._colors.get("error_bold") or self._colors["error"]
+                bold = True
             safe = (line.replace("&", "&amp;")
                         .replace("<", "&lt;").replace(">", "&gt;"))
-            cur.insertHtml(
-                '<span style="color:%s;">%s</span><br>' % (color, safe))
+            if bold:
+                cur.insertHtml(
+                    '<span style="color:%s;font-weight:bold;">'
+                    '%s</span><br>' % (color, safe))
+            else:
+                cur.insertHtml(
+                    '<span style="color:%s;">%s</span><br>'
+                    % (color, safe))
         self.out.setTextCursor(cur)
         if was_at_bottom:
             sb.setValue(sb.maximum())
@@ -441,10 +485,17 @@ class MainWindow(QMainWindow):
         self._size_cache = {}  # ★ 缓存文件夹大小，不要写进 servers.json  
         self._port_cache = {}  # ★ 缓存端口，防止悬停时疯狂读盘
         self._proc_buffers = {}  # ★ 日志缓冲区，防止多字节中文截断
+        # ★ V0.5.0：实时监控 + 每日定时重启的状态
+        self._ping_text = {}      # key -> "在线: 3/20 | 延迟: 2ms"
+        self._ping_busy = set()   # 正在探测的 key（防止 10s 轮次堆积）
+        self._restart_timers = {}  # 每分钟检查定时重启的 QTimer
+        self._restart_countdown = {}  # 已进入 60 秒倒计时的 key
+        self._plan_restart = {}   # 标记"计划重启"（_finished 据此自动再启动）
         
         # 后台任务句柄（启动时可能还不存在，先置空，外部/测试可安全查询）
         self._scan_worker = None
         self._import_worker = None
+        self._modpack_worker = None
         self._migrate_worker = None
         self._scan_then = None
         self._scan_again = False
@@ -462,6 +513,10 @@ class MainWindow(QMainWindow):
             # ★ 启动时如果上次的总目录已经不在了（换了机器/盘符），
             #   别弹模态框卡在启动阶段，状态栏提示一下就行。
             self.do_scan(quiet=True)
+        # ★ V0.5.0：实时状态监控定时器（每 10 秒 ping 一次运行中的服）
+        self._ping_timer = QTimer(self)
+        self._ping_timer.timeout.connect(self._ping_round)
+        self._ping_timer.start(10000)
 
     # ---------------- UI ----------------
     def _build_ui(self):
@@ -485,9 +540,6 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         self.act_start = act("启动", self.do_start, "启动选中服务器")
         self.act_stop = act("停止", self.do_stop, "停止选中服务器")
-        self.act_stop_bk = act("停止并备份", self.do_stop_backup,
-                               "停止服务器并立即备份它的存档")
-        self.act_stop_bk.setEnabled(False)
         self.act_stop.setEnabled(False)
         tb.addSeparator()
         act("初始化服务端", self.do_create, "为选中项下载核心/模组/生成配置")
@@ -501,8 +553,13 @@ class MainWindow(QMainWindow):
             "删掉整个服务器文件夹（含存档）")
         tb.addSeparator()
         act("显示设置", self.do_display, "调整列表字号与行高")
+        act("检查更新", self.do_check_update,
+            "检查 GitHub 上有没有新版本（后台线程，不卡界面）")
         tb.addSeparator()
         act("导入地图", self.do_import, "把一个地图文件夹加入管理")
+        act("导入整合包", self.do_import_modpack,
+            "导入 Modrinth/CurseForge 整合包 zip：\n"
+            "自动识别类型、装对应版本核心、并发下载全部模组")
         act("打开文件夹", self.do_open_dir)
 
         # 顶部：根目录（放进 centralWidget，不用 setMenuWidget）
@@ -553,7 +610,9 @@ class MainWindow(QMainWindow):
         # 拖到边缘自动滚动（以前是 False，列表长了就拖不到底）
         self.icon_view.setAutoScroll(True)
         self.icon_view.itemSelectionChanged.connect(self.on_sel)
-        self.icon_view.doubleClicked.connect(lambda i: self.do_config())
+        # ★ V1.6.0：双击卡片 = 未运行就启动 / 运行中就停止
+        #   （服务器配置从右键菜单进）
+        self.icon_view.doubleClicked.connect(self._double_click_icon)
         # 右键菜单：图标视图不能因为换了样式就比表格少功能
         self.icon_view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.icon_view.customContextMenuRequested.connect(
@@ -588,7 +647,8 @@ class MainWindow(QMainWindow):
             self.table.horizontalHeader().setSectionResizeMode(
                 c, QHeaderView.ResizeToContents)
         self.table.itemSelectionChanged.connect(self.on_sel)
-        self.table.doubleClicked.connect(lambda i: self.do_config())
+        # ★ V1.6.0：双击行 = 未运行就启动 / 运行中就停止
+        self.table.doubleClicked.connect(self._double_click_row)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._icon_menu)
         # 表格也要画选中竖杠 / 悬停注释（stylesheet 的 item border 不稳）
@@ -641,6 +701,7 @@ class MainWindow(QMainWindow):
 
         # 总输出：软件自己的日志（扫描/备份/搬迁提示），始终存在
         self.console = Console()
+        self.console.set_colors(self.disp.get("console_colors") or None)
         # 每个运行中的服务器一个独立控制台，互不干扰 -> 支持多开
         self.consoles = {}
 
@@ -765,7 +826,7 @@ class MainWindow(QMainWindow):
           目录、Java、端口、存档名这些不占版面，但很常用。
         """
         L = []
-        name = e.get("name") or e.get("world_name") or "?"
+        name = self._display_name(e) or e.get("world_name") or "?"
         L.append(name)
         bits = []
         if e.get("version"):
@@ -807,7 +868,7 @@ class MainWindow(QMainWindow):
         lines = []
         # 用文件夹名（导入时已清洗过），不用 level.dat 里的世界名 ——
         # 后者可能带 §b§l 颜色码和冒号，显示出来是乱码
-        name = e.get("name") or e.get("world_name") or "?"
+        name = self._display_name(e) or e.get("world_name") or "?"
         if "name" in show:
             lines.append(name)
         sub = []
@@ -824,12 +885,18 @@ class MainWindow(QMainWindow):
             lines.append(" · ".join(sub))
         if "status" in show:
             if self._key(e) in self.procs:
-                lines.append("● 运行中")
+                # ★ V0.5.0：运行中有监控文本就显示"在线: 3/20 | 延迟: 2ms"
+                ping = self._ping_text.get(self._key(e))
+                if ping:
+                    lines.append(ping)
+                else:
+                    lines.append("● 运行中")
             elif e.get("notes"):
                 lines.append("● 未初始化")
         # ★ 一个都没勾时不能崩（IndexError），至少显示名称
         if not lines:
-            lines = [str(e.get("name") or e.get("world_name") or "?")]
+            lines = [str(self._display_name(e)
+                         or e.get("world_name") or "?")]
         if as_lines:
             return lines
         out = "<b>%s</b>" % lines[0]
@@ -844,7 +911,8 @@ class MainWindow(QMainWindow):
             order = self.disp.get("order", {})
             def k(e):
                 kk = self._key(e)
-                return (order.get(kk, 9999), str(e.get("name") or ""))
+                return (order.get(kk, 9999),
+                        str(self._display_name(e) or ""))
             return sorted(self.entries, key=k)
         if mode == "version":
             from .core import versions as _V
@@ -855,7 +923,7 @@ class MainWindow(QMainWindow):
                 #   会排出"1.21.10 夹着 1.21.11"这种乱序。
                 # 同版本时用名称兜底，保证顺序稳定。
                 return (_V.mc_version_key(e.get("version")),
-                        str(e.get("name") or "").lower())
+                        str(self._display_name(e) or "").lower())
             return sorted(self.entries, key=vk)
         if mode == "recent":
             def rk(e):
@@ -863,21 +931,20 @@ class MainWindow(QMainWindow):
                 return -(float(t) if t else 0)
             return sorted(self.entries, key=rk)
         if mode == "size":
-            # 按文件夹大小排序，大的在前（缓存 60 秒，避免重复扫盘）
+            # 按文件夹大小排序，大的在前（缓存 60 秒）。
+            # ★ 未缓存时先给占位值，绝不在这里同步扫盘卡主线程 ——
+            #   真正的大小由 _on_sort_changed 触发的后台 Worker
+            #   （_prefetch_sizes）算完写缓存后自动刷新。
             import time as _t
-            from .core import install
             cache = self._size_cache
             now = _t.time()
-            
+
             def sk(e):
-                d = e.get("server_dir") or e.get("folder") or ""
                 key = self._key(e)
                 cached = cache.get(key)
                 if cached and now - cached.get("t", 0) < 60:
                     return -cached["s"]
-                sz = install.server_size(d)
-                cache[key] = {"s": sz, "t": now}
-                return -sz
+                return -1  # 未缓存：占位，等后台算完 _fill_views 刷新
             return sorted(self.entries, key=sk)
         if mode == "mtime":
             # 按文件夹最后修改时间，新的在前
@@ -890,7 +957,7 @@ class MainWindow(QMainWindow):
             return sorted(self.entries, key=mk)
         # name
         return sorted(self.entries,
-                      key=lambda e: str(e.get("name") or "").lower())
+                      key=lambda e: str(self._display_name(e) or "").lower())
 
     def _fill_icons(self):
         """填充图标视图。
@@ -1168,7 +1235,6 @@ class MainWindow(QMainWindow):
         running = self._key(e) in self.procs
         a_start = m.addAction("启动") if not running else None
         a_stop = m.addAction("停止") if running else None
-        a_stopbk = m.addAction("停止并备份") if running else None
         m.addSeparator()
         a_cfg = m.addAction("服务器配置")
         a_init = m.addAction("初始化服务端")
@@ -1177,6 +1243,7 @@ class MainWindow(QMainWindow):
         a_mod = m.addAction("模组管理")
         a_log = m.addAction("分析日志")
         m.addSeparator()
+        a_rename = m.addAction("重命名服务器")
         a_icon = m.addAction("设置服务器图标...")
         a_clricon = m.addAction("清除自定义图标")
         a_bat = m.addAction("重新生成 run.bat")
@@ -1189,8 +1256,6 @@ class MainWindow(QMainWindow):
             self.do_start()
         elif act is a_stop:
             self.do_stop()
-        elif act is a_stopbk:
-            self.do_stop_backup()
         elif act is a_cfg:
             self.do_config()
         elif act is a_init:
@@ -1203,6 +1268,8 @@ class MainWindow(QMainWindow):
             self.do_analyze()
         elif act is a_icon:
             self.do_edit_icon()
+        elif act is a_rename:
+            self.do_rename_server()
         elif act is a_clricon:
             self.do_clear_icon()
         elif act is a_bat:
@@ -1292,6 +1359,56 @@ class MainWindow(QMainWindow):
         if self.sort_mode == "custom":
             self.statusBar().showMessage(
                 "自定义顺序：拖动图标即可调整，会自动保存", 4000)
+        elif self.sort_mode == "size":
+            # ★ 按大小排序：后台线程算目录大小，绝不卡死主线程
+            self._prefetch_sizes()
+
+    def _prefetch_sizes(self):
+        """按大小排序时，后台计算所有服务器目录大小（写进 _size_cache）。"""
+        if getattr(self, "_size_worker_running", False):
+            return
+        self._size_worker_running = True
+        self.statusBar().showMessage("正在计算各服务器大小 ...")
+        entries = list(self.entries)
+        import time as _t
+
+        def job(on_log=None):
+            from .core import install as _inst
+            now = _t.time()
+            out = {}
+            for e in entries:
+                d = e.get("server_dir") or e.get("folder") or ""
+                key = self._key(e)
+                try:
+                    out[key] = _inst.server_size(d)
+                except Exception:
+                    out[key] = 0
+            return {"sizes": out, "t": now}
+
+        w = _track(self, Worker(job, {}, self))
+        self._size_worker = w
+        w.done.connect(self._on_sizes_done)
+        w.start()
+
+    def _on_sizes_done(self, ok, res):
+        self._size_worker_running = False
+        try:
+            w, self._size_worker = getattr(self, "_size_worker", None), None
+            if w is not None:
+                self._forget_worker(w)
+        except Exception:
+            pass
+        if ok and res:
+            sizes = res.get("sizes") or {}
+            t = res.get("t", 0)
+            for k, s in sizes.items():
+                self._size_cache[k] = {"s": s, "t": t}
+            self._fill_views()
+            self.statusBar().showMessage(
+                "大小计算完成，已按大小排序", 4000)
+        else:
+            self.statusBar().showMessage(
+                "大小计算失败，保持当前顺序", 4000)
 
     def _switch_view(self, mode):
         self.view_mode = mode
@@ -1322,6 +1439,80 @@ class MainWindow(QMainWindow):
     def _wrap(self, w):
         """把一个已带布局的 widget 变成页签页。"""
         return w
+
+    def _console_colors_tab(self):
+        """V1.1.0：控制台配色页签（info / warn / error / chat）。
+
+        返回 {"widget": 页签widget, "result": 取色函数}。
+        """
+        cur = self.disp.get("console_colors") or {}
+        w = QWidget()
+        vv = QVBoxLayout(w)
+
+        tip = QLabel(
+            "自定义控制台各类型日志的颜色，不设置就恢复默认。\n"
+            "报错堆栈（Exception / Caused by / at net.minecraft...）\n"
+            "会使用『错误』的颜色并加粗。")
+        tip.setWordWrap(True)
+        tip.setStyleSheet("color:#9aa4b2;")
+        vv.addWidget(tip)
+
+        f = QFormLayout()
+        items = [
+            ("info", "普通信息"),
+            ("warn", "警告"),
+            ("error", "错误"),
+            ("chat", "玩家聊天"),
+        ]
+        btns = {}
+        from PySide6.QtWidgets import QColorDialog
+        from PySide6.QtGui import QColor
+
+        def _mk(key, label):
+            default = Console.DEFAULT_COLORS.get(key, "#d0d0d0")
+            hexs = cur.get(key) or default
+            b = QPushButton(hexs)
+            b.setStyleSheet("color:%s;" % hexs)
+            b.setToolTip("点击打开颜色选择器")
+
+            def pick():
+                col = QColorDialog.getColor(
+                    QColor(b.text()), self,
+                    "选择『%s』的颜色" % label)
+                if col.isValid():
+                    hx = col.name()
+                    b.setText(hx)
+                    b.setStyleSheet("color:%s;" % hx)
+
+            b.clicked.connect(pick)
+            return b
+
+        for key, label in items:
+            btns[key] = _mk(key, label)
+            f.addRow("%s:" % label, btns[key])
+
+        b_reset = QPushButton("恢复默认配色")
+        b_reset.clicked.connect(
+            lambda: _reset(btns, items))
+        vv.addLayout(f)
+
+        def _reset(bts, its):
+            for key, label in its:
+                d = Console.DEFAULT_COLORS.get(key, "#d0d0d0")
+                bts[key].setText(d)
+                bts[key].setStyleSheet("color:%s;" % d)
+
+        vv.addWidget(b_reset)
+        vv.addStretch(1)
+
+        def _result():
+            out = {}
+            for key, label in items:
+                out[key] = btns[key].text().strip() or \
+                    Console.DEFAULT_COLORS.get(key, "#d0d0d0")
+            return out
+
+        return {"widget": w, "result": _result}
 
     def _appearance_tab(self):
         """外观/主题设置页。"""
@@ -1756,6 +1947,10 @@ class MainWindow(QMainWindow):
         ap = self._appearance_tab()
         tabs.addTab(ap, "外观 / 主题")
 
+        # ★ V1.1.0：控制台配色页签
+        cc = self._console_colors_tab()
+        tabs.addTab(cc["widget"], "控制台配色")
+
         vb = QVBoxLayout()
         vb.addWidget(tabs, 1)
         btns = QDialogButtonBox(
@@ -1780,6 +1975,8 @@ class MainWindow(QMainWindow):
             self.disp["view"] = cb_view.currentData() or "icon"
             self.disp["show"] = [k for k, cb in show_boxes.items()
                                  if cb.isChecked()]
+            # ★ V1.1.0：保存控制台配色
+            self.disp["console_colors"] = cc["result"]()
             self.data["display"] = self.disp
             # ★ 主题保存失败不能连累其它设置 —— 以前这里 theme 未导入，
             #   一保存就 NameError，导致字体/图标大小/视图全都存不下来。
@@ -1816,6 +2013,16 @@ class MainWindow(QMainWindow):
             self._switch_view(self.disp["view"])
             self._apply_display()
             self._fill_views()
+            # ★ V1.1.0：把新配色广播给所有控制台（含每服控制台）
+            try:
+                cc_colors = self.disp.get("console_colors") or None
+                for _c in [self.console] + list(self.consoles.values()):
+                    try:
+                        _c.set_colors(cc_colors)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             from .core import theme as _t2
             _t2.load()
             self.statusBar().showMessage(
@@ -1874,6 +2081,35 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             "已设置 %s 的图标" % (e.get("name") or ""))
 
+    def do_rename_server(self):
+        """右键重命名：给服务器起个好记的名字（不碰文件夹名）。
+
+        存进 servers.json 的 display_name；图标视图和表格视图
+        扫描后都会用这个字段覆盖显示（见 _display_name）。
+        """
+        e = self._cur_entry()
+        if not e:
+            QMessageBox.information(self, "提示", "先选中一个服务器")
+            return
+        old = e.get("display_name") or e.get("name") or ""
+        new, ok = QInputDialog.getText(
+            self, "重命名服务器",
+            "给这个服务器起个好记的名字（不会改文件夹名）：",
+            text=old)
+        if not ok:
+            return
+        new = (new or "").strip()
+        if not new:
+            QMessageBox.warning(self, "名字不能为空", "请输入一个名字。")
+            return
+        e["display_name"] = new
+        k = self._key(e)
+        self.data.setdefault("servers", {}).setdefault(k, {})[
+            "display_name"] = new
+        self._save_data()
+        self._fill_views()
+        self.statusBar().showMessage("已重命名为：%s" % new, 4000)
+
     def do_clear_icon(self):
         """清掉自定义图标，回到自动识别（存档 icon.png 或首字母块）。"""
         e = self._cur_entry()
@@ -1894,6 +2130,73 @@ class MainWindow(QMainWindow):
         self._fill_views()
         self.statusBar().showMessage("已清除自定义图标，恢复自动识别")
 
+    # ★ V1.6.0：启动流程提前中止时恢复按钮/状态栏
+    def _restore_start_btn(self, e=None):
+        try:
+            self.act_start.setEnabled(True)
+        except Exception:
+            pass
+        if e is not None:
+            self.statusBar().showMessage("就绪", 3000)
+
+    # ★ V1.6.0：双击卡片/行 = 未运行就启动，运行中就停止
+    #   （服务器配置改从右键菜单进）
+    def _double_click_icon(self, item):
+        key = (item.data(Qt.UserRole) or "") if item is not None else ""
+        for en in self.entries:
+            if self._key(en) == key:
+                self._toggle_run(en)
+                return
+
+    def _double_click_row(self, idx):
+        try:
+            row = idx.row()
+            en = self._sorted_entries()[row]
+        except Exception:
+            return
+        self._toggle_run(en)
+
+    def _toggle_run(self, e):
+        k = self._key(e)
+        if k in self.procs:
+            self.do_stop()
+        else:
+            self.do_start()
+
+    # ★ V1.6.0：崩溃/启动失败后的非模态智能引导
+    def _ask_crash_diag(self, key=None):
+        """弹非模态 QMessageBox：要不要打开『日志分析』找原因。"""
+        try:
+            en = None
+            if key is not None:
+                for x in self.entries:
+                    if self._key(x) == key:
+                        en = x
+                        break
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Warning)
+            box.setWindowTitle("服务器异常")
+            box.setText("检测到服务器异常退出，是否为您自动打开"
+                        "『日志分析』寻找原因？")
+            yes = box.addButton("是，打开日志分析", QMessageBox.AcceptRole)
+            no = box.addButton("否", QMessageBox.RejectRole)
+            box.setAttribute(Qt.WA_DeleteOnClose)
+
+            def _on(btn):
+                try:
+                    if btn is yes:
+                        self.do_analyze(en)
+                finally:
+                    try:
+                        box.close()
+                    except Exception:
+                        pass
+
+            box.buttonClicked.connect(_on)
+            box.show()  # 非模态：不阻塞主界面，其它服务器还能操作
+        except Exception:
+            pass
+
     def do_config(self):
         e = self._cur()
         if not e:
@@ -1913,13 +2216,20 @@ class MainWindow(QMainWindow):
 
 
     # ---------------- 备份 ----------------
-    def do_stop_backup(self):
-        """停止服务器，等它退出后自动备份存档。"""
-        e = self._cur()
+    def do_stop_backup(self, k=None, e=None, proc=None):
+        """停止服务器，等它退出后自动备份存档。
+
+        ★ V1.1.0：支持从 do_stop 传入 (k, e, proc)，
+          不传则按原来的方式取当前选中服务器。
+        """
+        if e is None:
+            e = self._cur()
         if not e:
             return
-        k = self._key(e)
-        proc = self.procs.get(k)
+        if k is None:
+            k = self._key(e)
+        if proc is None:
+            proc = self.procs.get(k)
         if not proc:
             QMessageBox.information(self, "提示", "这个服没在运行")
             return
@@ -1937,6 +2247,10 @@ class MainWindow(QMainWindow):
 
         def safe_kill():
             try:
+                # ★ 多开修复：进程已经在超时前正常退出了（对象被销毁/
+                #   已 NotRunning），就别再 9 秒后强杀一次，否则会报错
+                if proc.state() == QProcess.NotRunning:
+                    return
                 self._kill(proc)
             except RuntimeError:
                 pass  # 对象已销毁，安全忽略
@@ -1951,10 +2265,14 @@ class MainWindow(QMainWindow):
             return
         wd = worlds[0]
         self._log_console("[备份] 开始后台备份存档: %s，请稍候..." % wd["rel"])
+        # ★ V1.1.0：备份格式跟随服务器配置
+        sv = self._saved(e)
+        compress = (sv.get("backup_format", "folder") == "zip")
         
         # 把备份操作放到后台 Worker 线程
         def job(on_log=None):
-            return backup.backup_world(wd["path"], sd, on_log=on_log)
+            return backup.backup_world(wd["path"], sd,
+                                       compress=compress, on_log=on_log)
 
         w = _track(self, Worker(job, {}, self))
         w.log.connect(lambda m: self._log_console("[备份] " + m))
@@ -2057,15 +2375,34 @@ class MainWindow(QMainWindow):
         self._import_dropped(paths)
 
     def _import_dropped(self, paths):
-        """处理拖进来的东西（统一走 migrate.plan_import，避免结构错乱）。"""
+        """处理拖进来的东西（统一走 migrate.plan_import，避免结构错乱）。
+
+        ★ V0.4.0：zip 会先检测是不是整合包（Modrinth/CurseForge），
+          是就走整合包导入；剩下的才当地图导入。
+        """
         if not self.root:
             QMessageBox.information(self, "提示", "请先选择总目录")
             return
         root = self.root
         self.statusBar().showMessage("导入中 ...")
 
+        # 整合包分流（本地 zip 读取，很快）
+        rest = []
+        for p in paths:
+            if os.path.isfile(p) and p.lower().endswith(".zip"):
+                try:
+                    from .core import modpack as _mp
+                    if _mp.detect_kind(p):
+                        self._import_modpack_path(p)
+                        continue
+                except Exception:
+                    pass
+            rest.append(p)
+        if not rest:
+            return
+        paths = rest
+
         def job(on_log=None):
-            import zipfile as _zf
             import tempfile
             ok_n = 0
             msgs = []
@@ -2073,14 +2410,14 @@ class MainWindow(QMainWindow):
                 base = os.path.basename(os.path.normpath(p)) or p
                 src_dir = p
                 
-                # 如果是 zip，先解压到临时目录
+                # 如果是 zip，先解压到临时目录（★ V1.4.0：用系统 tar 提速）
                 is_tmp = False
                 if os.path.isfile(p) and p.lower().endswith(".zip"):
                     try:
                         src_dir = tempfile.mkdtemp(prefix="mcs_import_")
                         is_tmp = True
-                        with _zf.ZipFile(p) as z:
-                            z.extractall(src_dir)
+                        from .core import modpack as _mp
+                        _mp._fast_extract(p, src_dir)
                     except Exception as ex:
                         msgs.append("[失败] %s（解压失败：%s）" % (base, str(ex)[:40]))
                         continue
@@ -2248,6 +2585,75 @@ class MainWindow(QMainWindow):
                 % (plan["server_name"], plan["server_name"],
                    plan["world_subdir"], plan["world_subdir"]))
 
+    # ---------------- V0.4.0：整合包一键导入 ----------------
+    def do_import_modpack(self):
+        """选一个整合包 zip（Modrinth / CurseForge）导入。"""
+        if not self.root:
+            QMessageBox.information(self, "提示", "请先选择总目录")
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择整合包 zip",
+            "", "整合包 (*.zip);;所有文件 (*)")
+        if not path:
+            return
+        self._import_modpack_path(path)
+
+    def _import_modpack_path(self, path):
+        """把整合包 zip 交给后台 Worker 导入（网络请求不进主线程）。"""
+        root = self.root
+        self.statusBar().showMessage("正在导入整合包 ...")
+        self._forget_worker(getattr(self, "_modpack_worker", None))
+
+        def job(on_log=None):
+            from .core import modpack as _mp
+            return _mp.install_modpack(path, root, on_log=on_log)
+
+        w = _track(self, Worker(job, {}, self))
+        self._modpack_worker = w
+        w.log.connect(lambda m: self.statusBar().showMessage(str(m)))
+        w.done.connect(self._modpack_done)
+        w.start()
+
+    def _modpack_done(self, ok, res):
+        w, self._modpack_worker = (
+            getattr(self, "_modpack_worker", None), None)
+        if w is not None:
+            self._forget_worker(w)
+        if not ok:
+            self.statusBar().showMessage("整合包导入失败")
+            QMessageBox.critical(self, "导入整合包失败",
+                                 "导入失败：\n%s" % str(res)[:300])
+            return
+        sd = res.get("server_dir") or ""
+        fail = res.get("mods_fail") or []
+        ok_n = len(res.get("mods_ok") or [])
+        msg = ("整合包已导入：%s\n\n"
+               "目录: %s\n"
+               "MC %s · %s\n"
+               "模组：成功 %d 个" % (
+                   res.get("name"), sd,
+                   res.get("mc_version"), res.get("loader"), ok_n))
+        if fail:
+            msg += "\n\n失败 %d 个：\n%s" % (
+                len(fail), "\n".join("· %s" % f for f in fail[:15]))
+        msg += "\n\n接下来选中它，点『初始化服务端』完善配置，然后就能启动。"
+        QMessageBox.information(self, "整合包导入完成", msg)
+        self.statusBar().showMessage("整合包导入完成")
+
+        target = os.path.abspath(sd)
+
+        def select_me():
+            for i, e in enumerate(self._sorted_entries()):
+                if os.path.abspath(e.get("folder") or "") == target:
+                    self.table.selectRow(i)
+                    if self.view_mode == "icon" \
+                            and self.icon_view.count() > i:
+                        self.icon_view.setCurrentRow(i)
+                    self.on_sel()
+                    break
+
+        self.do_scan(then=select_me)
+
         self.do_scan(then=select_new)
 
     def _region_count(self, world_dir):
@@ -2344,9 +2750,13 @@ class MainWindow(QMainWindow):
 
 
     # ---------------- 诊断 / 删除 ----------------
-    def do_analyze(self):
-        """离线日志诊断。"""
-        e = self._cur()
+    def do_analyze(self, entry=None):
+        """离线日志诊断。
+
+        ★ V1.6.0：可选 entry —— 崩溃智能引导时直接对准崩掉的那台服，
+          不依赖用户当前选中。
+        """
+        e = entry if entry is not None else self._cur()
         if not e:
             QMessageBox.information(self, "提示", "先选中一个服务器")
             return
@@ -2355,6 +2765,45 @@ class MainWindow(QMainWindow):
         dlg = self._style_dlg(AnalyzeDialog(
             e, all_entries=self.entries, console_text=txt, parent=self))
         dlg.exec()
+
+    # ---------------- V1.6.0：检查更新 ----------------
+    def do_check_update(self):
+        """后台检查 GitHub 最新版（Worker 线程，不卡 UI）。"""
+        if getattr(self, "_checking_update", False):
+            return
+        self._checking_update = True
+        self.statusBar().showMessage("正在检查更新...", 0)
+        w = _track(self, Worker(updater.check_latest, {}, self))
+        w.done.connect(self._on_update_done)
+        w.start()
+
+    def _on_update_done(self, ok, res):
+        self._checking_update = False
+        self.statusBar().showMessage("就绪", 3000)
+        if not ok:
+            self.statusBar().showMessage(
+                "检查更新失败（网络异常或未配置仓库）", 5000)
+            return
+        tag, url, is_new = res
+        if not is_new or not tag:
+            QMessageBox.information(self, "检查更新",
+                                    "当前已是最新版本")
+            return
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Information)
+        box.setWindowTitle("发现新版本")
+        box.setText("发现新版本 %s，是否前往下载？" % tag)
+        dl = box.addButton("前往下载", QMessageBox.AcceptRole)
+        box.addButton("取消", QMessageBox.RejectRole)
+
+        def _go(btn):
+            if btn is dl and url:
+                QDesktopServices.openUrl(QUrl(url))
+
+        box.buttonClicked.connect(_go)
+        box.exec()
 
     def _console_text(self, e):
         """取某个服务器自己的控制台全文。
@@ -2536,9 +2985,17 @@ class MainWindow(QMainWindow):
             self._log_console("扫描失败：%s" % res)
             return
         self.entries = res or []
+        # ★ 右键重命名支持：扫描后把 servers.json 里的 display_name
+        #   回填到条目上，图标和表格都显示用户改的名字
+        for en in self.entries:
+            saved = self.data.get("servers", {}).get(self._key(en), {})
+            if saved.get("display_name"):
+                en["display_name"] = saved["display_name"]
         self._fill_views()
         self.statusBar().showMessage(
             "扫描完成，共 %d 个" % len(self.entries))
+        if self.sort_mode == "size":
+            self._prefetch_sizes()  # ★ 扫描完若在按大小排序，后台补算
         cb, self._scan_then = getattr(self, "_scan_then", None), None
         if cb:
             try:
@@ -2665,7 +3122,8 @@ class MainWindow(QMainWindow):
         newmeta = versions.uses_new_packmeta(e.get("version")) \
             if e.get("version") else None
         lines = [
-            "<b>%s</b>" % (e.get("world_name") or e.get("name")),
+            "<b>%s</b>" % (e.get("world_name")
+                           or self._display_name(e)),
             "目录: %s" % e.get("folder"),
             "服务端目录: %s" % (e.get("server_dir") or "-"),
             "存档: %s" % (e.get("world_dir") or "-"),
@@ -2691,8 +3149,11 @@ class MainWindow(QMainWindow):
 
         running = self._key(e) in self.procs
         self.act_stop.setEnabled(running)
-        self.act_stop_bk.setEnabled(running)
         self.act_start.setEnabled(not running)
+
+    def _display_name(self, e):
+        """界面显示名：优先用户自定义重命名（display_name），否则原名。"""
+        return e.get("display_name") or e.get("name") or ""
 
     def _key(self, e):
         return e.get("folder", "")
@@ -2757,6 +3218,10 @@ class MainWindow(QMainWindow):
                 sv["java"] = info.get("java")
                 sv["xms"] = info.get("xms", 1024)
                 sv["xmx"] = info.get("xmx", 4096)
+                # ★ 自动化三项（初始化对话框里默认全勾，可在此覆盖）
+                sv["aikar"] = bool(info.get("aikar", True))
+                sv["auto_restart"] = bool(info.get("auto_restart", True))
+                sv["auto_backup"] = bool(info.get("auto_backup", True))
                 self._save_data()
 
             # ★ 扫描完成后自动重新选中该服务器，刷新右侧信息面板
@@ -2885,6 +3350,209 @@ class MainWindow(QMainWindow):
         except Exception as ex:
             QMessageBox.warning(self, "打不开", repr(ex))
 
+    # ---------------- V1.3.0 多源登录准备 ----------------
+    def _prepare_auth(self, e, then):
+        """按 auth_type 准备登录环境；全部就绪后回调 then() 继续启动。"""
+        sd = e.get("server_dir") or e["folder"]
+        sv = self._saved(e)
+        auth_type = sv.get("auth_type") or "offline"
+        auth_url = (sv.get("auth_url") or "").strip()
+        loader = (e.get("loader") or "").lower()
+        v = e.get("version") or ""
+        online = auth_type in ("mojang", "multi")
+        self._set_online_mode(sd, online)
+
+        if auth_type != "multi":
+            # 正版 / 离线：清理可能残留的登录模组/插件（改名保留）
+            self._cleanup_auth_components(sd)
+            then()
+            return
+
+        # ===== 多源共存 =====
+        if loader == "paper":
+            comp = install.AUTH_COMPONENTS["paper"]
+            need = not self._has_auth_jar(
+                sd, "plugins", ["multilogin"])
+        else:
+            comp = install.AUTH_COMPONENTS["mod"]
+            need = not self._has_auth_jar(
+                sd, "mods", ["multiyggdrasil", "akiyggdrasil"])
+        if not need:
+            self._write_auth_cfg(e, auth_url)
+            self._auth_multi_hint(e)
+            then()
+            return
+
+        # 早期 Forge 兼容性提示
+        if loader == "forge" and self._is_early_forge(v):
+            QMessageBox.information(
+                self, "早期版本可能不兼容",
+                "当前是较早期的 Forge 版本，多源登录模组"
+                "（MultiYggdrasil）可能不兼容。\n\n"
+                "若启动后第三方玩家无法登录，请改用正版或离线模式。")
+
+        r = QMessageBox.question(
+            self, "安装多源登录组件",
+            "启用多源共存需要安装 %s。\n\n"
+            "将自动从 Modrinth 下载并配置（后台进行，不卡界面）。\n"
+            "继续吗？\n\n（选『否』则直接启动，第三方玩家将无法登录）"
+            % comp["name"],
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if r != QMessageBox.Yes:
+            then()
+            return
+        self._log_console("=== 正在下载多源登录组件 %s ===" % comp["name"])
+        w = _track(self, Worker(self._dl_auth_worker, {
+            "sd": sd, "v": v, "loader": loader, "comp": comp}, self))
+        w.log.connect(lambda m: self._log_console(m))
+        w.done.connect(
+            lambda ok, res: self._on_auth_dl(ok, res, e, auth_url, then))
+        w.start()
+
+    def _dl_auth_worker(self, sd="", v="", loader="", comp=None, on_log=None):
+        return install.install_auth_component(
+            sd, v, loader, comp["kind"], comp["slug"], on_log=on_log)
+
+    def _on_auth_dl(self, ok, res, e, auth_url, then):
+        if ok and (res or {}).get("ok"):
+            self._log_console("[登录组件] 安装完成: %s" % (res or {}).get("name"))
+            self._write_auth_cfg(e, auth_url)
+        else:
+            self._log_console("[登录组件] 安装失败: %s"
+                              % ((res or {}).get("reason") or "?"))
+            loader = (e.get("loader") or "").lower()
+            comp = (install.AUTH_COMPONENTS["paper"] if loader == "paper"
+                    else install.AUTH_COMPONENTS["mod"])
+            if comp.get("hint"):
+                QMessageBox.information(
+                    self, "需要手动安装 %s" % comp["name"],
+                    "%s\n\n%s" % (comp["name"], comp["hint"]))
+        self._auth_multi_hint(e)
+        then()
+
+    def _auth_multi_hint(self, e):
+        """Paper 多源共存：建议把 enforce-secure-profile 设为 false。"""
+        if (e.get("loader") or "").lower() != "paper":
+            return
+        try:
+            p = os.path.join(e.get("server_dir") or e["folder"],
+                             "server.properties")
+            if os.path.isfile(p):
+                with open(p, "r", encoding="utf-8") as f:
+                    for ln in f:
+                        if ln.strip().startswith(
+                                "enforce-secure-profile=false"):
+                            return  # 已设置过就不再提示
+        except Exception:
+            pass
+        QMessageBox.information(
+            self, "建议关闭强制安全档案",
+            "Paper 多源共存建议把 server.properties 里的\n"
+            "『enforce-secure-profile』设为 false，\n"
+            "否则部分外置登录玩家可能被拒绝。\n\n"
+            "（可在『服务器配置』里修改后重启）")
+
+    def _has_auth_jar(self, sd, folder, prefixes):
+        d = os.path.join(sd, folder)
+        try:
+            if not os.path.isdir(d):
+                return False
+            for fn in os.listdir(d):
+                low = fn.lower()
+                if low.endswith(".jar") and not low.endswith(".disabled"):
+                    for p in prefixes:
+                        if low.startswith(p):
+                            return True
+        except Exception:
+            pass
+        return False
+
+    def _cleanup_auth_components(self, sd):
+        """正版/离线模式下，把残留的登录模组/插件改名 .disabled（不删除）。"""
+        for folder in ("mods", "plugins"):
+            try:
+                for m in modman.scan_mods_dir(os.path.join(sd, folder)):
+                    n = (m.get("filename") or "").lower()
+                    if (n.startswith("multiyggdrasil")
+                            or n.startswith("akiyggdrasil")
+                            or n.startswith("multilogin")):
+                        if m.get("enabled"):
+                            try:
+                                modman.set_enabled(m["path"], False)
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
+    def _set_online_mode(self, sd, online):
+        """改 server.properties 的 online-mode（无该行则追加）。"""
+        p = os.path.join(sd, "server.properties")
+        try:
+            if not os.path.isfile(p):
+                return
+            with open(p, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            val = "true" if online else "false"
+            hit = False
+            for i, ln in enumerate(lines):
+                if ln.strip().startswith("online-mode="):
+                    lines[i] = "online-mode=%s\n" % val
+                    hit = True
+                    break
+            if not hit:
+                lines.append("online-mode=%s\n" % val)
+            with open(p, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+        except Exception:
+            pass
+
+    def _write_auth_cfg(self, e, auth_url):
+        """写多源登录配置：mods 类 -> config/multi-yggdrasil.ini。"""
+        loader = (e.get("loader") or "").lower()
+        if loader == "paper":
+            return  # MultiLogin 配置由插件首次启动自动生成
+        if not auth_url:
+            return
+        sd = e.get("server_dir") or e["folder"]
+        cfg_dir = os.path.join(sd, "config")
+        try:
+            os.makedirs(cfg_dir, exist_ok=True)
+        except Exception:
+            return
+        path = os.path.join(cfg_dir, "multi-yggdrasil.ini")
+        body = (
+            "allowOfficial = true\n"
+            "allowYggdrasil = true\n"
+            'yggdrasilApiRoot = "%s"\n'
+            % auth_url.replace('"', "")
+        )
+        try:
+            if os.path.isfile(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    old = f.read()
+                if auth_url in old:
+                    return
+                QMessageBox.information(
+                    self, "配置文件已存在",
+                    "config/multi-yggdrasil.ini 已存在且 API 地址与当前设置"
+                    "不同，为避免覆盖你的自定义配置，本次没有写入。\n\n"
+                    "如需更换皮肤站，请手动修改该文件。")
+                return
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(body)
+            self._log_console("[登录] 已生成 multi-yggdrasil.ini")
+        except Exception:
+            pass
+
+    def _is_early_forge(self, v):
+        """极早期 Forge（MultiYggdrasil 支持 1.14+，更早不兼容）。"""
+        try:
+            from .core import versions as _v
+            return (_v.mc_version_key(v, newest_first=False)
+                    < _v.mc_version_key("1.14", newest_first=False))
+        except Exception:
+            return False
+
     # ---------------- 启动/停止 ----------------
     # ---------------- 控制台页签（支持多开） ----------------
     def _console_tab(self, key, name, create=True):
@@ -2896,6 +3564,7 @@ class MainWindow(QMainWindow):
             return None
         c = Console()
         c.proc_key = key
+        c.set_colors(self.disp.get("console_colors") or None)  # ★ V1.1.0
         self.consoles[key] = c
         idx = self.console_tabs.addTab(c, name or "服务器")
         self.console_tabs.setCurrentIndex(idx)
@@ -2933,12 +3602,79 @@ class MainWindow(QMainWindow):
         if not e:
             self.act_start.setEnabled(False)
             self.act_stop.setEnabled(False)
-            self.act_stop_bk.setEnabled(False)
             return
         running = self._key(e) in self.procs
         self.act_start.setEnabled(not running)
         self.act_stop.setEnabled(running)
-        self.act_stop_bk.setEnabled(running)
+
+    # ---------------- V0.5.0：实时状态监控 ----------------
+    def _ping_round(self):
+        """每 10 秒：对所有运行中的服务器做一次状态探测（Worker 线程）。
+
+        ★ 探测是网络 IO，绝不能卡主线程；busy 集合防止 10 秒轮次
+          没跑完就堆积新一轮。
+        """
+        if not self.procs:
+            return
+        by_key = {}
+        for en in self.entries:
+            by_key[self._key(en)] = en
+        for k, e in list(by_key.items()):
+            if k not in self.procs or k in self._ping_busy:
+                continue
+            self._ping_busy.add(k)
+            port = self._port_of(e)
+
+            def job(port=port):
+                return monitor.live_status(port)
+
+            w = _track(self, Worker(job, {}, self))
+            w.done.connect(
+                lambda ok, res, kk=k: self._on_ping_done(kk, ok, res))
+            w.start()
+
+    def _on_ping_done(self, key, ok, res):
+        self._ping_busy.discard(key)
+        if key not in self.procs:
+            self._ping_text.pop(key, None)
+            return
+        # ★ V1.5.0：成功显示"运行中 (在线: X/Y | 延迟: Zms)"，
+        #   失败显示"运行中 (无响应)"，状态列一眼看懂
+        text = monitor.ping_text(res) if ok else None
+        if text:
+            self._ping_text[key] = "运行中 (" + text + ")"
+        else:
+            self._ping_text[key] = "运行中 (无响应)"
+        self._apply_ping_ui(key)
+
+    def _apply_ping_ui(self, key):
+        """把监控文本刷到表格状态列 + 图标卡片文字上。"""
+        en = None
+        for x in self.entries:
+            if self._key(x) == key:
+                en = x
+                break
+        if en is None:
+            return
+        for i, e2 in enumerate(self._sorted_entries()):
+            if self._key(e2) == key:
+                self._set_row_status(i, e2)
+                break
+        try:
+            for r in range(self.icon_view.count()):
+                it = self.icon_view.item(r)
+                if it is None or (it.data(Qt.UserRole) or "") != key:
+                    continue
+                lines = self._item_text(en, as_lines=True)
+                it.setData(Qt.UserRole + 3, lines)
+                sz = int(self.disp.get("icon", 110))
+                px = max(24, int(sz * 0.62))
+                it.setSizeHint(QSize(sz + 16,
+                                     px + 34 + 17 * max(1, len(lines))))
+                self.icon_view.viewport().update()
+                break
+        except Exception:
+            pass
 
     def _refresh_status(self, e=None):
         """刷新"状态"显示：表格刷新那一列，图标视图重画文字。
@@ -2979,7 +3715,11 @@ class MainWindow(QMainWindow):
             return
         running = self._key(e) in self.procs
         if running:
-            txt, color = "运行中", "#2e7d32"
+            ping = self._ping_text.get(self._key(e))
+            if ping:
+                txt, color = ping, "#2e7d32"
+            else:
+                txt, color = "运行中", "#2e7d32"
         elif e.get("notes"):
             txt, color = "未初始化", "#c62828"
         else:
@@ -3045,6 +3785,43 @@ class MainWindow(QMainWindow):
             return True  # 用户坚持，让他试
         return True
 
+    def _firewall_allow(self, e):
+        """★ V0.4.0：放行 server-port 的 TCP 入站（Windows 防火墙）。
+
+        防止朋友联机时被防火墙拦截。没有管理员权限 / 不是 Windows
+        就静默跳过，绝不让防火墙操作打断服务器启动。
+        """
+        if os.name != "nt":
+            return
+        try:
+            port = self._port_of(e)
+        except Exception:
+            port = None
+        if not port:
+            return
+        try:
+            import threading
+            import subprocess as _sp
+            cmd = (
+                ["powershell", "-NoProfile", "-Command",
+                 "New-NetFirewallRule -DisplayName 'MCSM_Server_%d'"
+                 " -Direction Inbound -Protocol TCP -LocalPort %d"
+                 " -Action Allow -ErrorAction SilentlyContinue"
+                 % (port, port)])
+
+            def _run():
+                # ★ V1.4.0：防火墙命令挪到后台线程，主线程绝不同步等待
+                try:
+                    _sp.run(cmd, capture_output=True, timeout=30)
+                except Exception:
+                    pass  # 没权限就静默，别影响启动
+
+            threading.Thread(target=_run, daemon=True).start()
+            self._log_console("[防火墙] 正在后台放行 TCP %d（MCSM_Server_%d）"
+                              % (port, port))
+        except Exception:
+            pass
+
     def _suggest_port(self, e):
         """帮忙改成一个没被占用的端口并提示。"""
         used = set()
@@ -3087,6 +3864,15 @@ class MainWindow(QMainWindow):
         k = self._key(e)
         if k in self.procs:
             return
+        # ★ V1.6.0：点击启动立即给反馈并禁用按钮，防止狂点。
+        #   真正启动成功后 _refresh_actions() 会重设按钮；
+        #   提前中止的路径各自调用 _restore_start_btn 恢复。
+        self.statusBar().showMessage(
+            "正在启动: %s ..." % (e.get("name") or e.get("folder")), 0)
+        try:
+            self.act_start.setEnabled(False)
+        except Exception:
+            pass
         sd = e.get("server_dir") or e["folder"]
         bat = os.path.join(sd, "run.bat")
         jar = None
@@ -3096,11 +3882,25 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "无法启动",
                                 "没有 run.bat 也没有服务端 jar，"
                                 "请先『初始化服务端』")
+            self._restore_start_btn(e)
             return
 
         if not self._check_port_conflict(e):
+            self._restore_start_btn(e)
             return
 
+        # ★ V0.4.0：防火墙自动放行 server-port（静默，失败不打断启动）
+        self._firewall_allow(e)
+
+        # ★ V1.3.0：登录环境准备（正版/离线 即时处理；
+        #   多源共存 需下载登录组件时先走 Worker，完成后自动继续启动）
+        self._prepare_auth(e, lambda: self._go_start_now(e, auto_restart))
+
+    def _go_start_now(self, e, auto_restart=False):
+        k = self._key(e)
+        if k in self.procs:
+            return
+        sd = e.get("server_dir") or e["folder"]
         v = e.get("version")
         need = versions.need_java(v) if v else None
         sv = self._saved(e)
@@ -3110,6 +3910,7 @@ class MainWindow(QMainWindow):
             if not j:
                 QMessageBox.warning(self, "缺 Java",
                                     "没找到 Java %s" % need)
+                self._restore_start_btn(e)
                 return
             jpath = j["path"]
         # ★ 读取 Aikar 优化开关
@@ -3195,6 +3996,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "无法启动",
                                 "没找到可启动的核心，"
                                 "请先『初始化服务端』")
+            self._restore_start_btn(e)
             return
 
         # ★ 隐患 3：把"是不是自动重启"记在 proc 上，
@@ -3226,6 +4028,20 @@ class MainWindow(QMainWindow):
                 timer.start(interval)
                 self.auto_backup_timers[k] = timer
                 self._log_console(f"[备份] 已开启定时备份，每 {sv.get('backup_interval')} 分钟一次")
+
+            # ★ V0.5.0：每日定时重启（每分钟检查一次，命中就倒计时重启）
+            rt = sv.get("auto_restart_time") or ""
+            if rt:
+                if k in self._restart_timers:
+                    self._restart_timers[k].stop()
+                rt_timer = QTimer(self)
+                rt_timer.timeout.connect(lambda: self._check_restart_time(k, e))
+                rt_timer.start(60000)
+                self._restart_timers[k] = rt_timer
+                self._log_console("[定时重启] 已开启，每天 %s 自动重启"
+                                  % rt)
+                # 启动后立即检查一次（配置时间刚好到点的场景）
+                self._check_restart_time(k, e)
         except Exception:
             pass
 
@@ -3315,6 +4131,53 @@ class MainWindow(QMainWindow):
             c.append(line_str)
             self._proc_buffers.pop(proc, None)
 
+    def _check_restart_time(self, k, e):
+        """每分钟检查一次，到点就触发 60 秒倒计时重启。"""
+        try:
+            sv = self.data.get("servers", {}).get(k, {})
+            rt = sv.get("auto_restart_time") or ""
+        except Exception:
+            return
+        if not rt or k not in self.procs:
+            return
+        if k in self._restart_countdown or k in self._plan_restart:
+            return
+        import time as _t
+        try:
+            now = _t.localtime()
+            hhmm = "%02d:%02d" % (now.tm_hour, now.tm_min)
+        except Exception:
+            return
+        if hhmm == rt:
+            self._start_planned_restart(k, e)
+
+    def _start_planned_restart(self, k, e):
+        """写公告 + 60 秒后 stop；_finished 里检测 _plan_restart 自动再启动。"""
+        proc = self.procs.get(k)
+        if proc is None:
+            return
+        self._plan_restart[k] = True
+        self._restart_countdown[k] = True
+        self._log_console("[定时重启] 『%s』将在 60 秒后重启！"
+                          % (e.get("name") or ""))
+        try:
+            proc.write(("say [系统] 服务器将在 60 秒后重启！\r\n")
+                       .encode("utf-8"))
+        except Exception:
+            pass
+
+        def _do_stop():
+            self._restart_countdown.pop(k, None)
+            p = self.procs.get(k)
+            if p is None:
+                return
+            try:
+                p.write(b"stop\r\n")
+            except Exception:
+                pass
+
+        QTimer.singleShot(60000, _do_stop)
+
     def _finished(self, proc, code):
         # ★ Bug 4 修复：进程退出前把残留的缓冲区吐完（可能包含崩溃的最后一行）
         try:
@@ -3328,6 +4191,21 @@ class MainWindow(QMainWindow):
                 key = k
                 del self.procs[k]
                 break
+
+        # ★ 多开修复：进程结束第一时间清掉状态标记，
+        #   防止残留的 _is_stopping 把崩溃误判成"主动停止"、
+        #   残留的 _port_cache 让悬停显示旧端口。
+        #   （is_stopping 提前取出来，供下面自动重启判断使用）
+        is_stopping = self._is_stopping.pop(key, None)
+        self._port_cache.pop(key, None)
+        # ★ V0.5.0：计划重启标记提前取出；顺带清掉监控/倒计时状态
+        is_plan = self._plan_restart.pop(key, False)
+        self._ping_text.pop(key, None)
+        self._restart_countdown.pop(key, None)
+        if key in self._restart_timers:
+            self._restart_timers[key].stop()
+            del self._restart_timers[key]
+
         c = self._console_of(proc) or self.console
         c.append("=== 已退出，代码 %d ===" % code)
         if code != 0:
@@ -3350,7 +4228,6 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("已停止", 3000)
         # ★ 删除下面 4 行暴力覆盖，信任 _refresh_actions() 
         # self.act_stop.setEnabled(False)
-        # self.act_stop_bk.setEnabled(False)
         # self.act_start.setEnabled(True)
         # self.statusBar().showMessage("已停止")
 
@@ -3359,9 +4236,18 @@ class MainWindow(QMainWindow):
             self.auto_backup_timers[key].stop()
             del self.auto_backup_timers[key]
 
+        # ★ V0.5.0：计划重启 —— 不弹窗、不计数，3 秒后自动再启动
+        if is_plan:
+            for en in self.entries:
+                if self._key(en) == key:
+                    self._log_console(
+                        "[定时重启] 正在重新启动『%s』..." % en.get("name"))
+                    QTimer.singleShot(
+                        3000, lambda: self._try_restart(key, en))
+                    break
+
         # ★ 自动重启逻辑
-        is_stopping = self._is_stopping.pop(key, False)
-        if code != 0 and not is_stopping:
+        elif code != 0 and not is_stopping:
             sv = self.data.get("servers", {}).get(key, {})
             if sv.get("auto_restart"):
                 cnt = self.auto_restart_count.get(key, 0)
@@ -3374,6 +4260,12 @@ class MainWindow(QMainWindow):
                             break
                 else:
                     self._log_console("[!] 自动重启次数已达 5 次，暂停重启。请检查日志。")
+                    # ★ V1.6.0：自动重启已放弃 → 智能引导打开日志分析
+                    self._ask_crash_diag(key)
+            else:
+                # ★ V1.6.0：没开自动重启 → 崩溃后智能引导
+                self._log_console("[!] 服务器异常退出（未开启自动重启）。")
+                self._ask_crash_diag(key)
         else:
             if key:  # ★ 建议 6 修复：防止 None 写入脏数据
                 self.auto_restart_count[key] = 0
@@ -3387,6 +4279,13 @@ class MainWindow(QMainWindow):
         self._proc_buffers.pop(proc, None)
         try:
             proc.deleteLater()
+        except Exception:
+            pass
+
+        # ★ 多开修复：进程结束强制全量重绘，彻底刷新
+        #   "运行中/已停止" 状态，避免界面残留旧状态
+        try:
+            self._fill_views()
         except Exception:
             pass
 
@@ -3453,6 +4352,8 @@ class MainWindow(QMainWindow):
                 "多半是 Java 路径失效（重装或移动过 Java），\n"
                 "或者安全软件拦了 java.exe。\n\n"
                 "可以到『服务器配置 → 启动设置』里重新选 Java。")
+            # ★ V1.6.0：启动直接失败 → 智能引导打开日志分析
+            self._ask_crash_diag(key)
         else:
             self._log_console(
                 "[!] 自动重启失败：java 找不到 / 权限不足 / 被拦截。"
@@ -3465,6 +4366,19 @@ class MainWindow(QMainWindow):
         k = self._key(e)
         proc = self.procs.get(k)
         if not proc:
+            # ★ V1.1.0：没在运行直接提示，不弹备份确认框
+            QMessageBox.information(self, "提示", "这个服没在运行")
+            return
+        # ★ V1.1.0：停止时询问是否在停止后备份存档
+        r = QMessageBox.question(
+            self, "停止服务器",
+            "是否在停止后备份存档？\n\n"
+            "· 是：服务器退出后自动备份存档\n"
+            "  （格式按『服务器配置 → 备份』里的备份格式）\n"
+            "· 否：只停止，不备份",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if r == QMessageBox.Yes:
+            self.do_stop_backup(k, e, proc)
             return
         self._is_stopping[k] = True
         # ★ 立刻给反馈。以前点了停止什么提示都没有，
@@ -3472,7 +4386,6 @@ class MainWindow(QMainWindow):
         self._log_console("=== 正在停止，等待世界保存完毕 ===")
         self.statusBar().showMessage("正在停止 %s ..." % e.get("name"))
         self.act_stop.setEnabled(False)
-        self.act_stop_bk.setEnabled(False)
         try:
             proc.write(b"stop\n")
         except Exception:

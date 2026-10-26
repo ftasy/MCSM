@@ -453,19 +453,22 @@ def browse_projects(query="", mc_version=None, loader=None,
             category=category, sort=smap.get(sort, 1),
             page_size=limit, index=offset)
 
-    # facets 语法：外层数组是 AND，内层是 OR。
-    # 值要用单引号包起来，且只能包一次
-    # —— 以前模板里写了一对、_q() 又加一对，变成
-    #    ["categories:"fabric""]，Modrinth 会 400。
+    # facets 语法：外层数组是 AND，内层数组是 OR。
+    # ★ v0.3.0 修复：以前是手写字符串拼接 + _q() 加引号，
+    #   最终 urlencode 出来带双层引号（["categories:"fabric""]），
+    #   Modrinth 直接 400 Bad Request。
+    #   现在改成列表嵌套，用 json.dumps 一次性生成标准 JSON：
+    #   facets=[["project_type:mod"],["categories:fabric"]]
+    #   —— 绝不 400。
     facets = []
     if project_type:
-        facets.append("[project_type:%s]" % _q(project_type))
+        facets.append(["project_type:%s" % project_type])
     if loader:
-        facets.append("[categories:%s]" % _q(loader))
+        facets.append(["categories:%s" % loader])
     if mc_version:
-        facets.append("[versions:%s]" % _q(mc_version))
+        facets.append(["versions:%s" % mc_version])
     if category:
-        facets.append("[categories:%s]" % _q(category))
+        facets.append(["categories:%s" % category])
 
     params = {
         "limit": limit,
@@ -475,7 +478,8 @@ def browse_projects(query="", mc_version=None, loader=None,
     if query:
         params["query"] = query
     if facets:
-        params["facets"] = "[%s]" % ",".join(facets)
+        # 顶部已 import json，直接序列化（urlencode 会自动转义方括号）
+        params["facets"] = json.dumps(facets)
 
     path = "/search?" + urllib.parse.urlencode(params)
     try:

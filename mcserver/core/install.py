@@ -1302,126 +1302,112 @@ def collect_diag(server_dir, out_dir=None, extra_log=None):
 #   soft     推荐同时装的 slug（缺了也能跑，但不建议）
 #   conflict 冲突 slug 列表（两个一起装会互相打架）
 #
-# ★ v5.7 为什么要大改：
-#   以前清单里混进了只对客户端生效的模组（装到服务端完全没用，
-#   还白白占一个下载位），而且有的模组之间会抢同一块功能。
-#   用户明确要求"常驻的都改成服务端能用的、最好全装也不冲突"。
-#   下面每一条 side/conflict 都是查过 Modrinth / MC 百科 / 官方文档的。
+# ★ v0.3.0 视图化模式：清单回归极简。
+#   以前表格模式要维护 default（默认勾不勾）、side（服务端/客户端）、
+#   conflict（互斥）、min_ver/max_ver（版本上限）……一长串字段，
+#   写的时候小心翼翼，还是会有模组因为"死活装不上"被吐槽。
+#   现在改成 PCL2 风格卡片视图：用户自己看图标、看简介、自己勾选，
+#   一切以用户的选择为准 —— 这里只留最核心的 5 个字段：
+#     slug   Modrinth 项目 id（唯一标识）
+#     name   显示名
+#     desc   一句话简介（卡片/表格上直接给用户看）
+#     group  分组（仅用于界面归类展示）
+#     req    前置依赖（有前置的绑死一起装，绝不装一半）
+#   版本兼容性交给 Modrinth API 兜底：视图里装的都是当前服版本
+#   查得到版本的；查不到会在安装时明确提示，不会误导。
 
-_S = "server"
-_C = "client"
 
+def _m(slug, name, desc, group, req=(), max_ver=None):
+    """极简清单条目。
 
-def _m(slug, name, default, desc, group, side=_S, req=(), soft=(),
-       conflict=(), min_ver=None, max_ver=None):
-    return {"slug": slug, "name": name, "default": bool(default),
-            "desc": desc, "group": group, "side": side,
-            "req": list(req), "soft": list(soft),
-            "conflict": list(conflict),
-            "min_ver": min_ver, "max_ver": max_ver}
+    max_ver：该模组最高支持的 MC 版本（如 LazyDFU 只到 1.18.2）。
+    视图/列表展示时会严格过滤：当前服版本高于 max_ver 就不显示。
+    """
+    return {"slug": slug, "name": name, "desc": desc,
+            "group": group, "req": list(req), "max_ver": max_ver}
 
 
 MOD_TARGETS = {
     "fabric": [
         # ---- 前置 ----
-        _m("fabric-api", "Fabric API", True,
-           "绝大多数模组的前置，建议始终装", "① 前置"),
+        _m("fabric-api", "Fabric API",
+           "绝大多数模组的前置，建议勾选", "① 前置"),
 
         # ---- 核心优化（全是服务端生效）----
-        _m("lithium", "Lithium", True,
-           "优化游戏逻辑(实体AI/红石/区块刻)，收益最大", "② 核心优化"),
-        _m("ferrite-core", "FerriteCore", True,
+        _m("lithium", "Lithium",
+           "优化游戏逻辑（实体AI/红石/区块刻），收益最大", "② 核心优化"),
+        _m("ferrite-core", "FerriteCore",
            "减少内存占用，小内存服必装", "② 核心优化"),
-        _m("c2me-fabric", "C2ME", True,
+        _m("c2me-fabric", "C2ME",
            "多线程区块生成与保存，跑图/预生成快很多", "② 核心优化"),
-        _m("modernfix", "ModernFix", True,
+        _m("modernfix", "ModernFix",
            "修复 Mojang 的性能 bug，还加快启动", "② 核心优化"),
-        _m("modernfix-mvus", "ModernFix-mVUS", False,
-           "社区版 ModernFix，支持官方未适配的 Fabric 新版本", "② 核心优化"),
-        _m("krypton", "Krypton", True,
+        _m("krypton", "Krypton",
            "优化网络包处理，人多时明显", "② 核心优化"),
-        _m("servercore", "ServerCore", True,
-           "服务端综合优化，可按 MSPT 动态调视距（可配置）",
-           "② 核心优化",
-           conflict=["dynview"]),
-        _m("saturn", "Saturn", False,
-           "减少内存占用(与 FerriteCore 互补，可同时装)", "② 核心优化"),
-        _m("badoptimizations", "BadOptimizations", False,
-           "一堆零散的小优化（只对客户端生效，服务端装了没用）",
-           "② 核心优化", side=_C),
-        _m("alternate-current", "Alternate Current", False,
+        _m("servercore", "ServerCore",
+           "服务端综合优化，可按 MSPT 动态调视距（可配置）", "② 核心优化"),
+        _m("saturn", "Saturn",
+           "减少内存占用（与 FerriteCore 互补，可同时装）", "② 核心优化"),
+        _m("alternate-current", "Alternate Current",
            "重写红石粉更新逻辑，大型红石机械明显变快", "② 核心优化"),
-        _m("moonrise", "Moonrise", False,
-           "移植 Paper 的光照/区块/实体碰撞等补丁，提升很大",
-           "② 核心优化",
-           conflict=["c2me-fabric"]),
 
         # ---- 启动与内存 ----
-        _m("lazydfu", "LazyDFU", True,
-           "延迟加载 DataFixer，启动快几秒（仅 1.18.2 及以前）", "③ 启动与内存",
-           max_ver="1.18.2"),
-        _m("papi", "Put A Plug In it!", False,
+        _m("lazydfu", "LazyDFU",
+           "延迟加载 DataFixer，启动快几秒（仅 1.18.2 及以前）",
+           "③ 启动与内存", max_ver="1.18.2"),
+        _m("put-a-plug-in-it!", "Put A Plug In It!",
            "修内存泄漏（替代已停更的 Memory Leak Fix）", "③ 启动与内存"),
 
         # ---- 区块与视距 ----
-        _m("noisium", "Noisium", False,
-           "加速新区块生成(仅服务端生效)，地形已生成完则没用（26.3 起停更）",
-           "④ 区块与视距", max_ver="1.21.11"),
-        _m("dynview", "DynView", False,
-           "按 TPS 自动调视距/模拟距离(仅服务端)", "④ 区块与视距",
-           conflict=["servercore"]),
+        _m("noisium", "Noisium",
+           "加速新区块生成（仅服务端生效；26.3 起停更）", "④ 区块与视距"),
 
         # ---- 服主工具 ----
-        _m("spark", "spark", True,
+        _m("spark", "spark",
            "性能分析，卡顿时 /spark profiler 排查", "⑤ 服主工具"),
-        _m("chunky", "Chunky", False,
+        _m("chunky", "Chunky",
            "预生成地形，新图跑图不卡", "⑤ 服主工具",
            req=["fabric-api"]),
-        _m("luckperms", "LuckPerms", False,
+        _m("luckperms", "LuckPerms",
            "权限管理，要给朋友开指令时很有用", "⑤ 服主工具"),
-        _m("voicechat", "Simple Voice Chat", False,
+        _m("simple-voice-chat", "Simple Voice Chat",
            "近距离语音，客户端也要装同名模组", "⑤ 服主工具",
            req=["fabric-api"]),
-        _m("cloth-config", "Cloth Config", False,
+        _m("cloth-config", "Cloth Config",
            "部分模组的配置库，一般不用单独装", "⑤ 服主工具"),
     ],
 
     "neoforge": [
-        _m("ferrite-core", "FerriteCore", True, "减少内存占用",
+        _m("ferrite-core", "FerriteCore", "减少内存占用", "② 核心优化"),
+        _m("modernfix", "ModernFix", "修复性能 bug + 加快启动", "② 核心优化"),
+        _m("krypton", "Krypton", "优化网络包处理", "② 核心优化"),
+        _m("saturn", "Saturn", "减少内存占用", "② 核心优化"),
+        _m("lithium", "Lithium", "优化游戏逻辑", "② 核心优化"),
+        _m("alternate-current", "Alternate Current", "重写红石粉更新逻辑",
            "② 核心优化"),
-        _m("modernfix", "ModernFix", True, "修复性能 bug + 加快启动",
-           "② 核心优化"),
-        _m("krypton", "Krypton", True, "优化网络包处理", "② 核心优化"),
-        _m("saturn", "Saturn", False, "减少内存占用", "② 核心优化"),
-        _m("lithium", "Lithium", False, "优化游戏逻辑", "② 核心优化"),
-        _m("alternate-current", "Alternate Current", False,
-           "重写红石粉更新逻辑", "② 核心优化"),
-        _m("memoryleakfix", "Memory Leak Fix", False, "修内存泄漏",
-           "③ 启动与内存"),
-        _m("noisium", "Noisium", False, "加速新区块生成", "④ 区块与视距"),
-        _m("chunky", "Chunky", False, "预生成地形", "⑤ 服主工具"),
-        _m("spark", "spark", True, "性能分析", "⑤ 服主工具"),
-        _m("luckperms", "LuckPerms", False, "权限管理", "⑤ 服主工具"),
+        _m("memoryleakfix", "Memory Leak Fix", "修内存泄漏", "③ 启动与内存"),
+        _m("noisium", "Noisium", "加速新区块生成", "④ 区块与视距"),
+        _m("chunky", "Chunky", "预生成地形", "⑤ 服主工具"),
+        _m("spark", "spark", "性能分析", "⑤ 服主工具"),
+        _m("luckperms", "LuckPerms", "权限管理", "⑤ 服主工具"),
     ],
 
     "forge": [
         # ★ 修正：slug 是 ferrite-core 而非 ferritecore
-        _m("ferrite-core", "FerriteCore", True, 
+        _m("ferrite-core", "FerriteCore",
            "减少内存占用（1.20.1 需在配置中开启 populateNeighborTable 防崩溃）",
            "② 核心优化"),
-        _m("modernfix", "ModernFix", True, "修复性能 bug + 加快启动",
-           "② 核心优化"),
+        _m("modernfix", "ModernFix", "修复性能 bug + 加快启动", "② 核心优化"),
         # ★ 修正：Forge 版 Krypton 的 slug 是 krypton-fnp
-        _m("krypton-fnp", "Krypton FNP (Forge版)", True, 
+        _m("krypton-fnp", "Krypton FNP (Forge版)",
            "优化网络包处理（Forge 非官方重构版）", "② 核心优化"),
-        _m("alternate-current", "Alternate Current", False,
-           "重写红石粉更新逻辑(Forge 版最高到 1.20.4)", "② 核心优化"),
-        _m("memoryleakfix", "Memory Leak Fix", False, "修内存泄漏",
-           "③ 启动与内存"),
-        _m("noisium", "Noisium", False, "加速新区块生成", "④ 区块与视距"),
-        _m("chunky", "Chunky", False, "预生成地形", "⑤ 服主工具"),
-        _m("spark", "spark", True, "性能分析", "⑤ 服主工具"),
-        _m("luckperms", "LuckPerms", False, "权限管理", "⑤ 服主工具"),
+        _m("alternate-current", "Alternate Current",
+           "重写红石粉更新逻辑（Forge 版最高到 1.20.4）", "② 核心优化"),
+        _m("memoryleakfix", "Memory Leak Fix", "修内存泄漏", "③ 启动与内存"),
+        _m("noisium", "Noisium", "加速新区块生成", "④ 区块与视距"),
+        _m("chunky", "Chunky", "预生成地形", "⑤ 服主工具"),
+        _m("spark", "spark", "性能分析", "⑤ 服主工具"),
+        _m("luckperms", "LuckPerms", "权限管理", "⑤ 服主工具"),
     ],
 
     "vanilla": [],
@@ -1563,37 +1549,26 @@ def normalize_slug(text):
         return parts[-1]
     return t or None
 
-def mod_list_for(loader, mc_version):
-    """返回清单，每项 dict:
-    {slug, name, default, desc, group, side, req, conflict}
+def mod_list_for(loader, mc_version=None):
+    """返回精简清单，每项 dict:
+    {slug, name, desc, group, req, max_ver}
 
-    ★ 服务端用不到的（side=client）默认不进清单 ——
-      装上去没效果还占一个下载位，纯属误导。
-      想看的话调用方可以传 include_client=True。
+    ★ v0.3.0 视图化模式：不再写死 default / side / min_ver。
+      用户自己看简介、自己勾选；版本能不能装由 Modrinth API 兜底。
+    ★ 严格版本过滤：带 max_ver 的模组（如 LazyDFU 只支持 1.18.2），
+      当前服版本高于 max_ver 就直接剔除，绝不显示。
     """
-    from . import versions
+    lst = MOD_TARGETS.get(loader) or []
+    if not mc_version:
+        return [dict(m) for m in lst]
+    from . import versions as _V
+    vk = _V.mc_version_key(mc_version, newest_first=False)  # ★ 正序比较
     out = []
-    for m in MOD_TARGETS.get(loader) or []:
-        if m.get("side") == "client":
-            continue
-        
-        # ★ 版本过滤：避免把已经停更的模组推给新版本（比如 26.3 的 LazyDFU）
-        if mc_version:
-            m_min = m.get("min_ver")
-            m_max = m.get("max_ver")
-            try:
-                # newest_first=False 才能用 > 或 < 正确比较版本新旧
-                vk = versions.mc_version_key(mc_version, newest_first=False)
-                if m_min and vk < versions.mc_version_key(m_min, newest_first=False):
-                    continue
-                if m_max and vk > versions.mc_version_key(m_max, newest_first=False):
-                    continue
-            except Exception:
-                pass
-
-        d = dict(m)
-        d["default"] = bool(d.get("default"))
-        out.append(d)
+    for m in lst:
+        m_max = m.get("max_ver")
+        if m_max and vk > _V.mc_version_key(m_max, newest_first=False):
+            continue  # ★ 版本不支持，剔除（如 1.20.1 看不到 LazyDFU）
+        out.append(dict(m))
     return out
 
 
@@ -1715,8 +1690,9 @@ def install_mods(server_dir, mc_version, loader, on_log=None,
     if only is not None:
         want = list(only)
     else:
-        want = [m["slug"] for m in (MOD_TARGETS.get(loader) or [])
-                if m.get("default")]
+        # ★ v0.3.0：清单不再有 default 字段（视图化模式由用户勾选），
+        #   未指定时默认装清单里的全部。
+        want = [m["slug"] for m in (MOD_TARGETS.get(loader) or [])]
 
     # ★ 补前置 + 排顺序 + 查冲突（"不要只装一半"就靠这里）
     plan = resolve_selection(loader, want)
@@ -1818,6 +1794,143 @@ def install_mods(server_dir, mc_version, loader, on_log=None,
     return {"ok": ok_list, "fail": fail_list, "skipped": skipped,
             "notes": plan.get("notes") or [],
             "conflicts": plan.get("conflicts") or []}
+
+
+def install_plugins(server_dir, mc_version, only=None, on_log=None):
+    """并发下载插件到 server_dir/plugins（Paper 专用）。
+
+    ★ V1.2.0：与 install_mods 逻辑一致（4 线程并发 + CDN 加速 +
+      断点续传 + Fractureiser 木马扫描），但：
+      · 下载目标目录是 plugins/（不是 mods/）
+      · 没有内置清单，只装用户从插件视图（Modrinth
+        project_type=plugin + categories=paper）勾选的 slug。
+    """
+    def log(m):
+        if on_log:
+            on_log(m)
+
+    want = list(only or [])
+    if not want:
+        log("没有选中任何插件，跳过")
+        return {"ok": [], "fail": [], "skipped": [], "notes": []}
+
+    plugins_dir = os.path.join(server_dir, "plugins")
+    os.makedirs(plugins_dir, exist_ok=True)
+    ok_list, fail_list = [], []
+
+    def _download_task(slug):
+        desc = slug
+        try:
+            def _note(attempt, e, wait):
+                log("    [%s] 网络不稳（%s），%.1fs 后重试..."
+                    % (desc, _brief(e), wait))
+            # ★ 插件统一走 paper 加载器过滤（Paper 服）
+            v = modrinth_pick(slug, mc_version, "paper", on_retry=_note)
+            if not v:
+                return False, slug, desc, "无 %s+paper 版本" % mc_version
+
+            dest = os.path.join(plugins_dir, v["name"])
+            download_url = _mirror_download_url(v["url"])
+            _download(download_url, dest, on_retry=_note, on_log=log)
+
+            # ★ 下载后安全扫描（Fractureiser 木马）
+            if _scan_jar_virus(dest):
+                try:
+                    os.remove(dest)
+                except Exception:
+                    pass
+                return False, slug, desc, "拦截到恶意文件（Fractureiser 特征），已删除"
+
+            log("  [OK] %s" % v["name"])
+            return True, slug, desc, v["name"]
+        except Exception as e:
+            log("  [跳过] %s - %s" % (desc, _brief(e)))
+            return False, slug, desc, _brief(e)
+
+    # ---- 并发下载（4 线程）----
+    log("开始并发下载 %d 个插件（4 线程）..." % len(want))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        future_to_slug = {
+            executor.submit(_download_task, slug): slug
+            for slug in want
+        }
+        for future in concurrent.futures.as_completed(future_to_slug):
+            try:
+                success, slug, desc, result = future.result()
+            except Exception as e:  # 任务本身异常也要兜住，别让 UI 崩
+                slug = future_to_slug[future]
+                success, desc, result = False, slug, _brief(e)
+            if success:
+                ok_list.append({"name": result, "slug": slug})
+            else:
+                fail_list.append({"slug": slug, "name": desc,
+                                  "reason": result})
+
+    if fail_list and not ok_list:
+        log("")
+        log("★ 一个都没装上，通常是网络瞬时故障（不是插件的问题）。")
+        log("  等几秒再点一次『开始』通常就好了。")
+    return {"ok": ok_list, "fail": fail_list, "skipped": [],
+            "notes": []}
+
+
+# ★ V1.3.0：多源登录组件（全部走 Modrinth 下载引擎，不写死第三方网址）
+AUTH_COMPONENTS = {
+    # Paper 服：MultiLogin 插件（注意：Modrinth 上暂没有官方发布，
+    # 若自动下载失败，日志里会给手动安装指引）
+    "paper": {
+        "kind": "plugin", "slug": "multilogin", "name": "MultiLogin",
+        "hint": "Modrinth 暂无官方 MultiLogin 插件发布；若自动下载失败，"
+                "请到 MultiLogin 官方 GitHub（Ink33/MultiLogin）下载 jar "
+                "手动放入 plugins/",
+    },
+    # 模组服（Forge / Fabric / NeoForge，含 1.21.1）：
+    # MultiYggdrasil 官方支持 fabric/forge/neoforge 与 1.14~1.21.11。
+    "mod": {
+        "kind": "mod", "slug": "multiyggdrasil", "name": "MultiYggdrasil",
+        "hint": None,
+    },
+}
+
+
+def install_auth_component(server_dir, mc_version, loader, kind, slug,
+                           on_log=None):
+    """下载单个多源登录组件（Modrinth 引擎：并发/镜像/断点续传/木马扫描）。
+
+    kind: "plugin"（装进 plugins/，加载器固定 paper）或
+          "mod"（装进 mods/，加载器用服务器的实际加载器）。
+    返回 {"ok": bool, "name": str, "reason": str, "path": str}
+    """
+    def log(m):
+        if on_log:
+            on_log(m)
+
+    target = os.path.join(
+        server_dir, "plugins" if kind == "plugin" else "mods")
+    os.makedirs(target, exist_ok=True)
+    ldr = loader if kind == "mod" else "paper"
+    try:
+        def _note(attempt, e, wait):
+            log("    [%s] 网络不稳（%s），%.1fs 后重试..."
+                % (slug, _brief(e), wait))
+        v = modrinth_pick(slug, mc_version, ldr, on_retry=_note)
+        if not v:
+            return {"ok": False, "name": slug,
+                    "reason": "Modrinth 无 %s+%s 版本" % (mc_version, ldr)}
+        dest = os.path.join(target, v["name"])
+        _download(_mirror_download_url(v["url"]), dest,
+                  on_retry=_note, on_log=log)
+        if _scan_jar_virus(dest):
+            try:
+                os.remove(dest)
+            except Exception:
+                pass
+            return {"ok": False, "name": slug,
+                    "reason": "拦截到恶意文件（Fractureiser 特征），已删除"}
+        log("  [OK] %s" % v["name"])
+        return {"ok": True, "name": v["name"], "path": dest}
+    except Exception as e:
+        return {"ok": False, "name": slug, "reason": _brief(e)}
 
 
 def _brief(e):

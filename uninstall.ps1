@@ -29,6 +29,34 @@ function Remove-Shortcut {
     }
 }
 
+function Stop-OccupyingProcesses {
+    # ★ 卸载防残留：先把还开着本程序（python.exe / pythonw.exe）
+    #   且命令行里指向安装目录的进程全部强杀，等句柄释放后再删文件。
+    #   不然 Remove-Item 会因为文件被占用而删不干净。
+    $procs = @()
+    try {
+        $procs = @(Get-CimInstance Win32_Process `
+            -Filter "Name='python.exe' OR Name='pythonw.exe'" `
+            -ErrorAction SilentlyContinue)
+    } catch { }
+    if ($procs.Count -eq 0) { return }
+    $app = $AppDir.TrimEnd('\', '/').ToLower()
+    $killed = 0
+    foreach ($p in $procs) {
+        try {
+            if ($p.CommandLine -and
+                $p.CommandLine.ToLower().Contains($app)) {
+                Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+                $killed++
+            }
+        } catch { }
+    }
+    if ($killed -gt 0) {
+        Write-Log "已结束 $killed 个还在运行的进程，等待句柄释放 ..."
+        Start-Sleep -Seconds 2
+    }
+}
+
 function Remove-ProgramFiles {
     # ★ 防呆：绝对不能在盘符根目录下执行删除！
     #   如果在 D:\ 运行，Remove-Item 会误删 D:\mcserver 等同名文件夹；
@@ -39,6 +67,7 @@ function Remove-ProgramFiles {
         throw "检测到程序目录在盘符根目录（如 D:\）。为防止误删你的文件，卸载程序已停止。请手动删除该目录。"
     }
 
+    Stop-OccupyingProcesses
     $codeItems = @(
         "mcserver", "icons", "start_manager.bat", "换图标.bat", 
         "使用说明.txt", "更新日志.txt", "icon.ico", "icon.png", 

@@ -4,8 +4,10 @@
 import os
 import sys
 
-from PySide6.QtGui import QColor, QDesktopServices, QTextCursor
-from PySide6.QtCore import Qt, Signal, QThread, QTimer, QUrl
+from PySide6.QtGui import (QColor, QDesktopServices, QTextCursor,
+                           QIcon, QPixmap, QImage)
+from PySide6.QtCore import (Qt, Signal, QThread, QTimer, QUrl, QSize,
+                            QTime)
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel,
     QLineEdit, QComboBox, QPushButton, QCheckBox, QSpinBox,
@@ -14,7 +16,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QPlainTextEdit, QTextBrowser,
     QTabWidget, QScrollArea, QDoubleSpinBox, QFrame,  # ★ 加上 QFrame
     QWidget, QApplication, QTableWidget, QTableWidgetItem,
-    QHeaderView, QInputDialog, QCompleter,
+    QHeaderView, QInputDialog, QCompleter, QListView,
 )
 
 from .core import (versions, java as javacore, install, builder,
@@ -115,11 +117,188 @@ def _muted():
         return "color:#9aa4b2;"
 
 
+# =========================================================
+#  V0.5.0：Paper/Spigot 性能优化（YAML 可视化编辑）
+# =========================================================
+YAML_ITEMS = [
+    # (key, yaml 路径, 类型, 显示名, 默认值, 提示)
+    ("optimize-explosions",
+     "world-settings.default.optimize-explosions", "bool",
+     "优化爆炸计算", True,
+     "降低 TNT/爆炸对服务端性能的影响（推荐开启）"),
+    ("max-entity-collisions",
+     "world-settings.default.entity-activation-range"
+     ".max-entity-collisions", "int",
+     "实体碰撞上限", 8,
+     "同一位置最多同时发生碰撞的实体数，改小可防实体过多卡服"),
+    ("mob-spawn-range",
+     "world-settings.default.mob-spawn-range", "int",
+     "刷怪范围", 8,
+     "玩家周围多少个区块内会刷怪，改小更省性能"),
+    ("tick-rate",
+     "world-settings.default.tick-rate", "int",
+     "区块 tick 倍率", 1,
+     "1=原版。改大跳过区块 tick 提升性能（略影响红石/刷怪）"),
+    ("animals",
+     "world-settings.default.entity-activation-range.animals", "int",
+     "动物激活距离", 32,
+     "动物在多少格内才激活 AI，改小省性能"),
+]
+
+
+def _yaml_path_for(server_dir):
+    """找 Paper/Spigot 的 YAML 配置文件，按优先级返回第一个存在的。"""
+    cands = [
+        os.path.join(server_dir, "config", "paper-world-defaults.yml"),
+        os.path.join(server_dir, "config", "paper-global.yml"),
+        os.path.join(server_dir, "spigot.yml"),
+    ]
+    for p in cands:
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def _yaml_get(data, path):
+    """沿点路径取 YAML 值；缺失返回 None。"""
+    cur = data
+    for part in path.split("."):
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+        if cur is None:
+            return None
+    return cur
+
+
+def _yaml_set(data, path, value):
+    """沿点路径写入 YAML 值（逐级补 dict）。"""
+    cur = data
+    parts = path.split(".")
+    for part in parts[:-1]:
+        nxt = cur.get(part)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            cur[part] = nxt
+        cur = nxt
+    cur[parts[-1]] = value
+
+
+# ============ V1.6.1：内存单位（G/MB）智能换算 ============
+def _mem_mb_of(sp, cb):
+    """按当前单位取整数 MB（底层统一整数 MB 传给 Java）。
+
+    G：值 x 1024 取整；MB：直接取整。
+    """
+    if cb.currentData() == "g":
+        return int(round(float(sp.value()) * 1024))
+    return int(round(float(sp.value())))
+
+
+def _set_mem_mb(sp, cb, mb):
+    """按 cb 当前单位把整数 MB 写进 sp（Aikar 同步等场景用）。"""
+    if cb.currentData() == "g":
+        sp.setValue(round(mb / 1024.0, 1))
+    else:
+        sp.setValue(int(mb))
+
+
+def _apply_mem_unit(sp, cb):
+    """单位切换联动：改精度/范围/步长/后缀 + 智能换算当前值。
+
+    - 切到 G：当前值视为 MB，除以 1024；整除显示整数、
+      除不尽保留一位小数（如 3584 -> 3.5）；范围 1.0~64.0，
+      步长 0.5，允许小数。
+    - 切到 MB：当前值视为 G，乘以 1024 取整；范围 512~65536，
+      步长 512。
+    """
+    if cb.currentData() == "g":
+        mb = int(round(float(sp.value())))
+        sp.setDecimals(1)
+        sp.setSingleStep(0.5)
+        sp.setRange(1.0, 64.0)
+        sp.setSuffix(" G")
+        v = mb / 1024.0
+        sp.setValue(round(v, 1) if v != int(v) else float(int(v)))
+    else:
+        g = float(sp.value())
+        mb = int(round(g * 1024))
+        sp.setDecimals(0)
+        sp.setSingleStep(512)
+        sp.setRange(512, 65536)
+        sp.setSuffix(" MB")
+        sp.setValue(mb)
+
+
+def _yaml_scalar(v):
+    """YAML 标量文本：bool 写 true/false（小写），其余直接转 str。"""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    return str(v)
+
+
+def _yaml_patch_preserve(path, edits):
+    """★ V1.5.0：行级原位替换 YAML 值，保留原有注释。
+
+    edits: [(path 列表, value), ...]。
+    每个键沿缩进层级在原文中定位，只替换值、保留行尾注释；
+    原文里没有的键（Paper 默认文件一般全都有）追加到文件末尾。
+    这样不用 safe_dump 重建全文，注释全部保留。
+    """
+    import re
+    with open(path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    stack = []            # [(indent, key), ...]
+    idx = {}              # (key1, key2, ...) -> 行号
+    for i, ln in enumerate(lines):
+        m = re.match(r"^(\s*)([^#\s][^:]*):", ln)
+        if not m:
+            continue
+        indent = len(m.group(1))
+        key = m.group(2).strip().strip("'\"")
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        stack.append((indent, key))
+        idx[tuple(k for _, k in stack)] = i
+
+    changed = False
+    missing = []
+    for plist, val in edits:
+        key = tuple(plist)
+        if key not in idx:
+            missing.append(plist)
+            continue
+        i = idx[key]
+        line = lines[i]
+        m2 = re.match(r"^(\s*[^#][^:]*:)\s*(.*)$", line)
+        if not m2:
+            continue
+        tail = m2.group(2)
+        cm = re.search(r"(#.*)$", tail)
+        comment = cm.group(1) if cm else ""
+        lines[i] = (m2.group(1) + " " + _yaml_scalar(val)
+                    + (" " + comment if comment else "") + "\n")
+        changed = True
+
+    if missing:
+        lines.append("\n# ---- MCSM 性能优化（v1.5.0 追加）----\n")
+        for plist, val in edits:
+            if plist not in missing:
+                continue
+            indent = "  " * (len(plist) - 1)
+            lines.append(indent + plist[-1] + ": " + _yaml_scalar(val) + "\n")
+        changed = True
+
+    if changed:
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.writelines(lines)
+
+
 class _StopMixin:
     """给 QThread 加一个安全的 stop()。
 
-    QThread 不能"优雅中断"一个正在阻塞（下载等）的 run()，
-    所以顺序是：请求中断 -> quit() -> 等一小会儿 ->
+    QThread 不能"优雅中断"一个正在阻塞（下载等）的 run()，    所以顺序是：请求中断 -> quit() -> 等一小会儿 ->
     还不停就 terminate()（总比整个程序崩掉强）。
     """
 
@@ -322,6 +501,9 @@ class JavaPick(QGroupBox):
         self.combo.setMinimumWidth(400)
         self.btn_browse = QPushButton("浏览...")
         self.btn_scan = QPushButton("重新扫描")
+        self.btn_dl = QPushButton("下载 Java")
+        self.btn_dl.setToolTip("没找到合适的 Java 时，一键从 Adoptium 下载"
+                               "Temurin JRE 到软件目录 java/ 并自动选中")
         self.lbl = QLabel("")
         self.lbl.setWordWrap(True)
 
@@ -329,6 +511,7 @@ class JavaPick(QGroupBox):
         row.addWidget(self.combo, 1)
         row.addWidget(self.btn_browse)
         row.addWidget(self.btn_scan)
+        row.addWidget(self.btn_dl)
 
         v = QVBoxLayout(self)
         v.addLayout(row)
@@ -336,6 +519,7 @@ class JavaPick(QGroupBox):
 
         self.btn_browse.clicked.connect(self.browse)
         self.btn_scan.clicked.connect(self.rescan)
+        self.btn_dl.clicked.connect(self._dl_java)
         self.combo.currentIndexChanged.connect(self._check)
 
     def set_need(self, need, mc_version=None):
@@ -423,6 +607,53 @@ class JavaPick(QGroupBox):
 
     def path(self):
         return self.combo.currentData()
+
+    # ---------- V0.4.0：一键下载 Java（Worker 线程） ----------
+    def _dl_java(self):
+        major = self.need or 21
+        if self.need:
+            hint = "当前服务器需要 Java %d。" % self.need
+        else:
+            hint = "按 Java %d 下载（现代 MC 通用）。" % major
+        r = QMessageBox.question(
+            self, "下载 Java",
+            "%s\n将从 Adoptium 官方下载 Temurin JRE %d（约 40-60MB）\n"
+            "并解压到软件目录的 java/ 文件夹，下载完自动选中。\n\n"
+            "继续吗？" % (hint, major),
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if r != QMessageBox.Yes:
+            return
+        self.btn_dl.setEnabled(False)
+        self.lbl.setStyleSheet("color:%s;" % _on_bg("#1565c0"))
+        self.lbl.setText("正在下载 JRE %d ...（网络请求在后台）" % major)
+        self.worker = _track(self, Worker(
+            self._dl_job, {"major": major}, self))
+        self.worker.log.connect(lambda m: self.lbl.setText(str(m)))
+        self.worker.done.connect(self._dl_done)
+        self.worker.start()
+
+    def _dl_job(self, major=None, on_log=None):
+        """Worker 内执行：下载 + 解压 + 校验，全部不碰主线程。"""
+        exe = javacore.download_jre(int(major or 21), on_log=on_log)
+        info = javacore.probe(exe)
+        if not info:
+            raise RuntimeError("下载完成但校验失败，请重试")
+        return {"exe": exe, "major": info[0], "version": info[1]}
+
+    def _dl_done(self, ok, res):
+        self.btn_dl.setEnabled(True)
+        if not ok:
+            self.lbl.setText("[下载失败] %s" % str(res)[:120])
+            self.lbl.setStyleSheet("color:%s;" % _on_bg("#c62828"))
+            return
+        exe = res.get("exe") or ""
+        mj = res.get("major")
+        self.combo.blockSignals(True)
+        self.combo.insertItem(
+            0, "Java %d（内置下载） - %s" % (mj or "?", exe), exe)
+        self.combo.setCurrentIndex(0)
+        self.combo.blockSignals(False)
+        self._check()
 
 
 class CreateDialog(QDialog):
@@ -544,8 +775,28 @@ class CreateDialog(QDialog):
         self.chk_mods.setChecked(True)
         f2.addRow("", self.chk_mods)
 
+        # ★ V1.2.0：插件（仅 Paper 显示）
+        self.chk_plugins = QCheckBox("同时下载插件")
+        self.chk_plugins.setChecked(True)
+        self.chk_plugins.setVisible(False)
+        f2.addRow("", self.chk_plugins)
+        self._picked_plugin_slugs = None
+        self._plugins_confirmed = False
+        hplg = QHBoxLayout()
+        self.btn_pick_plugins = QPushButton("选择要装哪些插件...")
+        self.btn_pick_plugins.clicked.connect(self.pick_plugins)
+        self.btn_pick_plugins.setVisible(False)
+        hplg.addWidget(self.btn_pick_plugins)
+        self.lbl_plugins = QLabel("（未选择，点开始时会弹选择界面）")
+        self.lbl_plugins.setWordWrap(True)
+        self.lbl_plugins.setStyleSheet(_muted())
+        self.lbl_plugins.setVisible(False)
+        hplg.addWidget(self.lbl_plugins, 1)
+        f2.addRow("", hplg)
+
         self._picked_slugs = None
         self._mod_fail = []
+        self._plugin_fail = []  # ★ V1.2.0
         self._mods_confirmed = False
         self._last_loader = None
         self._rebuilding = False
@@ -569,19 +820,60 @@ class CreateDialog(QDialog):
         scroll_layout.addWidget(self.java_pick)
         self.ed_version.textChanged.connect(self._sync_java_need)
 
-        # ---- 内存 ----
+        # ---- 内存（★ V1.6.1：MB/G 单位可切换，底层统一整数 MB）----
         g3 = QGroupBox("内存")
         h3 = QHBoxLayout(g3)
         h3.addWidget(QLabel("最小:"))
-        self.sp_xms = QSpinBox(); self.sp_xms.setRange(256, 65536)
-        self.sp_xms.setValue(1024); self.sp_xms.setSuffix(" MB")
+        # ★ QDoubleSpinBox：G 模式允许小数（0.5 步进）；MB 模式整数
+        self.sp_xms = QDoubleSpinBox()
+        self.cb_xms_unit = QComboBox()
+        self.cb_xms_unit.addItem("G", "g")
+        self.cb_xms_unit.addItem("MB", "mb")
+        self.cb_xms_unit.setCurrentIndex(0)  # 默认 G
+        self.sp_xms.setDecimals(1)
+        self.sp_xms.setSingleStep(0.5)
+        self.sp_xms.setRange(1.0, 64.0)
+        self.sp_xms.setValue(1.0)  # 默认 1.0G
+        self.sp_xms.setSuffix(" G")
         h3.addWidget(self.sp_xms)
+        h3.addWidget(self.cb_xms_unit)
         h3.addWidget(QLabel("最大:"))
-        self.sp_xmx = QSpinBox(); self.sp_xmx.setRange(512, 65536)
-        self.sp_xmx.setValue(4096); self.sp_xmx.setSuffix(" MB")
+        self.sp_xmx = QDoubleSpinBox()
+        self.cb_xmx_unit = QComboBox()
+        self.cb_xmx_unit.addItem("G", "g")
+        self.cb_xmx_unit.addItem("MB", "mb")
+        self.cb_xmx_unit.setCurrentIndex(0)
+        self.sp_xmx.setDecimals(1)
+        self.sp_xmx.setSingleStep(0.5)
+        self.sp_xmx.setRange(1.0, 64.0)
+        self.sp_xmx.setValue(4.0)  # 默认 4.0G
+        self.sp_xmx.setSuffix(" G")
         h3.addWidget(self.sp_xmx)
+        h3.addWidget(self.cb_xmx_unit)
         h3.addStretch(1)
+        # 单位切换联动：G <-> MB 智能换算
+        self.cb_xms_unit.currentIndexChanged.connect(
+            lambda: _apply_mem_unit(self.sp_xms, self.cb_xms_unit))
+        self.cb_xmx_unit.currentIndexChanged.connect(
+            lambda: _apply_mem_unit(self.sp_xmx, self.cb_xmx_unit))
         scroll_layout.addWidget(g3)
+
+        # ---- 自动化功能（初始化默认勾选，可随时在服务器配置里改）----
+        g_auto = QGroupBox("自动化功能")
+        v_auto = QVBoxLayout(g_auto)
+        self.chk_aikar = QCheckBox("启用 Aikar 性能优化 (G1GC)")
+        self.chk_aikar.setToolTip(
+            "目前公认最优的 Java 启动参数，可大幅减少 GC 卡顿。\n"
+            "启用后最大内存会被强制设置为与最小内存相同。")
+        self.chk_aikar.setChecked(True)  # ★ 默认勾选
+        v_auto.addWidget(self.chk_aikar)
+        self.chk_auto_restart = QCheckBox("崩溃时自动重启（最多 5 次）")
+        self.chk_auto_restart.setChecked(True)  # ★ 默认勾选
+        v_auto.addWidget(self.chk_auto_restart)
+        self.chk_auto_backup = QCheckBox("开启定时备份存档")
+        self.chk_auto_backup.setChecked(True)  # ★ 默认勾选
+        v_auto.addWidget(self.chk_auto_backup)
+        scroll_layout.addWidget(g_auto)
 
         self.ed_version.textChanged.connect(self._refresh_loaders)
         self.ed_version.textChanged.connect(self._note_version_changed)
@@ -745,9 +1037,15 @@ class CreateDialog(QDialog):
             # 删除了：self.chk_autoconf.setEnabled(False)
             self.btn_pick_mods.setEnabled(False)
             self.lbl_mods.setText("（Paper 装插件，不装模组）")
+            # ★ V1.2.0：Paper -> 显示插件勾选与选择入口
+            self.chk_plugins.setVisible(True)
+            self.btn_pick_plugins.setVisible(True)
+            self.lbl_plugins.setVisible(True)
             if self._last_loader != l and not self._rebuilding:
                 self._picked_slugs = []
                 self._mods_confirmed = False
+                self._picked_plugin_slugs = None
+                self._plugins_confirmed = False
             self._last_loader = l
         else:
             self.lbl_loader_hint.setText(
@@ -756,6 +1054,12 @@ class CreateDialog(QDialog):
             self.chk_mods.setEnabled(True)
             self.chk_mods.setChecked(True)
             self.btn_pick_mods.setEnabled(True)
+            # ★ V1.2.0：非 Paper -> 隐藏插件区
+            self.chk_plugins.setVisible(False)
+            self.btn_pick_plugins.setVisible(False)
+            self.lbl_plugins.setVisible(False)
+            self._picked_plugin_slugs = None
+            self._plugins_confirmed = False
             if self._last_loader != l and not self._rebuilding:
                 self._picked_slugs = None
                 self._mods_confirmed = False
@@ -810,7 +1114,9 @@ class CreateDialog(QDialog):
                 pass
 
         self.btn_lver.setEnabled(False)
-        self.lbl_lver.setText("正在查询可用版本 ...")
+        # ★ 加载中禁用下拉框（防止旧选项被误用 / 边加载边改）
+        self.cb_lver.setEnabled(False)
+        self.lbl_lver.setText("加载中 ...")
         
         # ★ 引入请求 ID 防止并发乱序（旧请求晚回来直接丢弃）
         self._lver_req_id = getattr(self, "_lver_req_id", 0) + 1
@@ -842,6 +1148,7 @@ class CreateDialog(QDialog):
                 "（不影响安装）")
             return
         if not cands:
+            self.cb_lver.setEnabled(True)  # ★ 恢复可点，别一直灰着
             self.lbl_lver.setText("这个加载器没有可选版本，留空即可")
             return
         for c in cands:
@@ -922,10 +1229,10 @@ class CreateDialog(QDialog):
             self._picked_slugs = []
             self.lbl_mods.setText("（%s 不装模组）" % loader)
             return
-        dlg = _themed(ModPickDialog(v, loader, self))
+        dlg = _themed(self._browse_dlg(v, loader))
         if dlg.exec() != QDialog.Accepted:
             return
-        self._picked_slugs = dlg.result_slugs()
+        self._picked_slugs = dlg.selected
         self._mods_confirmed = True
         n = len(self._picked_slugs)
         if n == 0:
@@ -934,6 +1241,42 @@ class CreateDialog(QDialog):
             self.lbl_mods.setText("已选 %d 个：%s"
                                   % (n, "、".join(self._picked_slugs[:6])
                                      + (" ..." if n > 6 else "")))
+
+    def _browse_dlg(self, v, loader):
+        """PCL2 风格模组选择视图（初始化向导共用）。"""
+        e = dict(self.entry)
+        e["version"] = v
+        e["loader"] = loader
+        return ModBrowseDialog(e, self, select_only=True)
+
+    def _browse_plugins_dlg(self, v):
+        """★ V1.2.0：插件选择视图（数据源 project_type=plugin）。"""
+        e = dict(self.entry)
+        e["version"] = v
+        e["loader"] = "paper"
+        return ModBrowseDialog(e, self, select_only=True, mode="plugins")
+
+    def pick_plugins(self):
+        """★ V1.2.0：弹出插件选择界面。"""
+        v = self.ed_version.text().strip()
+        if not v:
+            QMessageBox.warning(self, "缺信息", "先填 MC 版本")
+            return
+        dlg = _themed(self._browse_plugins_dlg(v))
+        if dlg.exec() != QDialog.Accepted:
+            return
+        self._picked_plugin_slugs = dlg.selected
+        self._plugins_confirmed = True
+        n = len(self._picked_plugin_slugs)
+        if n == 0:
+            self.lbl_plugins.setText("已选：0 个（只装核心）")
+        else:
+            self.lbl_plugins.setText("已选 %d 个：%s"
+                                     % (n, "、".join(
+                                         self._picked_plugin_slugs[:6])
+                                        + (" ..." if n > 6 else "")))
+        # ★ Paper 装了插件后自动勾上"同时下载插件"
+        self.chk_plugins.setChecked(True)
 
     def start(self):
         v = self.ed_version.text().strip()
@@ -972,10 +1315,10 @@ class CreateDialog(QDialog):
             if self._mods_confirmed and self._picked_slugs is not None:
                 mod_slugs = self._picked_slugs
             else:
-                dlg = _themed(ModPickDialog(v, loader, self))
+                dlg = _themed(self._browse_dlg(v, loader))
                 if dlg.exec() != QDialog.Accepted:
                     return
-                mod_slugs = dlg.result_slugs()
+                mod_slugs = dlg.selected
                 self._picked_slugs = mod_slugs
                 self._mods_confirmed = True
             if not mod_slugs:
@@ -989,6 +1332,30 @@ class CreateDialog(QDialog):
         else:
             self._picked_slugs = None
             self._mods_confirmed = False
+
+        # ★ 插件选择（Paper）：勾了"同时下载插件"就先弹选择界面
+        plugin_slugs = None
+        if loader == "paper" and self.chk_plugins.isChecked():
+            if self._plugins_confirmed and self._picked_plugin_slugs is not None:
+                plugin_slugs = self._picked_plugin_slugs
+            else:
+                dlg = _themed(self._browse_plugins_dlg(v))
+                if dlg.exec() != QDialog.Accepted:
+                    return
+                plugin_slugs = dlg.selected
+                self._picked_plugin_slugs = plugin_slugs
+                self._plugins_confirmed = True
+            if not plugin_slugs:
+                r = QMessageBox.question(
+                    self, "一个都没选",
+                    "你没勾选任何插件。\n\n"
+                    "确定不装插件，只装核心吗？",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if r != QMessageBox.Yes:
+                    return
+        else:
+            self._picked_plugin_slugs = None
+            self._plugins_confirmed = False
 
         # ★ 加载器版本：下拉里选了就用选的，没选(None)才自动用最新。
         #   以前压根没往 info 里放，_do 拿到的永远是 None，
@@ -1006,13 +1373,21 @@ class CreateDialog(QDialog):
             "loader": loader,
             "loader_version": lv,
             "java": jpath,
-            "xms": self.sp_xms.value(),
-            "xmx": self.sp_xmx.value(),
+            "xms": _mem_mb_of(self.sp_xms, self.cb_xms_unit),
+            "xmx": _mem_mb_of(self.sp_xmx, self.cb_xmx_unit),
+            # ★ 自动化三项（默认全勾），随初始化写进服务器配置
+            "aikar": self.chk_aikar.isChecked(),
+            "auto_restart": self.chk_auto_restart.isChecked(),
+            "auto_backup": self.chk_auto_backup.isChecked(),
             # level-name 必须是"世界文件夹的名字"，不是显示名。
             # 显示名可能含冒号/颜色码，会导致启动崩溃。
             "level_name": self._pick_level_name(),
             "want_mods": self.chk_mods.isChecked(),
             "mod_slugs": mod_slugs,
+            # ★ V1.2.0：插件（Paper 专用）
+            "want_plugins": (loader == "paper"
+                             and self.chk_plugins.isChecked()),
+            "plugin_slugs": plugin_slugs,
             "entry": self.entry,
         }
         self.btn_ok.setEnabled(False)
@@ -1128,6 +1503,19 @@ class CreateDialog(QDialog):
                     log("  [警告] 自动配置 FerriteCore 失败: %r" % e)
 
             # （服务端的 ServerCore 配置已移至「服务器配置」中手动生成）
+
+        # 3.5) 插件（★ V1.2.0：Paper 专用，用初始化前选好的清单）
+        if info.get("want_plugins"):
+            pl_slugs = info.get("plugin_slugs")
+            log("下载插件 (%s) ..."
+                % ("%d 个" % len(pl_slugs) if pl_slugs else "全部"))
+            pr = install.install_plugins(
+                sd, info["version"], on_log=log, only=pl_slugs)
+            log("插件: %d 个成功, %d 个失败"
+                % (len(pr["ok"]), len(pr["fail"])))
+            for f in pr["fail"]:
+                log("  失败: %s (%s)" % (f["name"], f["slug"]))
+            self._plugin_fail = pr["fail"]
 
         # 4) server.properties
         e = info["entry"]
@@ -1417,11 +1805,18 @@ class ServerConfigDialog(QDialog):
         # ---- 页签容器 ----
         self.tabs = QTabWidget()
 
-        # ===== 页签 1：server.properties =====
-        self.props_tabs = QTabWidget()
+        # ===== 页签 1：server.properties（★ V1.5.0：合并为单页滚动）=====
+        # 以前按分组拆成 6 个子页签，切换麻烦；现在一个可滚动页面
+        # 从上到下排完，布尔值全部用 QCheckBox，小白看得懂。
+        sa = QScrollArea()
+        sa.setWidgetResizable(True)
+        self.props_tabs = sa  # 保留属性名，兼容其它引用
+        w = QWidget()
+        self._props_root = w  # 挂到 self 防止被回收
+        out = QVBoxLayout(w)
         for gname, keys in self.GROUPS:
-            w = QWidget()
-            f = QFormLayout(w)
+            gb = QGroupBox(gname)
+            f = QFormLayout(gb)
             f.setLabelAlignment(Qt.AlignRight)
             for k in keys:
                 lbl = QLabel(props.KEY_LABEL.get(k, k))
@@ -1432,11 +1827,10 @@ class ServerConfigDialog(QDialog):
                     wd.setToolTip(desc)
                 f.addRow(lbl, wd)
                 self.widgets[k] = wd
-            sa = QScrollArea()
-            sa.setWidgetResizable(True)
-            sa.setWidget(w)
-            self.props_tabs.addTab(sa, gname)
-        self.tabs.addTab(self.props_tabs, "server.properties")
+            out.addWidget(gb)
+        out.addStretch(1)
+        sa.setWidget(w)
+        self.tabs.addTab(sa, "server.properties")
         v.addWidget(self.tabs, 1)
 
         # ===== 页签 2：核心 =====
@@ -1445,11 +1839,18 @@ class ServerConfigDialog(QDialog):
         # ===== 页签 3：模组 =====
         self.tabs.addTab(self._mod_tab(), "模组")
 
+        # ===== 页签 3.5：插件（★ V1.2.0：仅 Paper 显示）=====
+        if (entry.get("loader") or "").lower() == "paper":
+            self.tabs.addTab(self._plugin_tab(), "插件")
+
         # ===== 页签 3.5：模组配置（装了还要配的那些）=====
         self.tabs.addTab(self._modconf_tab(), "模组配置")
 
         # ===== 页签 4：备份 =====
         self.tabs.addTab(self._backup_tab(), "备份")
+
+        # ===== 页签 4.5：登录（★ V1.3.0 多源共存）=====
+        self.tabs.addTab(self._auth_tab(), "登录")
 
         # ===== 页签 5：启动设置 =====
         gj = QGroupBox("Java 与内存（仅本服）", self)
@@ -1460,19 +1861,32 @@ class ServerConfigDialog(QDialog):
         gv.addWidget(self.java_pick)
         hm = QHBoxLayout()
         hm.addWidget(QLabel("最小内存:"))
-        self.sp_xms = QSpinBox()
-        self.sp_xms.setRange(256, 65536)
-        self.sp_xms.setSuffix(" MB")
-        self.sp_xms.setValue(int(self.saved.get("xms", 1024)))
+        # ★ V1.6.1：内存单位 MB/G 可切换，智能回显、底层统一整数 MB
+        self.sp_xms = QDoubleSpinBox()
+        self.cb_xms_unit = QComboBox()
+        self.cb_xms_unit.addItem("G", "g")
+        self.cb_xms_unit.addItem("MB", "mb")
         hm.addWidget(self.sp_xms)
+        hm.addWidget(self.cb_xms_unit)
         hm.addWidget(QLabel("最大内存:"))
-        self.sp_xmx = QSpinBox()
-        self.sp_xmx.setRange(512, 65536)
-        self.sp_xmx.setSuffix(" MB")
-        self.sp_xmx.setValue(int(self.saved.get("xmx", 4096)))
+        self.sp_xmx = QDoubleSpinBox()
+        self.cb_xmx_unit = QComboBox()
+        self.cb_xmx_unit.addItem("G", "g")
+        self.cb_xmx_unit.addItem("MB", "mb")
         hm.addWidget(self.sp_xmx)
+        hm.addWidget(self.cb_xmx_unit)
         hm.addStretch(1)
         gv.addLayout(hm)
+        # 智能回显：saved 里整数 MB，能被 1024 整除 → G 显示，否则 MB
+        # （先回显后连接联动，避免 setCurrentIndex 触发换算重算）
+        self._init_mem_spin(self.sp_xms, self.cb_xms_unit,
+                            int(self.saved.get("xms", 1024)))
+        self._init_mem_spin(self.sp_xmx, self.cb_xmx_unit,
+                            int(self.saved.get("xmx", 4096)))
+        self.cb_xms_unit.currentIndexChanged.connect(
+            lambda: _apply_mem_unit(self.sp_xms, self.cb_xms_unit))
+        self.cb_xmx_unit.currentIndexChanged.connect(
+            lambda: _apply_mem_unit(self.sp_xmx, self.cb_xmx_unit))
 
                 # ===== 页签 6：白名单 =====
         self.tabs.addTab(self._whitelist_tab(), "白名单")
@@ -1512,6 +1926,28 @@ class ServerConfigDialog(QDialog):
         self.chk_auto_restart = QCheckBox("崩溃时自动重启（最多 5 次）")
         self.chk_auto_restart.setChecked(self.saved.get("auto_restart", False))
         fg_auto.addRow("", self.chk_auto_restart)
+
+        # ★ V0.5.0：每日定时重启
+        hb_rt = QHBoxLayout()
+        self.chk_auto_restart_time = QCheckBox("每日定时重启")
+        self.chk_auto_restart_time.setToolTip(
+            "到点后服务器会广播『60 秒后重启』，倒计时结束自动 stop\n"
+            "并重新启动，适合清空内存泄漏 / 定期保活的场景。")
+        rt_cfg = str(self.saved.get("auto_restart_time") or "")
+        self.chk_auto_restart_time.setChecked(bool(rt_cfg))
+        hb_rt.addWidget(self.chk_auto_restart_time)
+        self.time_restart = QTimeEdit()
+        self.time_restart.setDisplayFormat("HH:mm")
+        try:
+            hh, mm = rt_cfg.split(":")
+            self.time_restart.setTime(QTime(int(hh), int(mm)))
+        except Exception:
+            self.time_restart.setTime(QTime(4, 0))
+        self.time_restart.setEnabled(self.chk_auto_restart_time.isChecked())
+        self.chk_auto_restart_time.toggled.connect(
+            self.time_restart.setEnabled)
+        hb_rt.addWidget(self.time_restart)
+        fg_auto.addRow("", hb_rt)
         
         hb_bk = QHBoxLayout()
         self.chk_auto_backup = QCheckBox("定时备份存档")
@@ -1531,6 +1967,9 @@ class ServerConfigDialog(QDialog):
         sw.setWidgetResizable(True)
         sw.setWidget(gj)
         self.tabs.addTab(sw, "启动设置")
+
+        # ===== 页签 7：性能优化（Paper/Spigot YAML）=====
+        self.tabs.addTab(self._yaml_tab(), "性能优化(Paper/Spigot)")
 
         self.java_pick.rescan()
         want = self.saved.get("java")
@@ -1841,6 +2280,229 @@ class ServerConfigDialog(QDialog):
         v.addLayout(hb2)
         return w
 
+    # ---------- 插件页签（★ V1.2.0，Paper 专用） ----------
+    def _plugins_dir_here(self):
+        return os.path.join(self.server_dir, "plugins")
+
+    def _plugin_tab(self):
+        w = QWidget(self)
+        self._w_plugin = w
+        v = QVBoxLayout(w)
+        try:
+            self.plugins = modman.scan_mods_dir(self._plugins_dir_here())
+        except Exception:
+            self.plugins = []
+
+        self.plugin_table = QTableWidget(0, 4)
+        self.plugin_table.setHorizontalHeaderLabels(
+            ["状态", "名称", "版本", "文件"])
+        self.plugin_table.verticalHeader().setVisible(False)
+        self.plugin_table.setEditTriggers(
+            QAbstractItemView.NoEditTriggers)
+        self.plugin_table.setSelectionBehavior(
+            QAbstractItemView.SelectRows)
+        hh = self.plugin_table.horizontalHeader()
+        for i, m in enumerate((80, 200, 140, 1)):
+            hh.setSectionResizeMode(
+                i, QHeaderView.ResizeToContents if m != 1
+                else QHeaderView.Stretch)
+        v.addWidget(self.plugin_table, 1)
+
+        self._fill_plugin_table()
+
+        # ---- 第一行：启用/禁用/打开目录 ----
+        hb = QHBoxLayout()
+        b_en = QPushButton("启用")
+        b_en.clicked.connect(lambda: self._toggle_plugin(True))
+        hb.addWidget(b_en)
+        b_dis = QPushButton("禁用")
+        b_dis.clicked.connect(lambda: self._toggle_plugin(False))
+        hb.addWidget(b_dis)
+        b_open = QPushButton("打开 plugins 文件夹")
+        b_open.clicked.connect(self._open_plugins_here)
+        hb.addWidget(b_open)
+        v.addLayout(hb)
+
+        # ---- 第二行：添加 ----
+        hb2 = QHBoxLayout()
+        b_add = QPushButton("＋ 添加插件")
+        b_add.setToolTip("从 Modrinth 搜索并安装 Paper 插件")
+        b_add.clicked.connect(self._add_plugin_here)
+        hb2.addWidget(b_add)
+        hb2.addStretch(1)
+        v.addLayout(hb2)
+
+        # ---- 插件配置板块（基础版）----
+        v.addWidget(self._plugin_cfg_box())
+        return w
+
+    def _fill_plugin_table(self):
+        self.plugin_table.setRowCount(0)
+        for p in self.plugins:
+            r = self.plugin_table.rowCount()
+            self.plugin_table.insertRow(r)
+            self.plugin_table.setItem(r, 0, QTableWidgetItem(
+                "启用" if p.get("enabled", True) else "禁用"))
+            self.plugin_table.setItem(r, 1,
+                                      QTableWidgetItem(p.get("name", "?")))
+            self.plugin_table.setItem(r, 2,
+                                      QTableWidgetItem(p.get("version", "")))
+            self.plugin_table.setItem(r, 3, QTableWidgetItem(
+                os.path.basename(p.get("path", ""))))
+
+    def _cur_plugin(self):
+        i = self.plugin_table.currentRow()
+        if 0 <= i < len(self.plugins):
+            return self.plugins[i]
+        return None
+
+    def _toggle_plugin(self, enable):
+        p = self._cur_plugin()
+        if not p:
+            QMessageBox.information(self, "提示", "先选中一个插件")
+            return
+        try:
+            modman.set_enabled(p["path"], enable)
+            self._need_rescan = True
+            self._refresh_plugins_here()
+            QMessageBox.information(
+                self, "完成",
+                "已%s: %s\n\n重启服务器后生效。"
+                % ("启用" if enable else "禁用", p.get("name")))
+        except Exception as e:
+            QMessageBox.critical(self, "失败", repr(e))
+
+    def _open_plugins_here(self):
+        _open_in_explorer(self._plugins_dir_here())
+
+    def _add_plugin_here(self):
+        """在这里直接搜装插件（装完自动刷新列表）。"""
+        dlg = _themed(ModBrowseDialog(self.entry, self, mode="plugins"))
+        dlg.exec()
+        self._refresh_plugins_here()
+
+    def _refresh_plugins_here(self):
+        try:
+            self.plugins = modman.scan_mods_dir(self._plugins_dir_here())
+        except Exception:
+            self.plugins = []
+        self._fill_plugin_table()
+
+    # ---------- 插件配置板块（基础版，★ V1.2.0） ----------
+    def _plugin_cfg_box(self):
+        """检测 EssentialsX / LuckPerms，提供一键生成基础配置。"""
+        gb = QGroupBox("插件配置（基础版）")
+        gv = QVBoxLayout(gb)
+
+        tip = QLabel(
+            "检测到常用插件时可一键生成基础配置。\n"
+            "更完整的配置会在插件首次启动时自动补齐；"
+            "已存在的配置文件不会被覆盖。")
+        tip.setWordWrap(True)
+        tip.setStyleSheet(_muted())
+        gv.addWidget(tip)
+
+        found = False
+        pd = self._plugins_dir_here()
+        names = []
+        try:
+            if os.path.isdir(pd):
+                names = [f.lower() for f in os.listdir(pd)
+                         if f.lower().endswith(".jar")
+                         or f.lower().endswith(".jar.disabled")]
+        except Exception:
+            names = []
+
+        def _has(prefix):
+            for n in names:
+                if n.startswith(prefix):
+                    return True
+            return False
+
+        # EssentialsX
+        if _has("essentialsx"):
+            found = True
+            row = QHBoxLayout()
+            row.addWidget(QLabel("已安装 <b>EssentialsX</b>"))
+            row.addStretch(1)
+            b = QPushButton("生成基础配置")
+            b.clicked.connect(self._gen_essentialsx_cfg)
+            row.addWidget(b)
+            gv.addLayout(row)
+
+        # LuckPerms
+        if _has("luckperms"):
+            found = True
+            row = QHBoxLayout()
+            row.addWidget(QLabel("已安装 <b>LuckPerms</b>"))
+            row.addStretch(1)
+            b = QPushButton("生成基础配置")
+            b.clicked.connect(self._gen_luckperms_cfg)
+            row.addWidget(b)
+            gv.addLayout(row)
+
+        if not found:
+            gv.addWidget(QLabel(
+                "（没检测到 EssentialsX / LuckPerms。"
+                "装好插件后回到这里可一键生成配置。）"))
+
+        row = QHBoxLayout()
+        b_open = QPushButton("打开插件配置文件夹")
+        b_open.setToolTip("打开服务器 config/ 目录（所有插件的配置都在这里）")
+        b_open.clicked.connect(
+            lambda: _open_in_explorer(os.path.join(
+                self.server_dir, "config")))
+        row.addWidget(b_open)
+        row.addStretch(1)
+        gv.addLayout(row)
+        return gb
+
+    def _gen_plugin_cfg(self, sub, filename, content, label):
+        """生成插件基础配置（不存在才写）。"""
+        cfg_dir = os.path.join(self.server_dir, "config", sub)
+        try:
+            os.makedirs(cfg_dir, exist_ok=True)
+        except Exception as e:
+            QMessageBox.critical(self, "失败", repr(e))
+            return
+        path = os.path.join(cfg_dir, filename)
+        if os.path.isfile(path):
+            QMessageBox.information(
+                self, "已存在",
+                "%s 的配置文件已经存在：\n%s\n\n"
+                "为避免覆盖你的自定义配置，本次没有写入。"
+                % (label, path))
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+            QMessageBox.information(
+                self, "完成",
+                "已生成 %s 基础配置：\n%s\n\n"
+                "插件首次启动时会把其余配置项自动补齐。"
+                % (label, path))
+        except Exception as e:
+            QMessageBox.critical(self, "失败", repr(e))
+
+    def _gen_essentialsx_cfg(self):
+        self._gen_plugin_cfg(
+            "EssentialsX", "config.yml",
+            "# EssentialsX 基础配置（由 MCSM 生成）\n"
+            "# 更完整的字段会在插件首次启动时自动补齐。\n"
+            "ops: []\n"
+            "motd: '&a欢迎来到本服务器'\n"
+            "hide-display-name-in-vanish: false\n",
+            "EssentialsX")
+
+    def _gen_luckperms_cfg(self):
+        self._gen_plugin_cfg(
+            "LuckPerms", "luckperms.yml",
+            "# LuckPerms 基础配置（由 MCSM 生成）\n"
+            "# 更完整的字段会在插件首次启动时自动补齐。\n"
+            "storage-method: h2\n"
+            "sync-min-interval: 30\n",
+            "LuckPerms")
+
     # ---------- 模组页签的新动作 ----------
     def _mods_dir_here(self):
         d = os.path.join(self.server_dir, "mods")
@@ -1858,7 +2520,7 @@ class ServerConfigDialog(QDialog):
                 "Paper 装的是插件不是模组。\n\n"
                 "要用模组的话，得把核心换成 Fabric / Forge。")
             return
-        dlg = _themed(ModrinthDialog(self.entry, self))
+        dlg = _themed(ModBrowseDialog(self.entry, self))
         dlg.exec()
         self._refresh_mods_here()
 
@@ -2281,6 +2943,87 @@ class ServerConfigDialog(QDialog):
             lbl.setText(msg)
         QMessageBox.information(self, "已保存", msg)
 
+    # ---------------- 登录页签（★ V1.3.0 多源共存） ----------------
+    def _auth_tab(self):
+        w = QWidget(self)
+        self._w_auth = w
+        v = QVBoxLayout(w)
+
+        g1 = QGroupBox("验证模式")
+        f = QFormLayout(g1)
+        self.cb_auth_mode = QComboBox()
+        self.cb_auth_mode.addItem("正版验证 (Mojang)", "mojang")
+        self.cb_auth_mode.addItem("离线模式 (无验证)", "offline")
+        self.cb_auth_mode.addItem(
+            "多源共存 (正版 + 第三方外置登录)", "multi")
+        cur = self.saved.get("auth_type", "offline")
+        i = self.cb_auth_mode.findData(cur)
+        self.cb_auth_mode.setCurrentIndex(i if i >= 0 else 1)
+        f.addRow("验证模式:", self.cb_auth_mode)
+        v.addWidget(g1)
+
+        g2 = QGroupBox("第三方源配置（仅『多源共存』生效）")
+        self._w_auth_g2 = g2
+        f2 = QFormLayout(g2)
+        self.cb_auth_source = QComboBox()
+        self.cb_auth_source.addItem(
+            "LittleSkin", "https://littleskin.cn/api/yggdrasil")
+        self.cb_auth_source.addItem(
+            "MUA Union",
+            "https://skin.mualliance.ltd/api/union/yggdrasil")
+        self.cb_auth_source.addItem("自定义", "")
+        self.cb_auth_source.currentIndexChanged.connect(
+            self._auth_source_changed)
+        f2.addRow("皮肤站源:", self.cb_auth_source)
+        self.ed_auth_url = QLineEdit()
+        self.ed_auth_url.setPlaceholderText(
+            "https://你的皮肤站/api/yggdrasil")
+        f2.addRow("Yggdrasil API 地址:", self.ed_auth_url)
+        v.addWidget(g2)
+
+        tip = QLabel(
+            "多源共存 = 正版玩家直接进，第三方皮肤站（LittleSkin / "
+            "MUA Union 等）玩家也能进。\n\n"
+            "首次启动服务器时本软件会自动：\n"
+            "· Paper 服：下载 MultiLogin 插件到 plugins/\n"
+            "· Forge / Fabric / NeoForge 服：下载 MultiYggdrasil "
+            "模组到 mods/ 并生成 multi-yggdrasil.ini\n"
+            "· 把 server.properties 的 online-mode 设为 true")
+        tip.setWordWrap(True)
+        tip.setStyleSheet(_muted())
+        v.addWidget(tip)
+
+        v.addStretch(1)
+
+        # 从已保存的配置初始化 API 地址
+        url = (self.saved.get("auth_url") or "").strip()
+        if url:
+            i = self.cb_auth_source.findData(url)
+            if i >= 0:
+                self.cb_auth_source.setCurrentIndex(i)
+                self.ed_auth_url.setText(url)
+            else:
+                self.cb_auth_source.setCurrentIndex(2)  # 自定义
+                self.ed_auth_url.setText(url)
+        else:
+            self._auth_source_changed()
+
+        self.cb_auth_mode.currentIndexChanged.connect(
+            self._auth_mode_changed)
+        self._auth_mode_changed()
+        return w
+
+    def _auth_source_changed(self):
+        d = self.cb_auth_source.currentData() or ""
+        if d:
+            self.ed_auth_url.setText(d)
+
+    def _auth_mode_changed(self):
+        multi = (self.cb_auth_mode.currentData() == "multi")
+        g2 = getattr(self, "_w_auth_g2", None)
+        if g2 is not None:
+            g2.setVisible(multi)
+
     # ---------------- 备份页签 ----------------
     def _backup_tab(self):
         w = QWidget(self)
@@ -2308,8 +3051,20 @@ class ServerConfigDialog(QDialog):
         v1.addWidget(self.bk_list)
         v.addWidget(g1)
 
-        self.bk_zip = QCheckBox("压缩成 zip（省空间，但慢）")
-        v.addWidget(self.bk_zip)
+        # ★ V1.1.0：备份格式下拉（默认文件夹）
+        gfmt = QGroupBox("备份格式")
+        fgf = QHBoxLayout(gfmt)
+        self.cb_backup_format = QComboBox()
+        self.cb_backup_format.addItem(
+            "文件夹（速度快，占用空间大）", "folder")
+        self.cb_backup_format.addItem(
+            "ZIP（速度慢，省空间）", "zip")
+        cur_fmt = self.saved.get("backup_format", "folder")
+        i_fmt = self.cb_backup_format.findData(cur_fmt)
+        self.cb_backup_format.setCurrentIndex(i_fmt if i_fmt >= 0 else 0)
+        fgf.addWidget(self.cb_backup_format, 1)
+        fgf.addWidget(QLabel("备份与『立即备份』都按这个格式来"))
+        v.addWidget(gfmt)
 
         hb = QHBoxLayout()
         b_now = QPushButton("立即备份")
@@ -2336,7 +3091,7 @@ class ServerConfigDialog(QDialog):
         try:
             r = backup.backup_world(
                 w["path"], sd, note="",
-                compress=self.bk_zip.isChecked())
+                compress=(self.cb_backup_format.currentData() == "zip"))
             QMessageBox.information(
                 self, "完成",
                 "已备份（%.1f MB）:\n%s"
@@ -2345,7 +3100,9 @@ class ServerConfigDialog(QDialog):
             QMessageBox.critical(self, "失败", repr(e))
 
     def _open_backup_dialog(self):
-        BackupDialog(self.entry, self).exec()
+        BackupDialog(self.entry, self,
+                     backup_format=self.cb_backup_format.currentData()
+                     or "folder").exec()
         self._need_rescan = True
 
     def _whitelist_tab(self):
@@ -2420,9 +3177,10 @@ class ServerConfigDialog(QDialog):
         t = props.KEY_TYPE.get(key, "str")
         cur = self.values.get(key, "")
         if t == "bool":
-            cb = QComboBox()
-            cb.addItems(["启用", "禁用"])
-            cb.setCurrentText(props.display(key, cur) if cur else "启用")
+            # ★ V1.5.0：布尔值用 QCheckBox（原来下拉"启用/禁用"）
+            cb = QCheckBox("启用")
+            cb.setChecked(str(cur).strip().lower()
+                          in ("true", "1", "yes", "on"))
             return cb
         if t == "enum":
             cb = QComboBox()
@@ -2453,7 +3211,7 @@ class ServerConfigDialog(QDialog):
             return None
         t = props.KEY_TYPE.get(key, "str")
         if t == "bool":
-            return props.from_display(key, w.currentText())
+            return "true" if w.isChecked() else "false"
         if t == "enum":
             d = w.currentData()
             return d if d is not None else w.currentText()
@@ -2462,9 +3220,147 @@ class ServerConfigDialog(QDialog):
         return w.text()
 
     def _sync_aikar_mem(self, on):
-        """勾选 Aikar 时把最大内存同步为最小内存（Aikar 的前提）。"""
+        """勾选 Aikar 时把最大内存同步为最小内存（Aikar 的前提）。
+
+        ★ V1.6.1：两个框单位可能不同，先统一换算成整数 MB 再写入，
+          防止把"G 数值"直接当"MB 数值"用。
+        """
         if on:
-            self.sp_xmx.setValue(self.sp_xms.value())
+            mb = _mem_mb_of(self.sp_xms, self.cb_xms_unit)
+            _set_mem_mb(self.sp_xmx, self.cb_xmx_unit, mb)
+
+    def _init_mem_spin(self, sp, cb, mb):
+        """★ V1.6.1：智能回显 —— saved 值是整数 MB。
+
+        能被 1024 整除（且换算后 <=64）→ 以 G 展示（如 4096 -> 4）；
+        除不尽（如 3072）→ 以 MB 展示原值。
+        """
+        if mb > 0 and mb % 1024 == 0 and (mb // 1024) <= 64:
+            cb.setCurrentIndex(cb.findData("g"))
+            sp.setDecimals(1)
+            sp.setSingleStep(0.5)
+            sp.setRange(1.0, 64.0)
+            sp.setSuffix(" G")
+            sp.setValue(round(mb / 1024.0, 1))
+        else:
+            cb.setCurrentIndex(cb.findData("mb"))
+            sp.setDecimals(0)
+            sp.setSingleStep(512)
+            lo = 512
+            if mb and mb < lo:
+                lo = mb  # 历史小值原样回显，防止被夹到 512
+            sp.setRange(lo, 65536)
+            sp.setSuffix(" MB")
+            sp.setValue(int(mb))
+
+    # ============ V0.5.0：性能优化（Paper/Spigot YAML）============
+    def _yaml_tab(self):
+        """把 YAML 核心优化项做成可视化开关。"""
+        try:
+            import yaml  # noqa: F401
+            self._yaml_ok = True
+        except Exception:
+            self._yaml_ok = False
+
+        w = QWidget()
+        self._yaml_root = w  # ★ 挂到 self 防止页签被回收后控件销毁
+        v = QVBoxLayout(w)
+
+        self._yaml_path = _yaml_path_for(self.server_dir)
+        self._yaml_data = {}
+        if self._yaml_path:
+            try:
+                import yaml
+                with open(self._yaml_path, "r",
+                          encoding="utf-8") as f:
+                    self._yaml_data = yaml.safe_load(f) or {}
+            except Exception:
+                self._yaml_data = {}
+        self._yaml_widgets = {}
+        self._yaml_dirty = False
+
+        if not self._yaml_ok:
+            v.addWidget(QLabel("未安装 pyyaml，请先运行：\n"
+                               "pip install pyyaml"))
+            return w
+        if not self._yaml_path:
+            lbl = QLabel("未找到 Paper/Spigot 配置文件。\n"
+                         "仅 Paper / Spigot 服务端支持此项优化，"
+                         "请先初始化对应核心。")
+            lbl.setWordWrap(True)
+            lbl.setStyleSheet(_muted())
+            v.addWidget(lbl)
+            return w
+
+        tip = QLabel("配置文件：%s\n"
+                     "改动会在点『保存』时写回 YAML，原注释全部保留。"
+                     % self._yaml_path)
+        tip.setWordWrap(True)
+        tip.setStyleSheet(_muted())
+        v.addWidget(tip)
+
+        f = QFormLayout()
+        f.setLabelAlignment(Qt.AlignRight)
+        for key, path, typ, name, default, desc in YAML_ITEMS:
+            cur = _yaml_get(self._yaml_data, path)
+            if typ == "bool":
+                ck = QCheckBox()
+                ck.setChecked(bool(cur if cur is not None else default))
+                ck.setToolTip(desc)
+                ck.toggled.connect(self._yaml_mark_dirty)
+                self._yaml_widgets[key] = ck
+                f.addRow(QLabel(name), ck)
+            else:
+                sp = QSpinBox()
+                sp.setRange(0, 10000)
+                sp.setValue(int(cur if cur is not None else default))
+                sp.setToolTip(desc)
+                sp.valueChanged.connect(self._yaml_mark_dirty)
+                self._yaml_widgets[key] = sp
+                f.addRow(QLabel(name), sp)
+        v.addLayout(f)
+        return w
+
+    def _yaml_mark_dirty(self):
+        self._yaml_dirty = True
+
+    def _yaml_save(self):
+        """把性能优化页签的改动写回 YAML 文件（有改动才写）。
+
+        ★ V1.5.0：行级原位替换，保留原有注释；行级替换失败
+        才回退 safe_dump（极端情况注释可能丢失）。
+        """
+        if not getattr(self, "_yaml_ok", False):
+            return
+        if not getattr(self, "_yaml_path", None):
+            return
+        if not self._yaml_dirty:
+            return
+        import yaml
+        edits = []
+        for key, path, typ, _name, _default, _desc in YAML_ITEMS:
+            wd = self._yaml_widgets.get(key)
+            if wd is None:
+                continue
+            val = wd.isChecked() if typ == "bool" else wd.value()
+            edits.append((path.split("."), val))
+        try:
+            _yaml_patch_preserve(self._yaml_path, edits)
+            return
+        except Exception:
+            pass
+        # 兜底：行级替换失败才整体重写
+        data = dict(self._yaml_data or {})
+        for key, path, typ, _name, _default, _desc in YAML_ITEMS:
+            wd = self._yaml_widgets.get(key)
+            if wd is None:
+                continue
+            val = wd.isChecked() if typ == "bool" else wd.value()
+            _yaml_set(data, path, val)
+        with open(self._yaml_path, "w", encoding="utf-8",
+                  newline="") as f:
+            yaml.safe_dump(data, f, allow_unicode=True,
+                           default_flow_style=False, sort_keys=False)
 
     def do_save(self):
         jpath = self.java_pick.path()
@@ -2491,15 +3387,23 @@ class ServerConfigDialog(QDialog):
             QMessageBox.critical(self, "保存失败", repr(e))
             return
 
-        # 生成 run.bat
+        # ★ V0.5.0：把性能优化页签的改动写回 YAML
+        try:
+            self._yaml_save()
+        except Exception as e:
+            QMessageBox.warning(self, "YAML 保存失败", repr(e))
+
+        # 生成 run.bat（★ V1.6.1：统一整数 MB，保持 -Xms4096M 格式）
         sd = self.entry.get("server_dir") or self.entry["folder"]
         L = install.find_launch(sd)
         launch_mode = L.get("launch") or "jar"
         jar = L.get("jar") or ((self.entry.get("jars") or ["server.jar"])[0])
+        xms_mb = _mem_mb_of(self.sp_xms, self.cb_xms_unit)
+        xmx_mb = _mem_mb_of(self.sp_xmx, self.cb_xmx_unit)
         bat = builder.build_run_bat(
             jpath, jar,
-            xms="%dM" % self.sp_xms.value(),
-            xmx="%dM" % self.sp_xmx.value(),
+            xms="%dM" % xms_mb,
+            xmx="%dM" % xmx_mb,
             launch=launch_mode, args_rel=L.get("args_rel"),
             pause=self.cb_pause.currentData() or "error",
             aikar=self.chk_aikar.isChecked())
@@ -2513,13 +3417,21 @@ class ServerConfigDialog(QDialog):
 
         self.result_info = {
             "java": jpath,
-            "xms": self.sp_xms.value(),
-            "xmx": self.sp_xmx.value(),
+            "xms": xms_mb,
+            "xmx": xmx_mb,
             "pause": self.cb_pause.currentData() or "error",
             "aikar": self.chk_aikar.isChecked(),  # ★ 保存 Aikar 开关
             "auto_restart": self.chk_auto_restart.isChecked(),
+            "auto_restart_time": (self.time_restart.time().toString("HH:mm")
+                                  if self.chk_auto_restart_time.isChecked()
+                                  else ""),  # ★ V0.5.0 每日定时重启
             "auto_backup": self.chk_auto_backup.isChecked(),
             "backup_interval": self.sp_bk_interval.value(),
+            "backup_format": (self.cb_backup_format.currentData()
+                              or "folder"),  # ★ V1.1.0 备份格式
+            # ★ V1.3.0：登录验证
+            "auth_type": (self.cb_auth_mode.currentData() or "offline"),
+            "auth_url": self.ed_auth_url.text().strip(),
         }
         tail = ("\n并已生成 run.bat" if bp else "")
         QMessageBox.information(self, "已保存",
@@ -3515,8 +4427,11 @@ class AnalyzeDialog(QDialog):
         # 详情
         self.detail = QTextEdit()
         self.detail.setReadOnly(True)
-        self.detail.setMinimumHeight(190)
+        self.detail.setMinimumHeight(150)
         v.addWidget(self.detail, 1)
+
+        # ★ V1.0.0 AI 深度诊断区
+        self._ai_init(v)
 
         v.addWidget(QLabel(
             "说明：这是离线规则匹配（不联网、不需要 AI）。"
@@ -3651,6 +4566,130 @@ class AnalyzeDialog(QDialog):
                 return
         try:
             subprocess.Popen(["explorer", self.server_dir])
+        except Exception:
+            pass
+
+    # ============ V1.0.0 AI 深度诊断 ============
+
+    def _ai_init(self, v):
+        """AI 深度诊断 UI：Key + 服务商 + 模型 + 按钮 + Markdown 输出。"""
+        from .core import ai_diag
+        gb = QGroupBox("AI 深度诊断（联网）")
+        g = QVBoxLayout(gb)
+
+        cfg = ai_diag.load_cfg()
+
+        row1 = QHBoxLayout()
+        self.ai_key = QLineEdit(cfg.get("key", ""))
+        self.ai_key.setPlaceholderText("OpenAI / DeepSeek / Kimi 兼容 API Key")
+        self.ai_key.setEchoMode(QLineEdit.Password)
+        row1.addWidget(QLabel("API Key:"))
+        row1.addWidget(self.ai_key, 1)
+
+        self.ai_provider = QComboBox()
+        for name, base, model in ai_diag.PROVIDERS:
+            self.ai_provider.addItem(name)
+        self.ai_provider.setCurrentIndex(
+            min(cfg.get("provider", 0), len(ai_diag.PROVIDERS) - 1))
+        self.ai_provider.currentIndexChanged.connect(self._ai_provider_changed)
+        row1.addWidget(QLabel("服务商:"))
+        row1.addWidget(self.ai_provider)
+
+        self.ai_model = QLineEdit(cfg.get("model", ""))
+        self.ai_model.setPlaceholderText("模型名（如 gpt-4o-mini / deepseek-chat）")
+        row1.addWidget(QLabel("模型:"))
+        row1.addWidget(self.ai_model)
+        g.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        self.ai_base = QLineEdit(cfg.get("base", ""))
+        self.ai_base.setPlaceholderText("接口地址（留空用预设，自定义时填 https://.../v1）")
+        row2.addWidget(QLabel("接口地址:"))
+        row2.addWidget(self.ai_base, 1)
+
+        self.btn_ai = QPushButton("AI 深度诊断")
+        self.btn_ai.clicked.connect(self._ai_diag)
+        row2.addWidget(self.btn_ai)
+        g.addLayout(row2)
+
+        self.ai_status = QLabel("提取 latest.log 最后 200 行报错，交给大模型分析")
+        self.ai_status.setStyleSheet(_muted())
+        g.addWidget(self.ai_status)
+
+        self.ai_out = QTextEdit()
+        self.ai_out.setReadOnly(True)
+        self.ai_out.setMinimumHeight(140)
+        self.ai_out.setPlaceholderText(
+            "AI 诊断结果（Markdown）会显示在这里")
+        g.addWidget(self.ai_out)
+
+        v.addWidget(gb, 1)
+        self._ai_provider_changed(self.ai_provider.currentIndex())
+
+    def _ai_provider_changed(self, idx):
+        """切换服务商时自动带出预设的接口地址与模型。"""
+        try:
+            from .core import ai_diag
+            name, base, model = ai_diag.PROVIDERS[idx]
+            if base:
+                self.ai_base.setText(base)
+            if model:
+                self.ai_model.setText(model)
+        except Exception:
+            pass
+
+    def _ai_diag(self):
+        """启动后台线程做 AI 诊断（网络请求绝不卡界面）。"""
+        from .core import ai_diag
+        key = self.ai_key.text().strip()
+        if not key:
+            QMessageBox.warning(self, "缺 API Key",
+                                "请先填写 API Key（OpenAI / DeepSeek / Kimi 兼容）")
+            return
+        base = self.ai_base.text().strip()
+        model = self.ai_model.text().strip()
+        # 持久化（Key 存在本机 ai.json）
+        try:
+            ai_diag.save_cfg(key, base, model, self.ai_provider.currentIndex())
+        except Exception:
+            pass
+
+        self.btn_ai.setEnabled(False)
+        self.ai_out.clear()
+        self.ai_status.setText("正在提取报错日志 ...")
+
+        def _job(on_log=None):
+            rep = ai_diag.collect_errors(self.server_dir)
+            if not rep["path"]:
+                raise ValueError("找不到 latest.log（服务器还没启动过？）")
+            body = ("以下是 Minecraft 服务器日志中提取的报错片段"
+                    "（共 %d 行，取最后 %d 行）：\n\n%s"
+                    % (rep["total"], len(rep["lines"]),
+                       "\n".join(rep["lines"])))
+            return ai_diag.call_llm(key, base, model, body,
+                                    on_log=on_log)
+
+        w = Worker(_job)
+        _track(self, w)
+        w.log.connect(self._ai_log)
+        w.done.connect(self._on_ai_done)
+        w.start()
+
+    def _ai_log(self, m):
+        try:
+            self.ai_status.setText(str(m))
+        except Exception:
+            pass
+
+    def _on_ai_done(self, ok, res):
+        try:
+            self.btn_ai.setEnabled(True)
+            if ok:
+                self.ai_out.setMarkdown(str(res))
+                self.ai_status.setText("诊断完成（结果可复制）")
+            else:
+                self.ai_status.setText("诊断失败")
+                self.ai_out.setPlainText("AI 诊断失败：%s" % res)
         except Exception:
             pass
 
@@ -4351,6 +5390,677 @@ def _fmt_num(n):
     return str(n)
 
 
+# =========================================================
+#  PCL2 风格模组浏览安装（v0.3.0 新增）
+# =========================================================
+# 不再用枯燥的表格：每个模组是一张卡片（图标 + 标题 + 简介），
+# 勾选后点"安装"直接走 install.install_mods 的 4 线程并发下载
+# （CDN 加速 + 断点续传 + Fractureiser 木马扫描）。
+# 版本和加载器在初始化时已经定死（从服务器配置进入），
+# 这里不再让用户选 —— 后台请求强制 facets：
+#   versions:<mc_version> + categories:<loader>
+def _fetch_icon_bytes(url, timeout=15):
+    """下载一张模组图标（后台线程调用，返回原始字节）。"""
+    if not url:
+        return None
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "MCServerManager/0.1"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read()
+    except Exception:
+        return None
+
+
+class ModBrowseDialog(QDialog):
+    """PCL2 风格模组浏览：卡片视图 + 勾选安装。
+
+    两种模式：
+      · select_only=False（默认，配置页用）：
+        勾选后点「安装选中」，直接并发下载到服务器 mods 目录。
+      · select_only=True（初始化向导用）：
+        只做选择，点「确定选择」返回勾选的 slug 列表，
+        实际下载由初始化流程统一执行（有进度/失败重试）。
+    """
+
+    def closeEvent(self, e):
+        """关闭前先停掉后台线程（不然对话框销毁线程还在跑 = 闪退）。"""
+        try:
+            _stop_threads(self)
+        except Exception:
+            pass
+        try:
+            super().closeEvent(e)
+        except Exception:
+            pass
+
+    def done(self, code):
+        # 确定/接受时把勾选的 slug 存到 self.selected，调用方读取
+        if code == QDialog.Accepted:
+            try:
+                self.selected = self._checked_slugs()
+            except Exception:
+                self.selected = []
+        super().done(code)
+
+    def __init__(self, entry, parent=None, select_only=False,
+                 mode="mods"):
+        super().__init__(parent)
+        try:
+            from .app import app_icon
+            self.setWindowIcon(app_icon())
+        except Exception:
+            pass
+        self.entry = entry
+        self.select_only = bool(select_only)
+        # ★ V1.2.0：mode="plugins" 时数据源切到 Modrinth
+        #   project_type=plugin + categories=paper，装进 plugins/ 目录
+        self.mode = mode or "mods"
+        self.is_plugins = (self.mode == "plugins")
+        kw = "插件" if self.is_plugins else "模组"
+        self.setWindowTitle(
+            ("选择%s" % kw if self.select_only else "浏览%s" % kw)
+            + " - %s" % entry.get("name", ""))
+        self.resize(960, 680)
+
+        self.server_dir = entry.get("server_dir") or entry["folder"]
+        self.mc_version = entry.get("version") or ""
+        if self.is_plugins:
+            # ★ 插件视图只服务于 Paper 服，加载器强制 paper
+            self.loader = "paper"
+        else:
+            self.loader = (entry.get("loader") or "").lower()
+        if self.loader == "unknown":
+            self.loader = ""
+        self.target_dir = os.path.join(
+            self.server_dir, "plugins" if self.is_plugins else "mods")
+
+        self.installed = self._installed_slugs()
+        self.offset = 0
+        self.total = 0
+        self.hits = []
+        self.worker = None
+        self.selected = []
+        self.builtin_mode = True  # ★ 打开默认内置推荐
+        self._slug_title = {}
+
+        v = QVBoxLayout(self)
+
+        # ---- 第一行：固定的版本 / 加载器（初始化时已定死）----
+        h = QHBoxLayout()
+        h.addWidget(QLabel(
+            "版本 <b>%s</b>　加载器 <b>%s</b>"
+            % (self.mc_version or "未知", self.loader or "未知")))
+        h.addStretch(1)
+        self.lbl_mirror = QLabel("")
+        self.lbl_mirror.setStyleSheet(_muted())
+        h.addWidget(self.lbl_mirror)
+        self.btn_mirror = QPushButton("镜像源设置")
+        self.btn_mirror.setToolTip(
+            "MCIM 公益镜像，默认『自动』：先试镜像，不通退回官方。")
+        self.btn_mirror.clicked.connect(self.ask_mirror)
+        h.addWidget(self.btn_mirror)
+        self.btn_probe = QPushButton("测一下哪个能用")
+        self.btn_probe.clicked.connect(self.do_probe)
+        h.addWidget(self.btn_probe)
+        # 仅选择模式：隐藏网络调试按钮，保持界面干净
+        if self.select_only:
+            self.btn_mirror.hide()
+            self.btn_probe.hide()
+        v.addLayout(h)
+
+        # ---- 第二行：搜索 + 分类 + 排序 ----
+        h = QHBoxLayout()
+        self.ed_q = QLineEdit()
+        self.ed_q.setPlaceholderText(
+            "输入关键词搜 Modrinth 全库（如 %s）"
+            % ("essentialsx" if self.is_plugins else "sodium"))
+        self.ed_q.returnPressed.connect(self.search)
+        h.addWidget(self.ed_q, 1)
+        h.addWidget(QLabel("分类:"))
+        self.cb_cat = QComboBox()
+        self.cb_cat.addItem("(全部)", "")
+        for slug, lab in modman.CATEGORIES:
+            self.cb_cat.addItem(lab, slug)
+        h.addWidget(self.cb_cat)
+        h.addWidget(QLabel("排序:"))
+        self.cb_sort = QComboBox()
+        for k, lab in modman.SORTS:
+            self.cb_sort.addItem(lab, k)
+        i = self.cb_sort.findData("downloads")
+        if i >= 0:
+            self.cb_sort.setCurrentIndex(i)
+        h.addWidget(self.cb_sort)
+        self.btn_go = QPushButton("搜索")
+        self.btn_go.clicked.connect(self.search)
+        h.addWidget(self.btn_go)
+        v.addLayout(h)
+        # ★ 切分类 / 切排序 = 进全库搜索（内置推荐页不响应）
+        self.cb_cat.currentIndexChanged.connect(self.search)
+        self.cb_sort.currentIndexChanged.connect(self.search)
+
+        # ---- 中部：PCL2 风格列表（左图右文卡片）----
+        self.list = QListWidget()
+        self.list.setViewMode(QListView.ListMode)  # ★ 列表，不是网格
+        self.list.setSelectionMode(QAbstractItemView.NoSelection)
+        self.list.setUniformItemSizes(True)
+        self.list.setSpacing(4)
+        v.addWidget(self.list, 1)
+
+        # ---- 底部：分页 + 已选计数 + 操作 ----
+        hp = QHBoxLayout()
+        self.btn_prev = QPushButton("上一页")
+        self.btn_prev.clicked.connect(lambda: self._page(-1))
+        hp.addWidget(self.btn_prev)
+        self.lbl_page = QLabel("第 1 页")
+        hp.addWidget(self.lbl_page)
+        self.btn_next = QPushButton("下一页")
+        self.btn_next.clicked.connect(lambda: self._page(1))
+        hp.addWidget(self.btn_next)
+        hp.addStretch(1)
+        self.btn_adv = QPushButton("高级搜索")
+        self.btn_adv.setToolTip(
+            "打开旧版表格搜索：可切换 CurseForge、GitHub 安装等")
+        self.btn_adv.clicked.connect(self.open_advanced)
+        hp.addWidget(self.btn_adv)
+        if self.select_only:
+            self.btn_adv.hide()
+        v.addLayout(hp)
+
+        hb = QHBoxLayout()
+        self.btn_inst = QPushButton(
+            ("确定选择" if self.select_only else "安装选中") + " (0)")
+        self.btn_inst.setToolTip(
+            "4 线程并发下载 + CDN 加速 + 断点续传 + 木马扫描")
+        self.btn_inst.clicked.connect(self.do_install)
+        hb.addWidget(self.btn_inst)
+        self.btn_all = QPushButton("全选")
+        self.btn_all.clicked.connect(lambda: self._set_all(True))
+        hb.addWidget(self.btn_all)
+        self.btn_none = QPushButton("全不选")
+        self.btn_none.clicked.connect(lambda: self._set_all(False))
+        hb.addWidget(self.btn_none)
+        hb.addStretch(1)
+        self.lbl_stat = QLabel("")
+        self.lbl_stat.setStyleSheet(_muted())
+        hb.addWidget(self.lbl_stat)
+        v.addLayout(hb)
+
+        # ---- 日志 ----
+        self.log = LogView()
+        self.log.setReadOnly(True)
+        self.log.setMaximumHeight(100)
+        v.addWidget(self.log)
+
+        bb = QDialogButtonBox(QDialogButtonBox.Close)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+
+        # 打开先浏览一批（按当前服务器版本 + 加载器）
+        QTimer.singleShot(60, self.search)
+
+    # ---------- 数据 ----------
+    def _installed_slugs(self):
+        """已装模组/插件的名字集合（用来打『已装』标记）。"""
+        out = set()
+        try:
+            for m in modman.scan_mods_dir(self.target_dir):
+                n = (m.get("name") or "").strip().lower()
+                if n:
+                    out.add(n)
+                fn = (m.get("filename") or "").lower()
+                if fn:
+                    out.add(fn.replace(".jar", "")
+                            .replace(".disabled", ""))
+        except Exception:
+            pass
+        return out
+
+    def _params(self):
+        return {
+            "query": self.ed_q.text().strip(),
+            "category": self.cb_cat.currentData() or None,
+            "sort": self.cb_sort.currentData() or "downloads",
+            "offset": self.offset,
+        }
+
+    def search(self):
+        self.offset = 0
+        self._run()
+
+    def _page(self, d):
+        new = self.offset + d * 20
+        if new < 0 or (self.total and new >= self.total):
+            return
+        self.offset = new
+        self._run()
+
+    def _run(self):
+        self.btn_go.setEnabled(False)
+        self.btn_inst.setEnabled(False)
+        self.lbl_stat.setText("搜索中 ...")
+        self.worker = _track(self, Worker(
+            self._do_search, self._params(), self))
+        self.worker.log.connect(self._log)
+        self.worker.done.connect(self._on_search)
+        self.worker.start()
+
+    def _do_search(self, query="", category=None, sort="downloads",
+                   offset=0, on_log=None):
+        """后台搜索。
+
+        ★ v0.3.0 双模式：
+          模式1 内置推荐（本地秒出）——仅当 关键词为空 且 没切分类
+          且 排序还是默认(downloads) 时显示；
+          模式2 全库搜索——用户输入关键词、点搜索、切了分类、
+          或改了排序，立即走 Modrinth API（版本/加载器强制当前服的）。
+        """
+        q = (query or "").strip()
+        # ★ 内置推荐只对模组模式有效；插件模式没有内置清单，
+        #   直接走 Modrinth 全库（project_type=plugin + categories=paper）。
+        if not self.is_plugins and not q and not category \
+                and sort in ("relevance", "downloads"):
+            return self._load_builtin(on_log=on_log)
+        # 全库搜索：facets 修复后传 mc_version/loader，
+        # browse_projects 内部用 json.dumps 生成标准 JSON facets。
+        r = modman.browse_projects(
+            query=query, mc_version=self.mc_version,
+            loader=self.loader, category=category, sort=sort,
+            limit=20, offset=offset, source="modrinth",
+            project_type="plugin" if self.is_plugins else "mod")
+        if r.get("err"):
+            raise RuntimeError(r["err"])
+        hits = r.get("hits") or []
+        icons = self._fetch_icons([(h.get("slug"), h.get("icon_url"))
+                                   for h in hits])
+        return {"hits": hits, "total": r.get("total"),
+                "icons": icons, "offset": offset,
+                "error": r.get("error"), "builtin": False}
+
+    def _load_builtin(self, on_log=None):
+        """内置优化清单（MOD_TARGETS）：图标按 slug 从 Modrinth 并发拉。"""
+        lst = install.mod_list_for(self.loader, self.mc_version)
+        hits = []
+        for m in lst:
+            hits.append({
+                "slug": m["slug"], "title": m["name"],
+                "description": m["desc"],
+                "categories": [],
+                "downloads": None,
+                "group": m.get("group", ""),
+                "req": m.get("req") or [],
+                "icon_url": None,
+            })
+        icons = self._fetch_icons(
+            [(h["slug"], None) for h in hits])
+        return {"hits": hits, "total": len(hits), "icons": icons,
+                "offset": 0, "error": None, "builtin": True}
+
+    @staticmethod
+    def _fetch_icons(items):
+        """并发下载图标字节：items = [(slug, icon_url), ...]。"""
+        import concurrent.futures
+        icons = {}
+
+        def _dl(item):
+            slug, url = item
+            if not slug:
+                return None
+            if not url:
+                # 内置清单没有 icon_url，按 slug 查 Modrinth 项目拿图标
+                try:
+                    info = modman.project_info(slug)
+                    url = (info or {}).get("icon_url")
+                except Exception:
+                    return None
+            b = _fetch_icon_bytes(url)
+            return (slug, b) if b else None
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=4) as ex:
+                for res in ex.map(_dl, items):
+                    if res:
+                        icons[res[0]] = res[1]
+        except Exception:
+            pass
+        return icons
+
+    def _on_search(self, ok, res):
+        self.btn_go.setEnabled(True)
+        self.btn_inst.setEnabled(True)
+        if not ok:
+            self.lbl_stat.setText("搜索失败")
+            self._log("[错误] %r" % (res,))
+            return
+        self.hits = res.get("hits") or []
+        self.total = res.get("total") or 0
+        builtin = bool(res.get("builtin"))
+        self.builtin_mode = builtin
+        self._fill(res.get("icons") or {}, builtin=builtin)
+        self._sync_page()
+        err = res.get("error")
+        if err:
+            self.lbl_stat.setText("搜索失败：%s" % err)
+            self._log("[失败] %s" % err)
+            return
+        if not self.hits:
+            if builtin:
+                self.lbl_stat.setText(
+                    "%s 加载器没有内置优化模组清单" % self.loader)
+            else:
+                self.lbl_stat.setText(
+                    "没找到匹配 %s + %s 的模组"
+                    % (self.mc_version, self.loader))
+                self._log("[空] 试试放宽分类或换个关键词")
+
+    # ---------- PCL2 风格卡片 ----------
+    def _make_card(self, h, icons, builtin):
+        """一行卡片：左侧勾选框 + 64x64 图标，右侧名称/简介/标签/百科按钮。"""
+        slug = h.get("slug") or ""
+        title = h.get("title") or slug
+        desc = (h.get("description") or "").replace("\n", " ")
+        if len(desc) > 120:
+            desc = desc[:117] + "..."
+        dl = h.get("downloads")
+        cats = h.get("categories") or []
+        cat_txt = "、".join(
+            dict(modman.CATEGORIES).get(c, c) for c in cats[:3])
+        group = h.get("group") or ""
+        req = h.get("req") or []
+        installed = (slug.lower() in self.installed
+                     or (title or "").strip().lower()
+                     in self.installed)
+
+        card = QWidget()
+        card.setStyleSheet(
+            "QWidget { background: #1e1f29; border-radius: 8px; }")
+        lay = QHBoxLayout(card)
+        lay.setContentsMargins(10, 8, 10, 8)
+        lay.setSpacing(10)
+
+        # 勾选框
+        chk = QCheckBox()
+        chk.setToolTip("勾选后点下方「%s」"
+                       % ("确定选择" if self.select_only else "安装选中"))
+        if installed:
+            chk.setChecked(False)
+        chk.stateChanged.connect(lambda _st: self._sync_count())
+        lay.addWidget(chk)
+
+        # 图标 64x64
+        ic = QLabel()
+        ic.setFixedSize(64, 64)
+        ic.setAlignment(Qt.AlignCenter)
+        ic.setStyleSheet("background: transparent;")
+        b = icons.get(slug)
+        pm = None
+        if b:
+            img = QImage.fromData(b)
+            if not img.isNull():
+                pm = QPixmap.fromImage(img).scaled(
+                    64, 64, Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation)
+        if pm is not None and not pm.isNull():
+            ic.setPixmap(pm)
+        else:
+            ic.setText("?")  # 图标拉不到就显示占位
+        lay.addWidget(ic)
+
+        # 右侧：三行文字 + 链接
+        rt = QVBoxLayout()
+        rt.setSpacing(2)
+
+        h1 = QHBoxLayout()
+        lb_title = QLabel("<b style='font-size:13px;'>%s</b>" % title)
+        if installed:
+            lb_title.setText(
+                "<b style='font-size:13px; color:#4ade80;'>✓已装 %s</b>"
+                % title)
+        h1.addWidget(lb_title)
+        h1.addStretch(1)
+        # 一键查百科
+        b_mod = QPushButton("[Modrinth]")
+        b_mod.setCursor(Qt.PointingHandCursor)
+        b_mod.setStyleSheet("QPushButton{border:none;color:#5b8def;"
+                            "font-size:11px;}"
+                            "QPushButton:hover{color:#8ab4ff;}")
+        b_mod.clicked.connect(
+            lambda _c, s=slug: self._open_modlink("modrinth", s, title))
+        b_mc = QPushButton("[MC百科]")
+        b_mc.setCursor(Qt.PointingHandCursor)
+        b_mc.setStyleSheet("QPushButton{border:none;color:#5b8def;"
+                           "font-size:11px;}"
+                           "QPushButton:hover{color:#8ab4ff;}")
+        b_mc.clicked.connect(
+            lambda _c, s=slug, n=title: self._open_modlink("mcmod", s, n))
+        b_cf = QPushButton("[CurseForge]")
+        b_cf.setCursor(Qt.PointingHandCursor)
+        b_cf.setStyleSheet("QPushButton{border:none;color:#5b8def;"
+                           "font-size:11px;}"
+                           "QPushButton:hover{color:#8ab4ff;}")
+        b_cf.clicked.connect(
+            lambda _c, s=slug: self._open_modlink("curseforge", s, title))
+        h1.addWidget(b_mod)
+        h1.addWidget(b_mc)
+        h1.addWidget(b_cf)
+        rt.addLayout(h1)
+
+        # 简介（灰色小字，两行截断）
+        lb_desc = QLabel(desc)
+        lb_desc.setWordWrap(True)
+        lb_desc.setStyleSheet(
+            "color:#9aa0b0; font-size:11px; background:transparent;")
+        lb_desc.setMaximumHeight(30)  # 最多两行
+        rt.addWidget(lb_desc)
+
+        # 标签行
+        tags = []
+        if builtin:
+            tags.append("[内置推荐]")
+            if group:
+                tags.append(group)
+            if req:
+                tags.append("前置: " + "、".join(req))
+            tags.append("版本兼容已按当前服过滤")
+        else:
+            if cat_txt:
+                tags.append("分类 " + cat_txt)
+            if dl:
+                tags.append("下载 " + _fmt_num(dl))
+            tags.append("%s + %s" % (self.mc_version or "?",
+                                     self.loader or "?"))
+        if installed:
+            tags.append("已安装（勾选可覆盖更新）")
+        lb_tags = QLabel("  ".join(tags))
+        lb_tags.setStyleSheet(
+            "color:#6b7280; font-size:10px; background:transparent;")
+        rt.addWidget(lb_tags)
+
+        lay.addLayout(rt, 1)
+        return card, chk
+
+    @staticmethod
+    def _open_modlink(kind, slug, name):
+        """打开百科/详情页。"""
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        import urllib.parse as _up
+        try:
+            if kind == "modrinth":
+                url = "https://modrinth.com/mod/%s" % slug
+            elif kind == "mcmod":
+                url = "https://search.mcmod.cn/s?key=%s" % (
+                    _up.quote(name))
+            else:
+                url = "https://www.curseforge.com/minecraft/mc-mods/%s" % slug
+            QDesktopServices.openUrl(QUrl(url))
+        except Exception:
+            pass
+
+    def _fill(self, icons, builtin=False):
+        self.list.blockSignals(True)
+        self.list.clear()
+        self._slug_title = {}
+        for h in self.hits:
+            slug = h.get("slug") or ""
+            title = h.get("title") or slug
+            self._slug_title[slug] = title
+            it = QListWidgetItem()
+            it.setData(Qt.UserRole, slug)
+            it.setFlags(Qt.ItemIsEnabled)
+            it.setSizeHint(QSize(0, 104))  # 卡片高度
+            card, chk = self._make_card(h, icons, builtin)
+            it._chk = chk  # 勾选状态存在这里
+            self.list.addItem(it)
+            self.list.setItemWidget(it, card)
+        self.list.blockSignals(False)
+        shown = self.list.count()
+        self.lbl_stat.setText("共 %d 个结果，显示 %d 个"
+                              % (self.total, shown))
+        self._sync_count()
+
+    def _sync_count(self):
+        n = len(self._checked_slugs())
+        verb = "确定选择" if self.select_only else "安装选中"
+        self.btn_inst.setText("%s (%d)" % (verb, n))
+
+    def _checked_slugs(self):
+        out = []
+        for i in range(self.list.count()):
+            it = self.list.item(i)
+            chk = getattr(it, "_chk", None)
+            if chk is not None and chk.isChecked():
+                s = it.data(Qt.UserRole)
+                if s:
+                    out.append(s)
+        return out
+
+    def _set_all(self, on):
+        for i in range(self.list.count()):
+            it = self.list.item(i)
+            chk = getattr(it, "_chk", None)
+            if chk is not None:
+                chk.setChecked(on)
+        self._sync_count()
+
+    def _sync_page(self):
+        page = self.offset // 20 + 1
+        self.lbl_page.setText("第 %d 页" % page)
+        self.btn_prev.setEnabled(self.offset > 0)
+        if self.builtin_mode:
+            # ★ 内置推荐只有 1 页：下一页禁用（要更多去搜索/翻分类）
+            self.btn_next.setEnabled(False)
+            self.btn_next.setToolTip("内置推荐就这些；搜索或切分类可看全库")
+        else:
+            self.btn_next.setEnabled(bool(self.total)
+                                     and self.offset + 20 < self.total)
+            self.btn_next.setToolTip("")
+
+    # ---------- 操作 ----------
+    def open_advanced(self):
+        """高级搜索：旧版表格（可切 CurseForge / GitHub 安装）。"""
+        dlg = _themed(ModrinthDialog(self.entry, self))
+        dlg.exec()
+        self.installed = self._installed_slugs()
+        self.search()
+
+    def ask_mirror(self):
+        try:
+            dlg = _themed(SourceDialog(self, self))
+            dlg.exec()
+            self._sync_src_ui()
+        except Exception:
+            pass
+
+    def do_probe(self):
+        try:
+            from .core import sources as _src
+            self._log("测源中 ...")
+            ok, msg = _src.probe()
+            self._log(("  [OK] %s" % msg) if ok else ("  [失败] %s" % msg))
+        except Exception as e:
+            self._log("[错误] %r" % e)
+
+    def _sync_src_ui(self):
+        try:
+            from .core import sources as _src
+            cur = _src.get_mirror()
+            lab = {"auto": "自动（镜像优先，失败回退官方）",
+                   "mcim": "MCIM 镜像", "official": "官方源"}.get(
+                       cur, str(cur))
+            self.lbl_mirror.setText("镜像: %s" % lab)
+        except Exception:
+            pass
+
+    def do_install(self):
+        slugs = self._checked_slugs()
+        if not slugs:
+            QMessageBox.information(
+                self, "没勾选",
+                "先勾选要装的%s（点卡片左侧的勾选框）"
+                % ("插件" if self.is_plugins else "模组"))
+            return
+        # ★ 仅选择模式（初始化向导）：不在这里下载，
+        #   直接 Accept，由调用方用 self.selected 统一安装
+        if self.select_only:
+            self.accept()
+            return
+        kw = "插件" if self.is_plugins else "模组"
+        names = "\n".join(
+            "· %s" % (self._slug_title.get(
+                self.list.item(i).data(Qt.UserRole), "?"))
+            for i in range(self.list.count())
+            if getattr(self.list.item(i), "_chk", None) is not None
+            and self.list.item(i)._chk.isChecked())[:500]
+        r = QMessageBox.question(
+            self, "确认安装",
+            "把选中的 %d 个%s装到：\n%s\n\n%s\n\n"
+            "4 线程并发下载 + CDN 加速 + 断点续传 + 木马扫描。\n"
+            "装完重启服务端才生效。"
+            % (len(slugs), kw, self.target_dir, names),
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if r != QMessageBox.Yes:
+            return
+        self.btn_inst.setEnabled(False)
+        self.worker = _track(self, Worker(
+            self._do_install, {"slugs": slugs}, self))
+        self.worker.log.connect(self._log)
+        self.worker.done.connect(self._on_install)
+        self.worker.start()
+
+    def _do_install(self, slugs=None, on_log=None):
+        """复用 install_mods / install_plugins（V1.2.0 插件分流）。"""
+        if self.is_plugins:
+            return install.install_plugins(
+                self.server_dir, self.mc_version,
+                on_log=on_log, only=slugs or [])
+        r = install.install_mods(
+            self.server_dir, self.mc_version, self.loader,
+            on_log=on_log, only=slugs or [])
+        return r
+
+    def _on_install(self, ok, res):
+        self.btn_inst.setEnabled(True)
+        if not ok:
+            self._log("[错误] %r" % (res,))
+            return
+        ok_l = res.get("ok") or []
+        fail_l = res.get("fail") or []
+        skip_l = res.get("skipped") or []
+        self._log("")
+        self._log("★ 完成：成功 %d，失败 %d，跳过 %d"
+                  % (len(ok_l), len(fail_l), len(skip_l)))
+        for f in fail_l:
+            self._log("  [失败] %s - %s" % (f.get("name"), f.get("reason")))
+        self.installed = self._installed_slugs()
+        self.search()
+
+    def _log(self, m):
+        self.log.appendPlainText(m)
+
+
 class ModDialog(QDialog):
     """模组管理：列出已装 mod，可启用/禁用/检查更新/打开文件夹。"""
 
@@ -4411,8 +6121,9 @@ class ModDialog(QDialog):
         btn_log = QPushButton("打开日志文件夹")
         btn_log.clicked.connect(self.open_log_dir)
         h.addWidget(btn_log)
-        btn_browse = QPushButton("从 Modrinth 装模组")
-        btn_browse.setToolTip("搜索、筛选、安装，像在 Modrinth 网页上挑一样")
+        btn_browse = QPushButton("浏览装模组")
+        btn_browse.setToolTip("PCL2 风格卡片视图：带图标和简介，"
+                              "按当前版本/加载器筛选，勾选后并发下载")
         btn_browse.clicked.connect(self.open_browse)
         h.addWidget(btn_browse)
         v.addLayout(h)
@@ -4467,8 +6178,14 @@ class ModDialog(QDialog):
 
 
     def open_browse(self):
-        """打开 Modrinth 浏览/搜索窗口。"""
-        dlg = _themed(ModrinthDialog(self.entry, self))
+        """打开 PCL2 风格模组浏览（卡片视图，按当前服筛选）。"""
+        if self.loader not in ("fabric", "forge", "neoforge"):
+            QMessageBox.information(
+                self, "当前加载器不支持模组",
+                "只有 Fabric / Forge / NeoForge 服务器能装模组。\n\n"
+                "当前加载器：%s" % (self.loader or "未知"))
+            return
+        dlg = _themed(ModBrowseDialog(self.entry, self))
         dlg.exec()
         # 装完回来刷新一下列表
         self.refresh()
@@ -4760,7 +6477,8 @@ class BackupDialog(QDialog):
         except Exception:
             pass
 
-    def __init__(self, entry, parent=None, running_fn=None):
+    def __init__(self, entry, parent=None, running_fn=None,
+                 backup_format=None):
         super().__init__(parent)
         # 窗口图标（跟主程序一致）
         try:
@@ -4771,6 +6489,8 @@ class BackupDialog(QDialog):
         self.entry = entry
         # 主窗口传进来的"这个服在不在跑"查询函数
         self.running_fn = running_fn
+        # ★ V1.1.0：备份格式（"folder" / "zip"），默认文件夹
+        self.backup_format = backup_format or "folder"
         self.setWindowTitle("备份管理 - %s" % entry.get("name", ""))
         self.resize(760, 560)
 
@@ -4799,6 +6519,8 @@ class BackupDialog(QDialog):
         # ---- 选项 ----
         h = QHBoxLayout()
         self.chk_zip = QCheckBox("压缩成 zip（省空间，但慢）")
+        # ★ V1.1.0：默认勾选状态跟随服务器配置的备份格式
+        self.chk_zip.setChecked(self.backup_format == "zip")
         h.addWidget(self.chk_zip)
         h.addStretch(1)
         v.addLayout(h)

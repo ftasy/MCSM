@@ -389,6 +389,20 @@ def cf_download_url(cf_id, mc_version=None, loader=None):
     return {"err": "文件列表里没有直链（CurseForge 有些文件要跳转）"}
 
 
+def cf_file_url(project_id, file_id):
+    """按精确 projectID + fileID 拿 CurseForge 文件直链（整合包清单用）。"""
+    path = "/v1/mods/%s/files/%s" % (project_id, file_id)
+    try:
+        d = _get_json(curseforge_base(), path, headers=_cf_headers())
+    except Exception as e:
+        return {"err": _brief(e)}
+    f = (d or {}).get("data") or {}
+    u = f.get("downloadUrl")
+    if u:
+        return {"url": u, "filename": f.get("fileName") or ""}
+    return {"err": "该文件没有直链"}
+
+
 def _brief(e):
     try:
         from . import install
