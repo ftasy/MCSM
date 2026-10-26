@@ -332,8 +332,11 @@ def read_servercore(server_dir):
 
 
 # ★ V1.7.0-4：Simple Voice Chat（语音聊天）可配置
-# 配置文件：config/simple-voice-chat/server.properties
+# ★ V1.8.0：新版 SVC 的配置路径是 config/voicechat/voicechat-server.properties
+#   （老版本是 config/simple-voice-chat/server.properties）。
+#   SVC_PATHS 顺序即查找顺序：新路径优先，找不到再回退旧路径。
 SVC_PATHS = [
+    os.path.join("config", "voicechat", "voicechat-server.properties"),
     os.path.join("config", "simple-voice-chat", "server.properties"),
 ]
 
@@ -348,6 +351,7 @@ SVC_PRESETS = {
         "voice_distance": SVC_DEFAULT_DISTANCE,
         "broadcast_range": SVC_DEFAULT_BROADCAST,
         "enable": True,
+        "enable_groups": True,
     },
     "small": {
         "label": "近距离（8 格内才听到）",
@@ -355,6 +359,7 @@ SVC_PRESETS = {
         "voice_distance": 8,
         "broadcast_range": 16,
         "enable": True,
+        "enable_groups": True,
     },
     "large": {
         "label": "远距离（适合大地图）",
@@ -362,6 +367,7 @@ SVC_PRESETS = {
         "voice_distance": 16,
         "broadcast_range": 128,
         "enable": True,
+        "enable_groups": True,
     },
 }
 
@@ -374,16 +380,21 @@ udp_thread_count=2
 show_voice_chat_settings=true
 enable_voice_chat={enable}
 voice_chat_icon=true
+disable_groups={disable_groups}
 """
 
 
 def find_svc_config(server_dir):
-    """找已存在的 SVC 配置。返回 (绝对路径, 相对路径)。"""
+    """找已存在的 SVC 配置。返回 (绝对路径, 相对路径)。
+
+    ★ V1.8.0：按 SVC_PATHS 顺序找，新路径优先，旧路径兜底。
+    """
     if not server_dir:
         return None, SVC_PATHS[0]
-    p = os.path.join(server_dir, SVC_PATHS[0])
-    if os.path.isfile(p):
-        return p, SVC_PATHS[0]
+    for rel in SVC_PATHS:
+        p = os.path.join(server_dir, rel)
+        if os.path.isfile(p):
+            return p, rel
     return None, SVC_PATHS[0]
 
 
@@ -404,12 +415,15 @@ def svc_installed(server_dir):
 
 
 def read_svc(server_dir):
-    """读 SVC 配置，返回 {port, voice_distance, broadcast_range, enable}。"""
+    """读 SVC 配置，返回
+    {port, voice_distance, broadcast_range, enable, enable_groups}。"""
     out = {
         "port": SVC_DEFAULT_PORT,
         "voice_distance": SVC_DEFAULT_DISTANCE,
         "broadcast_range": SVC_DEFAULT_BROADCAST,
         "enable": True,
+        # ★ V1.8.0：分组功能开关（disable_groups=false => 开启）
+        "enable_groups": True,
     }
     try:
         p, _ = find_svc_config(server_dir)
@@ -429,13 +443,17 @@ def read_svc(server_dir):
         m = re.search(r"^\s*enable_voice_chat\s*=\s*(\w+)", t, re.M)
         if m:
             out["enable"] = m.group(1).lower() in ("true", "1", "yes")
+        m = re.search(r"^\s*disable_groups\s*=\s*(\w+)", t, re.M)
+        if m:
+            out["enable_groups"] = \
+                m.group(1).lower() not in ("true", "1", "yes")
     except Exception:
         pass
     return out
 
 
 def apply_svc(server_dir, opts):
-    """把 SVC 配置写回 config/simple-voice-chat/server.properties。
+    """把 SVC 配置写回配置文件（新路径优先，旧路径兜底）。
 
     文件不存在则生成完整模板；存在则按 key=value 逐项替换，
     保留其它行与注释。返回 {"ok", "rel", "backup", "err"}。
@@ -447,6 +465,9 @@ def apply_svc(server_dir, opts):
         for k, v in (opts or {}).items():
             if v is not None:
                 d[k] = v
+        # enable_groups（UI 语义）-> disable_groups（配置文件语义）
+        groups = d.get("enable_groups", True)
+        disable_groups = "false" if groups else "true"
         p, rel = find_svc_config(server_dir)
         backup = False
         if p and os.path.isfile(p):
@@ -463,11 +484,13 @@ def apply_svc(server_dir, opts):
                         "broadcast_range", SVC_DEFAULT_BROADCAST))),
                     "enable_voice_chat": (
                         "true" if d.get("enable", True) else "false"),
+                    "disable_groups": disable_groups,
                 }.get(key)
                 return ("%s = %s" % (key, val)) if val is not None \
                     else m.group(0)
             body = re.sub(r"^\s*(port|voice_distance|broadcast_range|"
-                          r"enable_voice_chat)\s*=\s*\S+.*$",
+                          r"enable_voice_chat|disable_groups)"
+                          r"\s*=\s*\S+.*$",
                           _sub, old, flags=re.M)
             if body == old:
                 return {"ok": True, "rel": rel, "backup": False}
@@ -483,11 +506,13 @@ def apply_svc(server_dir, opts):
                     "voice_distance", SVC_DEFAULT_DISTANCE)),
                 broadcast_range=int(d.get(
                     "broadcast_range", SVC_DEFAULT_BROADCAST)),
-                enable="true" if d.get("enable", True) else "false")
-            cfg_dir = os.path.join(server_dir, "config",
-                                   "simple-voice-chat")
+                enable="true" if d.get("enable", True) else "false",
+                disable_groups=disable_groups)
+            # 按找到/目标路径建目录：优先新路径
+            cfg_dir = os.path.join(server_dir,
+                                   "config", "voicechat")
+            p = os.path.join(cfg_dir, "voicechat-server.properties")
             os.makedirs(cfg_dir, exist_ok=True)
-            p = os.path.join(cfg_dir, "server.properties")
         with open(p, "w", encoding="utf-8", newline="") as f:
             f.write(body)
         return {"ok": True, "rel": rel, "backup": backup}

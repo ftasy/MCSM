@@ -33,6 +33,38 @@
    - 优先级：① `level.dat` 存档（最准）→ ② 核心 jar 内部 `version.json` / `install.properties`（原版 bundler、Paper、Fabric、Forge/NeoForge 全覆盖，读不出再退 jar 文件名）→ ③ 文件夹名正则（`1.20.1forge → 1.20.1`、`26.2push → 26.2`）。
    - 全部失败：版本框留空，提示「未能自动识别版本，请手动填写」。
 
+---
+
+## v1.8.0
+
+**分离双视图（打开/翻页不再卡 3-4 秒）+ 推荐清单重构 + 配置页补全 + 更新检测修复**
+
+## 修复内容
+
+1. **「选择模组/插件」打开与翻页 3-4 秒延迟彻底解决**
+   - 根因：打开弹窗即发网络搜索，且内置推荐每项都要联网拉图标（`project_info` 并发请求），翻页在推荐模式下也会强行走网络。
+   - 方案：`QTabWidget` 物理分离【推荐安装】/【全库搜索】两个独立视图。
+     - 【推荐安装】**只读本地清单**（`MOD_TARGETS` / `PLUGIN_TARGETS`），**绝对不发任何网络请求**（连图标也不拉，统一占位），同步渲染毫秒级完成；分页在内存中完成（每页 20 个）。
+     - 【全库搜索】只在**用户搜索、回车、或切到该 Tab**时才发网络请求；翻页携带正确 `offset`。
+     - 全库等待时列表中央显示 **"正在搜索..."**，不再白屏。
+
+2. **推荐模组清单重构（Cupboard 生态 + 第三方登录优先）**
+   - 新增分组 **「① Cupboard 生态」**：`cupboard`（描述：提供 JSON 配置框架与崩溃追踪的核心前置），Paper 服推荐区可见。
+   - **第三方登录优先**：`AkiYggdrasil`（1.21.1 NeoForge，放 neoforge 组最前）、`MultiYggdrasil`（Forge/Fabric/NeoForge，fabric/forge/neoforge 组最前）。
+   - `cloth-config` 已从 `MOD_TARGETS` 本体移除。
+
+3. **推荐插件清单新增 + 前置绑定**
+   - 新增内置 `PLUGIN_TARGETS`：`multilogin` 最前（第三方登录第一）、`vault` 经济基础、`luckperms`、`essentialsx`（`req=["vault","luckperms"]` 绑死）、`coreprotect` / `ledger` 防熊插件。
+   - `install_plugins` 复用 `resolve_selection(plugin=True)`：勾选后自动**补前置 + 拓扑排序**，先装前置再装依赖，缺前置的插件跳过并提示。
+
+4. **配置页补全（语音聊天 + 插件配置）**
+   - **Simple Voice Chat**：配置路径升级为 `config/voicechat/voicechat-server.properties`（旧路径自动回退兼容）；新增**分组功能开关**（`disable_groups`），连同端口 / 语音距离 / 广播范围 / 开关一起读写。
+   - **新增「插件配置」页签**（在「插件」管理页之后）：LuckPerms 简单配置界面（存储方式 h2/SQLite/MySQL、server、默认组、MySQL 连接参数，读写 `config/LuckPerms/config.yml` 并自动备份），EssentialsX 一键生成基础配置。
+
+5. **「检查更新」网络异常修复**
+   - 确认 `GITHUB_REPO="ftasy/MCSM"` 已配置；修复 `check_latest` 中 URL 二次 `%` 格式化导致的 TypeError。
+   - 补充超时（10s）与退避重试（最多 3 次，1.5/3/6 秒），5xx/连接类异常自动重试，4xx 不重试。
+
 ## 下载说明
 
 - **ZIP 版（推荐）**：解压后运行 `MCSM.exe`，无需安装，绿色免安装。

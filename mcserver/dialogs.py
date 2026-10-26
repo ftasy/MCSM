@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QTimeEdit,  # ★ V1.6.3：定时重启时间框之前漏导，配置窗一点就 NameError
     QRadioButton,  # ★ V1.7.2：ModBrowseDialog 双分组用了但一直没导，
                    #   弹窗一构造就 NameError、点击毫无反应（静默失败）
+    QStackedLayout,  # ★ V1.8.0：全库搜索等待态（列表中央"正在搜索..."）
 )
 
 from .core import (versions, java as javacore, install, builder,
@@ -2017,6 +2018,8 @@ class ServerConfigDialog(QDialog):
         ldr_cfg = (entry.get("loader") or "").lower()
         if ldr_cfg not in ("", "vanilla", "unknown"):
             self.tabs.addTab(self._plugin_tab(), "插件")
+            # ★ V1.8.0：插件配置页签（LuckPerms 简单配置界面等）
+            self.tabs.addTab(self._plugincfg_tab(), "插件配置")
 
         # ===== 页签 3.5：模组配置（装了还要配的那些）=====
         self.tabs.addTab(self._modconf_tab(), "模组配置")
@@ -2584,6 +2587,207 @@ class ServerConfigDialog(QDialog):
         self._fill_plugin_table()
 
     # ---------- 插件配置板块（基础版，★ V1.2.0） ----------
+    # ---------- 插件配置页签（★ V1.8.0） ----------
+    def _luckperms_cfg_path(self):
+        """找 LuckPerms 配置文件（config/LuckPerms/config.yml）。"""
+        base = os.path.join(self.server_dir, "config")
+        for sub in ("LuckPerms", "luckperms", "LUCKPERMS"):
+            p = os.path.join(base, sub, "config.yml")
+            if os.path.isfile(p):
+                return p
+        return os.path.join(base, "LuckPerms", "config.yml")
+
+    def _read_luckperms_cfg(self):
+        """读 LuckPerms 配置，缺字段用默认值。返回 (dict, path)。"""
+        defaults = {
+            "storage-method": "h2",
+            "server": "global",
+            "default-groups": ["default"],
+        }
+        p = self._luckperms_cfg_path()
+        try:
+            if os.path.isfile(p):
+                with open(p, "r", encoding="utf-8",
+                          errors="replace") as f:
+                    d = yaml.safe_load(f.read()) or {}
+        except Exception:
+            d = {}
+        return defaults, p
+
+    def _plugincfg_tab(self):
+        """插件配置页签：LuckPerms 简单配置界面 + EssentialsX 一键生成。"""
+        import yaml  # noqa: F401
+        w = QWidget(self)
+        self._w_plugincfg = w
+        v = QVBoxLayout(w)
+
+        pd = self._plugins_dir_here()
+        names = []
+        try:
+            if os.path.isdir(pd):
+                names = [f.lower() for f in os.listdir(pd)
+                         if f.lower().endswith(".jar")
+                         or f.lower().endswith(".jar.disabled")]
+        except Exception:
+            names = []
+
+        def _has(prefix):
+            return any(n.startswith(prefix) for n in names)
+
+        # ---- LuckPerms 简单配置界面 ----
+        gb = QGroupBox("LuckPerms（权限管理）")
+        f = QFormLayout(gb)
+
+        if not _has("luckperms"):
+            f.addRow(QLabel(
+                "未检测到 LuckPerms 插件。\n"
+                "在『插件』页签装上 LuckPerms 后，"
+                "这里就能直接配它的存储与默认组。"))
+            row = QHBoxLayout()
+            b = QPushButton("生成基础配置（luckperms.yml）")
+            b.clicked.connect(self._gen_luckperms_cfg)
+            row.addWidget(b)
+            row.addStretch(1)
+            f.addRow("", row)
+        else:
+            defaults, path = self._read_luckperms_cfg()
+            tip = QLabel("配置文件：%s" % path)
+            tip.setWordWrap(True)
+            tip.setStyleSheet(_muted())
+            f.addRow("", tip)
+
+            self.lp_storage = QComboBox()
+            for k, label in (("h2", "h2（本地文件，推荐）"),
+                             ("sqlite", "SQLite（本地文件）"),
+                             ("mysql", "MySQL（远程数据库）")):
+                self.lp_storage.addItem(label, k)
+            cur = defaults.get("storage-method", "h2")
+            i = self.lp_storage.findData(cur)
+            self.lp_storage.setCurrentIndex(i if i >= 0 else 0)
+            f.addRow("存储方式:", self.lp_storage)
+
+            self.lp_server = QLineEdit(str(defaults.get("server", "global")))
+            self.lp_server.setPlaceholderText("global")
+            f.addRow("服务器名(server):", self.lp_server)
+
+            dg = defaults.get("default-groups") or ["default"]
+            self.lp_groups = QLineEdit(
+                ", ".join(str(x) for x in dg) if dg else "default")
+            self.lp_groups.setPlaceholderText("default")
+            f.addRow("默认组(逗号分隔):", self.lp_groups)
+
+            # MySQL 连接块（选 mysql 时显示）
+            self.lp_mysql_box = QGroupBox("MySQL 连接")
+            mf = QFormLayout(self.lp_mysql_box)
+            ms = defaults.get("data-source") or {}
+            my = ms.get("mysql") or {}
+            self.lp_mysql_host = QLineEdit(str(my.get("host", "127.0.0.1")))
+            mf.addRow("地址:", self.lp_mysql_host)
+            self.lp_mysql_port = QSpinBox()
+            self.lp_mysql_port.setRange(1, 65535)
+            self.lp_mysql_port.setValue(int(my.get("port", 3306)))
+            mf.addRow("端口:", self.lp_mysql_port)
+            self.lp_mysql_db = QLineEdit(str(my.get("database", "luckperms")))
+            mf.addRow("数据库:", self.lp_mysql_db)
+            self.lp_mysql_user = QLineEdit(str(my.get("username", "root")))
+            mf.addRow("用户名:", self.lp_mysql_user)
+            self.lp_mysql_pwd = QLineEdit(str(my.get("password", "")))
+            self.lp_mysql_pwd.setEchoMode(QLineEdit.Password)
+            mf.addRow("密码:", self.lp_mysql_pwd)
+            f.addRow("", self.lp_mysql_box)
+
+            def _toggle_mysql(_i=None):
+                self.lp_mysql_box.setVisible(
+                    self.lp_storage.currentData() == "mysql")
+            self.lp_storage.currentIndexChanged.connect(_toggle_mysql)
+            _toggle_mysql()
+
+            b_save = QPushButton("保存 LuckPerms 配置")
+            b_save.clicked.connect(self._save_luckperms_cfg)
+            f.addRow("", b_save)
+
+        v.addWidget(gb)
+
+        # ---- EssentialsX 一键生成 ----
+        gb2 = QGroupBox("EssentialsX（基础指令/经济桥）")
+        g2 = QVBoxLayout(gb2)
+        if _has("essentialsx"):
+            row = QHBoxLayout()
+            row.addWidget(QLabel("已安装 <b>EssentialsX</b>"))
+            row.addStretch(1)
+            b = QPushButton("生成基础配置")
+            b.clicked.connect(self._gen_essentialsx_cfg)
+            row.addWidget(b)
+            g2.addLayout(row)
+        else:
+            g2.addWidget(QLabel(
+                "未检测到 EssentialsX。装好后可一键生成基础配置。"))
+        row2 = QHBoxLayout()
+        b_open = QPushButton("打开插件配置文件夹")
+        b_open.setToolTip("打开服务器 config/ 目录（所有插件的配置都在这里）")
+        b_open.clicked.connect(
+            lambda: _open_in_explorer(os.path.join(
+                self.server_dir, "config")))
+        row2.addWidget(b_open)
+        row2.addStretch(1)
+        g2.addLayout(row2)
+        v.addWidget(gb2)
+
+        v.addStretch(1)
+        sw = QScrollArea()
+        sw.setWidgetResizable(True)
+        sw.setWidget(w)
+        return sw
+
+    def _save_luckperms_cfg(self):
+        """把 LuckPerms 配置界面上的值写回 config.yml。"""
+        import yaml
+        import shutil
+        try:
+            defaults, path = self._read_luckperms_cfg()
+            d = {}
+            try:
+                if os.path.isfile(path):
+                    with open(path, "r", encoding="utf-8",
+                              errors="replace") as f:
+                        d = yaml.safe_load(f.read()) or {}
+            except Exception:
+                d = {}
+            d["storage-method"] = str(self.lp_storage.currentData())
+            d["server"] = self.lp_server.text().strip() or "global"
+            groups = [g.strip() for g in
+                      self.lp_groups.text().replace("，", ",").split(",")
+                      if g.strip()]
+            d["default-groups"] = groups or ["default"]
+            if d["storage-method"] == "mysql":
+                d.setdefault("data-source", {})
+                d["data-source"]["mysql"] = {
+                    "host": self.lp_mysql_host.text().strip() or "127.0.0.1",
+                    "port": int(self.lp_mysql_port.value()),
+                    "database": self.lp_mysql_db.text().strip()
+                    or "luckperms",
+                    "username": self.lp_mysql_user.text().strip() or "root",
+                    "password": self.lp_mysql_pwd.text(),
+                }
+            cfg_dir = os.path.dirname(path)
+            os.makedirs(cfg_dir, exist_ok=True)
+            if os.path.isfile(path):
+                try:
+                    shutil.copy2(path, path + ".bak")
+                except Exception:
+                    pass
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                yaml.safe_dump(d, f, allow_unicode=True,
+                               default_flow_style=False, sort_keys=False)
+            QMessageBox.information(
+                self, "已保存",
+                "已写入 LuckPerms 配置：\n%s\n\n"
+                "重启服务器或执行 /lp reload 后生效。"
+                % path)
+        except Exception as e:
+            QMessageBox.critical(self, "保存失败",
+                                 "写 LuckPerms 配置失败：\n%r" % (e,))
+
     def _plugin_cfg_box(self):
         """检测 EssentialsX / LuckPerms，提供一键生成基础配置。"""
         gb = QGroupBox("插件配置（基础版）")
@@ -2979,6 +3183,11 @@ class ServerConfigDialog(QDialog):
                     "启用语音聊天（关掉后进服不加载语音）",
                     bool(d.get("enable", True)))
                 f.addRow("", self._mc_widgets["svc_enable"])
+                # ★ V1.8.0：分组功能开关（对讲组）
+                self._mc_widgets["svc_groups"] = self._mk_check(
+                    "启用语音分组（对讲组 / disable_groups=false）",
+                    bool(d.get("enable_groups", True)))
+                f.addRow("", self._mc_widgets["svc_groups"])
             else:
                 self._mc_widgets["dynamic"] = self._mk_check(
                     "卡了自动降视距/模拟距离/刷怪上限",
@@ -3066,6 +3275,9 @@ class ServerConfigDialog(QDialog):
                     if g("svc_enable"):
                         g("svc_enable").setChecked(
                             bool(p.get("enable", True)))
+                    if g("svc_groups"):
+                        g("svc_groups").setChecked(
+                            bool(p.get("enable_groups", True)))
                     if g("dynamic"):
                         g("dynamic").setChecked(bool(p.get("dynamic", True)))
                     if g("target_mspt"):
@@ -3165,6 +3377,9 @@ class ServerConfigDialog(QDialog):
                 if g("svc_broadcast") else 64,
                 "enable": bool(g("svc_enable").isChecked())
                 if g("svc_enable") else True,
+                # ★ V1.8.0：分组功能开关
+                "enable_groups": bool(g("svc_groups").isChecked())
+                if g("svc_groups") else True,
             }
         else:
             opts = {
@@ -5906,15 +6121,20 @@ class ModBrowseDialog(QDialog):
             self.server_dir, "plugins" if self.is_plugins else "mods")
 
         self.installed = self._installed_slugs()
-        self.offset = 0
+        # ★ V1.8.0：双视图物理分离（QTabWidget）
+        #   推荐安装 Tab：纯本地渲染（零网络），内存分页每页 20
+        #   全库搜索 Tab：仅在搜索/回车/切到该 Tab 时发网络请求
+        self.offset = 0            # 全库 offset（网络分页）
         self.total = 0
         self.hits = []
         self.worker = None
         self.selected = []
-        self.builtin_mode = True  # ★ 打开默认内置推荐
+        self.builtin_mode = True   # ★ 打开默认内置推荐
         self._slug_title = {}
-        # ★ V1.7.0：显式双分组视图（内置推荐 / 全库搜索）
-        self._view_mode = "builtin"
+        self._lib_searched = False  # 全库是否已搜过（切 Tab 才首搜）
+        self.builtin_hits = []      # 推荐清单全量（内存）
+        self.builtin_offset = 0     # 推荐分页偏移（内存）
+        self.builtin_total = 0
 
         v = QVBoxLayout(self)
 
@@ -5941,32 +6161,44 @@ class ModBrowseDialog(QDialog):
             self.btn_probe.hide()
         v.addLayout(h)
 
-        # ★ V1.7.0-1：双分组切换（内置推荐 / 全库搜索）
-        hm = QHBoxLayout()
-        self.rb_builtin = QRadioButton("内置推荐")
-        self.rb_builtin.setChecked(True)
-        self.rb_lib = QRadioButton("全库搜索")
-        hm.addWidget(self.rb_builtin)
-        hm.addWidget(self.rb_lib)
-        hm.addStretch(1)
+        # ★ V1.8.0：物理分离双视图（QTabWidget）
+        #   【推荐安装】：只读本地清单（MOD_TARGETS / PLUGIN_TARGETS），
+        #     零网络请求，内存分页每页 20，瞬间渲染。
+        #   【全库搜索】：仅搜索/回车/切到该 Tab 才发网络，翻页带 offset，
+        #     等待时列表中央显示"正在搜索..."。
+        self.tabs = QTabWidget()
+        v.addWidget(self.tabs, 1)
+
+        # ============ Tab1 推荐安装（本地，零网络） ============
+        w_rec = QWidget()
+        vr = QVBoxLayout(w_rec)
+        vr.setContentsMargins(2, 2, 2, 2)
         self.lbl_view_hint = QLabel("")
         self.lbl_view_hint.setStyleSheet(_muted())
-        hm.addWidget(self.lbl_view_hint)
-        v.addLayout(hm)
-        # ★ V1.7.3-2：插件分支必须放在 connect 之前 ——
-        #   rb_lib.setChecked(True) 会同步触发 toggled -> _on_view_switch，
-        #   那时 ed_q / cb_cat 等搜索控件还没创建，必然 AttributeError。
-        if self.is_plugins:
-            # 插件模式没有本地内置清单，直接全库搜索
-            self.rb_builtin.hide()
-            self.rb_lib.setChecked(True)
-            self._view_mode = "lib"
-            self.lbl_view_hint.setText(
-                "Modrinth 全库：强制过滤纯客户端插件")
-        self.rb_builtin.toggled.connect(
-            lambda on: self._on_view_switch(True if on else False))
+        vr.addWidget(self.lbl_view_hint)
+        self.list_builtin = QListWidget()
+        self.list_builtin.setViewMode(QListView.ListMode)
+        self.list_builtin.setSelectionMode(QAbstractItemView.NoSelection)
+        self.list_builtin.setUniformItemSizes(True)
+        self.list_builtin.setSpacing(4)
+        vr.addWidget(self.list_builtin, 1)
+        hp_b = QHBoxLayout()
+        self.btn_bp_prev = QPushButton("上一页")
+        self.btn_bp_prev.clicked.connect(lambda: self._bpage(-1))
+        hp_b.addWidget(self.btn_bp_prev)
+        self.lbl_bpage = QLabel("第 1 页")
+        hp_b.addWidget(self.lbl_bpage)
+        self.btn_bp_next = QPushButton("下一页")
+        self.btn_bp_next.clicked.connect(lambda: self._bpage(1))
+        hp_b.addWidget(self.btn_bp_next)
+        hp_b.addStretch(1)
+        vr.addLayout(hp_b)
+        self.tabs.addTab(w_rec, "推荐安装")
 
-        # ---- 第二行：搜索 + 分类 + 排序 ----
+        # ============ Tab2 全库搜索（按需网络） ============
+        w_lib = QWidget()
+        vl = QVBoxLayout(w_lib)
+        vl.setContentsMargins(2, 2, 2, 2)
         h = QHBoxLayout()
         self.ed_q = QLineEdit()
         self.ed_q.setPlaceholderText(
@@ -5991,20 +6223,34 @@ class ModBrowseDialog(QDialog):
         self.btn_go = QPushButton("搜索")
         self.btn_go.clicked.connect(self.search)
         h.addWidget(self.btn_go)
-        v.addLayout(h)
-        # ★ 切分类 / 切排序 = 进全库搜索（内置推荐页不响应）
+        vl.addLayout(h)
+        # ★ V1.8.0：切分类 / 切排序 = 用户显式操作，触发全库搜索
         self.cb_cat.currentIndexChanged.connect(self.search)
         self.cb_sort.currentIndexChanged.connect(self.search)
 
-        # ---- 中部：PCL2 风格列表（左图右文卡片）----
-        self.list = QListWidget()
-        self.list.setViewMode(QListView.ListMode)  # ★ 列表，不是网格
-        self.list.setSelectionMode(QAbstractItemView.NoSelection)
-        self.list.setUniformItemSizes(True)
-        self.list.setSpacing(4)
-        v.addWidget(self.list, 1)
+        # 列表 + 中央"正在搜索..."占位（QStackedLayout 切换）
+        self._lib_stack = QStackedLayout()
+        self.lbl_searching = QLabel("正在搜索...")
+        self.lbl_searching.setAlignment(Qt.AlignCenter)
+        self.lbl_searching.setStyleSheet(
+            "color:#9aa0b0; font-size:16px; background:transparent;")
+        w_wait = QWidget()
+        w_wait.setStyleSheet("background:transparent;")
+        lay_wait = QHBoxLayout(w_wait)
+        lay_wait.addStretch(1)
+        lay_wait.addWidget(self.lbl_searching)
+        lay_wait.addStretch(1)
+        self.list_lib = QListWidget()
+        self.list_lib.setViewMode(QListView.ListMode)
+        self.list_lib.setSelectionMode(QAbstractItemView.NoSelection)
+        self.list_lib.setUniformItemSizes(True)
+        self.list_lib.setSpacing(4)
+        self._lib_stack.addWidget(w_wait)     # index 0：等待/空态
+        self._lib_stack.addWidget(self.list_lib)  # index 1：结果
+        w_stack = QWidget()
+        w_stack.setLayout(self._lib_stack)
+        vl.addWidget(w_stack, 1)
 
-        # ---- 底部：分页 + 已选计数 + 操作 ----
         hp = QHBoxLayout()
         self.btn_prev = QPushButton("上一页")
         self.btn_prev.clicked.connect(lambda: self._page(-1))
@@ -6015,14 +6261,24 @@ class ModBrowseDialog(QDialog):
         self.btn_next.clicked.connect(lambda: self._page(1))
         hp.addWidget(self.btn_next)
         hp.addStretch(1)
+        vl.addLayout(hp)
+        self.tabs.addTab(w_lib, "全库搜索")
+
+        # ★ V1.8.0：切到全库 Tab 且从未搜索过 → 自动首搜一次；
+        #   切回推荐 Tab 不触发任何网络。
+        self.tabs.currentChanged.connect(self._on_tab_switch)
+
+        # ---- 底部公共：已选计数 + 操作 ----
+        hp2 = QHBoxLayout()
         self.btn_adv = QPushButton("高级搜索")
         self.btn_adv.setToolTip(
             "打开旧版表格搜索：可切换 CurseForge、GitHub 安装等")
         self.btn_adv.clicked.connect(self.open_advanced)
-        hp.addWidget(self.btn_adv)
+        hp2.addWidget(self.btn_adv)
         if self.select_only:
             self.btn_adv.hide()
-        v.addLayout(hp)
+        hp2.addStretch(1)
+        v.addLayout(hp2)
 
         hb = QHBoxLayout()
         self.btn_inst = QPushButton(
@@ -6053,8 +6309,9 @@ class ModBrowseDialog(QDialog):
         bb.rejected.connect(self.reject)
         v.addWidget(bb)
 
-        # 打开先浏览一批（按当前服务器版本 + 加载器）
-        QTimer.singleShot(60, self.search)
+        # ★ V1.8.0：打开即渲染本地推荐（同步、零网络、毫秒级）。
+        #   不再 QTimer.singleShot(60, self.search) —— 那是卡 3-4 秒的根源。
+        self._load_builtin_local()
 
     # ---------- 数据 ----------
     def _installed_slugs(self):
@@ -6084,11 +6341,115 @@ class ModBrowseDialog(QDialog):
             "offset": self.offset,
         }
 
+    # ---------- ★ V1.8.0：双视图（推荐安装 / 全库搜索） ----------
+    def _on_tab_switch(self, idx):
+        """切 Tab：只有切到『全库搜索』且还没搜过才发一次网络请求。
+
+        切回『推荐安装』不触发任何网络（本地清单已渲染）。
+        """
+        if idx == 1 and not self._lib_searched:
+            self.search()
+
+    def _current_list(self):
+        """当前活动 Tab 对应的列表（全选/全不选作用于当前视图）。"""
+        return self.list_lib if self.tabs.currentIndex() == 1 \
+            else self.list_builtin
+
+    # ---- 推荐安装 Tab：纯本地、零网络、内存分页 ----
+    def _load_builtin_local(self):
+        """同步渲染本地推荐清单。
+
+        ★ V1.8.0：绝对不发任何网络请求 —— 不查 Modrinth、不拉图标
+          （图标统一走卡片占位）。数据只来自 MOD_TARGETS / PLUGIN_TARGETS，
+          分页在内存中完成（每页 20）。
+        """
+        hits = []
+        if self.is_plugins:
+            # ★ V1.8.0：插件推荐清单（multilogin 最前 + 前置绑定）
+            for m in install.PLUGIN_TARGETS:
+                hits.append({
+                    "slug": m["slug"], "title": m["name"],
+                    "description": m["desc"],
+                    "categories": [], "downloads": None,
+                    "group": m.get("group", ""),
+                    "req": m.get("req") or [], "icon_url": None,
+                })
+        else:
+            lst = install.mod_list_for(self.loader, self.mc_version)
+            try:
+                from .core import install as _inst
+                _skip = set(_inst.CLIENT_ONLY_MODS)
+            except Exception:
+                _skip = set()
+            _skip.add("cloth-config")  # 防御：cloth-config 已移出清单
+            for m in lst:
+                if m["slug"] in _skip:
+                    continue
+                hits.append({
+                    "slug": m["slug"], "title": m["name"],
+                    "description": m["desc"],
+                    "categories": [], "downloads": None,
+                    "group": m.get("group", ""),
+                    "req": m.get("req") or [], "icon_url": None,
+                })
+        self.builtin_hits = hits
+        self.builtin_total = len(hits)
+        self.builtin_offset = 0
+        self.builtin_mode = True
+        self.lbl_view_hint.setText(
+            "本地推荐：已按 %s + %s 过滤版本，剔除纯客户端组件"
+            % (self.mc_version or "?", self.loader or "?"))
+        self._fill_builtin()
+
+    def _fill_builtin(self):
+        """渲染推荐清单当前页（内存分页每页 20）。"""
+        self.list_builtin.blockSignals(True)
+        self.list_builtin.clear()
+        self._slug_title = {}
+        page = self.builtin_hits[
+            self.builtin_offset:self.builtin_offset + 20]
+        for h in page:
+            slug = h.get("slug") or ""
+            title = h.get("title") or slug
+            self._slug_title[slug] = title
+            it = QListWidgetItem()
+            it.setData(Qt.UserRole, slug)
+            it.setFlags(Qt.ItemIsEnabled)
+            it.setSizeHint(QSize(0, 104))
+            card, chk = self._make_card(h, {}, True)
+            it._chk = chk
+            self.list_builtin.addItem(it)
+            self.list_builtin.setItemWidget(it, card)
+        self.list_builtin.blockSignals(False)
+        self._sync_bpage()
+        self.lbl_stat.setText("本地推荐 %d 个，显示 %d 个"
+                              % (self.builtin_total, len(page)))
+        self._sync_count()
+
+    def _bpage(self, d):
+        """推荐 Tab 内存分页（不发网络）。"""
+        new = self.builtin_offset + d * 20
+        if new < 0 or (self.builtin_total
+                       and new >= self.builtin_total):
+            return
+        self.builtin_offset = new
+        self._fill_builtin()
+
+    def _sync_bpage(self):
+        page = self.builtin_offset // 20 + 1
+        self.lbl_bpage.setText("第 %d 页" % page)
+        self.btn_bp_prev.setEnabled(self.builtin_offset > 0)
+        self.btn_bp_next.setEnabled(
+            bool(self.builtin_total)
+            and self.builtin_offset + 20 < self.builtin_total)
+
+    # ---- 全库搜索 Tab：按需网络 ----
     def search(self):
         self.offset = 0
         self._run()
 
     def _page(self, d):
+        """全库翻页：携带正确 offset 重新搜索。"""
         new = self.offset + d * 20
         if new < 0 or (self.total and new >= self.total):
             return
@@ -6096,35 +6457,27 @@ class ModBrowseDialog(QDialog):
         self._run()
 
     def _run(self):
+        self._lib_searched = True
         self.btn_go.setEnabled(False)
         self.btn_inst.setEnabled(False)
         self.lbl_stat.setText("搜索中 ...")
+        self._lib_wait(True)
         self.worker = _track(self, Worker(
             self._do_search, self._params(), self))
         self.worker.log.connect(self._log)
         self.worker.done.connect(self._on_search)
         self.worker.start()
 
+    def _lib_wait(self, waiting):
+        """全库 Tab 列表中央显示/隐藏『正在搜索...』（不白屏）。"""
+        try:
+            self._lib_stack.setCurrentIndex(0 if waiting else 1)
+        except Exception:
+            pass
+
     def _do_search(self, query="", category=None, sort="downloads",
                    offset=0, on_log=None):
-        """后台搜索。
-
-        ★ v0.3.0 双模式：
-          模式1 内置推荐（本地秒出）——仅当 关键词为空 且 没切分类
-          且 排序还是默认(downloads) 时显示；
-          模式2 全库搜索——用户输入关键词、点搜索、切了分类、
-          或改了排序，立即走 Modrinth API（版本/加载器强制当前服的）。
-        """
-        q = (query or "").strip()
-        # ★ V1.7.0：由顶部『内置推荐 / 全库搜索』显式决定走哪条路。
-        #   内置推荐只对模组模式有效（插件模式没有内置清单，走全库）；
-        #   一翻页 offset!=0 也必须强制走网络，防止"下一页"又回到
-        #   那十几个内置模组。
-        if not self.is_plugins and self._view_mode == "builtin" \
-                and offset == 0:
-            return self._load_builtin(on_log=on_log)
-        # 全库搜索：facets 修复后传 mc_version/loader，
-        # browse_projects 内部用 json.dumps 生成标准 JSON facets。
+        """后台搜索 Modrinth 全库（推荐 Tab 不走这里）。"""
         r = modman.browse_projects(
             query=query, mc_version=self.mc_version,
             loader=self.loader, category=category, sort=sort,
@@ -6139,85 +6492,20 @@ class ModBrowseDialog(QDialog):
                 "icons": icons, "offset": offset,
                 "error": r.get("error"), "builtin": False}
 
-    def _load_builtin(self, on_log=None):
-        """内置优化清单（MOD_TARGETS）：图标按 slug 从 Modrinth 并发拉。
-
-        ★ V1.7.0：读取时强制剔除纯客户端模组（CLIENT_ONLY_MODS 名单
-           + Cloth Config 这类客户端为主的库），并且 MOD_TARGETS 里
-           版本不兼容的（如 LazyDFU 限 1.18.2）已由
-           install.mod_list_for 提前过滤掉。
-        """
-        lst = install.mod_list_for(self.loader, self.mc_version)
-        try:
-            from .core import install as _inst
-            _skip = set(_inst.CLIENT_ONLY_MODS)
-        except Exception:
-            _skip = set()
-        _skip.add("cloth-config")
-        hits = []
-        for m in lst:
-            if m["slug"] in _skip:
-                continue
-            hits.append({
-                "slug": m["slug"], "title": m["name"],
-                "description": m["desc"],
-                "categories": [],
-                "downloads": None,
-                "group": m.get("group", ""),
-                "req": m.get("req") or [],
-                "icon_url": None,
-            })
-        icons = self._fetch_icons(
-            [(h["slug"], None) for h in hits])
-        return {"hits": hits, "total": len(hits), "icons": icons,
-                "offset": 0, "error": None, "builtin": True}
-
-    def _on_view_switch(self, builtin):
-        """★ V1.7.0-1：切『内置推荐 / 全库搜索』。
-        内置模式下搜索/分类/排序置灰（内置清单是本地秒出的，
-        不受关键词影响）；全库模式恢复可用并立即按当前条件搜索。
-        """
-        self._view_mode = "builtin" if builtin else "lib"
-        self.offset = 0
-        want = not builtin
-        # ★ V1.7.3-2：getattr 容错 —— 构造早期（ed_q 尚未创建）
-        #   触发的切换不再抛 AttributeError。
-        for w in (getattr(self, "ed_q", None),
-                  getattr(self, "cb_cat", None),
-                  getattr(self, "cb_sort", None),
-                  getattr(self, "btn_go", None)):
-            if w is None:
-                continue
-            try:
-                w.setEnabled(want)
-            except Exception:
-                pass
-        if builtin:
-            self.lbl_view_hint.setText(
-                "本地推荐：已按 %s + %s 过滤版本，剔除纯客户端模组"
-                % (self.mc_version or "?", self.loader or "?"))
-        else:
-            self.lbl_view_hint.setText(
-                "Modrinth 全库：强制过滤纯客户端模组")
-        self._run()
-
     @staticmethod
     def _fetch_icons(items):
-        """并发下载图标字节：items = [(slug, icon_url), ...]。"""
+        """并发下载图标字节：items = [(slug, icon_url), ...]。
+
+        ★ V1.8.0：只拉带 icon_url 的（全库结果），内置推荐不经过这里
+          —— 推荐 Tab 保持零网络。
+        """
         import concurrent.futures
         icons = {}
 
         def _dl(item):
             slug, url = item
-            if not slug:
+            if not slug or not url:
                 return None
-            if not url:
-                # 内置清单没有 icon_url，按 slug 查 Modrinth 项目拿图标
-                try:
-                    info = modman.project_info(slug)
-                    url = (info or {}).get("icon_url")
-                except Exception:
-                    return None
             b = _fetch_icon_bytes(url)
             return (slug, b) if b else None
 
@@ -6235,14 +6523,14 @@ class ModBrowseDialog(QDialog):
         self.btn_go.setEnabled(True)
         self.btn_inst.setEnabled(True)
         if not ok:
+            self._lib_wait(False)
             self.lbl_stat.setText("搜索失败")
             self._log("[错误] %r" % (res,))
             return
         self.hits = res.get("hits") or []
         self.total = res.get("total") or 0
-        builtin = bool(res.get("builtin"))
-        self.builtin_mode = builtin
-        self._fill(res.get("icons") or {}, builtin=builtin)
+        self._lib_wait(False)
+        self._fill_lib(res.get("icons") or {})
         self._sync_page()
         err = res.get("error")
         if err:
@@ -6250,14 +6538,34 @@ class ModBrowseDialog(QDialog):
             self._log("[失败] %s" % err)
             return
         if not self.hits:
-            if builtin:
-                self.lbl_stat.setText(
-                    "%s 加载器没有内置优化模组清单" % self.loader)
-            else:
-                self.lbl_stat.setText(
-                    "没找到匹配 %s + %s 的模组"
-                    % (self.mc_version, self.loader))
-                self._log("[空] 试试放宽分类或换个关键词")
+            self.lbl_stat.setText(
+                "没找到匹配 %s + %s 的%s"
+                % (self.mc_version, self.loader,
+                   "插件" if self.is_plugins else "模组"))
+            self._log("[空] 试试放宽分类或换个关键词")
+
+    def _fill_lib(self, icons):
+        """渲染全库搜索结果（带图标）。"""
+        self.list_lib.blockSignals(True)
+        self.list_lib.clear()
+        self._slug_title = {}
+        for h in self.hits:
+            slug = h.get("slug") or ""
+            title = h.get("title") or slug
+            self._slug_title[slug] = title
+            it = QListWidgetItem()
+            it.setData(Qt.UserRole, slug)
+            it.setFlags(Qt.ItemIsEnabled)
+            it.setSizeHint(QSize(0, 104))
+            card, chk = self._make_card(h, icons, False)
+            it._chk = chk
+            self.list_lib.addItem(it)
+            self.list_lib.setItemWidget(it, card)
+        self.list_lib.blockSignals(False)
+        shown = self.list_lib.count()
+        self.lbl_stat.setText("共 %d 个结果，显示 %d 个"
+                              % (self.total, shown))
+        self._sync_count()
 
     # ---------- PCL2 风格卡片 ----------
     def _make_card(self, h, icons, builtin):
@@ -6409,64 +6717,41 @@ class ModBrowseDialog(QDialog):
         except Exception:
             pass
 
-    def _fill(self, icons, builtin=False):
-        self.list.blockSignals(True)
-        self.list.clear()
-        self._slug_title = {}
-        for h in self.hits:
-            slug = h.get("slug") or ""
-            title = h.get("title") or slug
-            self._slug_title[slug] = title
-            it = QListWidgetItem()
-            it.setData(Qt.UserRole, slug)
-            it.setFlags(Qt.ItemIsEnabled)
-            it.setSizeHint(QSize(0, 104))  # 卡片高度
-            card, chk = self._make_card(h, icons, builtin)
-            it._chk = chk  # 勾选状态存在这里
-            self.list.addItem(it)
-            self.list.setItemWidget(it, card)
-        self.list.blockSignals(False)
-        shown = self.list.count()
-        self.lbl_stat.setText("共 %d 个结果，显示 %d 个"
-                              % (self.total, shown))
-        self._sync_count()
-
     def _sync_count(self):
         n = len(self._checked_slugs())
         verb = "确定选择" if self.select_only else "安装选中"
         self.btn_inst.setText("%s (%d)" % (verb, n))
 
     def _checked_slugs(self):
+        """★ V1.8.0：合并两个 Tab 的勾选（推荐 + 全库）。"""
         out = []
-        for i in range(self.list.count()):
-            it = self.list.item(i)
-            chk = getattr(it, "_chk", None)
-            if chk is not None and chk.isChecked():
-                s = it.data(Qt.UserRole)
-                if s:
-                    out.append(s)
+        for lst in (self.list_builtin, self.list_lib):
+            for i in range(lst.count()):
+                it = lst.item(i)
+                chk = getattr(it, "_chk", None)
+                if chk is not None and chk.isChecked():
+                    s = it.data(Qt.UserRole)
+                    if s:
+                        out.append(s)
         return out
 
     def _set_all(self, on):
-        for i in range(self.list.count()):
-            it = self.list.item(i)
+        """★ V1.8.0：作用于当前活动 Tab 的列表。"""
+        lst = self._current_list()
+        for i in range(lst.count()):
+            it = lst.item(i)
             chk = getattr(it, "_chk", None)
             if chk is not None:
                 chk.setChecked(on)
         self._sync_count()
 
     def _sync_page(self):
+        """全库 Tab 页码（推荐 Tab 走 _sync_bpage）。"""
         page = self.offset // 20 + 1
         self.lbl_page.setText("第 %d 页" % page)
         self.btn_prev.setEnabled(self.offset > 0)
-        if self.builtin_mode:
-            # ★ 内置推荐只有 1 页：下一页禁用（要更多去搜索/翻分类）
-            self.btn_next.setEnabled(False)
-            self.btn_next.setToolTip("内置推荐就这些；搜索或切分类可看全库")
-        else:
-            self.btn_next.setEnabled(bool(self.total)
-                                     and self.offset + 20 < self.total)
-            self.btn_next.setToolTip("")
+        self.btn_next.setEnabled(bool(self.total)
+                                 and self.offset + 20 < self.total)
 
     # ---------- 操作 ----------
     def open_advanced(self):
@@ -6519,11 +6804,8 @@ class ModBrowseDialog(QDialog):
             return
         kw = "插件" if self.is_plugins else "模组"
         names = "\n".join(
-            "· %s" % (self._slug_title.get(
-                self.list.item(i).data(Qt.UserRole), "?"))
-            for i in range(self.list.count())
-            if getattr(self.list.item(i), "_chk", None) is not None
-            and self.list.item(i)._chk.isChecked())[:500]
+            "· %s" % (self._slug_title.get(s, s))
+            for s in slugs)[:500]
         r = QMessageBox.question(
             self, "确认安装",
             "把选中的 %d 个%s装到：\n%s\n\n%s\n\n"

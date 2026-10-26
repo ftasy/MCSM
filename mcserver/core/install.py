@@ -1331,6 +1331,10 @@ def _m(slug, name, desc, group, req=(), max_ver=None):
 
 MOD_TARGETS = {
     "fabric": [
+        # ---- 第三方登录（★ V1.8.0：登录优先，放最前）----
+        _m("multiyggdrasil", "MultiYggdrasil",
+           "多源外置登录：正版 + 第三方皮肤站共存（Fabric/Forge/NeoForge）",
+           "① 第三方登录"),
         # ---- 前置 ----
         _m("fabric-api", "Fabric API",
            "绝大多数模组的前置，建议勾选", "① 前置"),
@@ -1375,11 +1379,15 @@ MOD_TARGETS = {
         _m("simple-voice-chat", "Simple Voice Chat",
            "近距离语音，客户端也要装同名模组", "⑤ 服主工具",
            req=["fabric-api"]),
-        _m("cloth-config", "Cloth Config",
-           "部分模组的配置库，一般不用单独装", "⑤ 服主工具"),
     ],
 
     "neoforge": [
+        # ---- 第三方登录（★ V1.8.0：登录优先，放最前）----
+        _m("akiyggdrasil", "AkiYggdrasil",
+           "第三方外置登录（1.21.1 NeoForge；若 Modrinth 暂无发布，"
+           "按日志提示手动装 jar）", "① 第三方登录", max_ver="1.21.1"),
+        _m("multiyggdrasil", "MultiYggdrasil",
+           "多源外置登录：正版 + 第三方皮肤站共存", "① 第三方登录"),
         _m("ferrite-core", "FerriteCore", "减少内存占用", "② 核心优化"),
         _m("modernfix", "ModernFix", "修复性能 bug + 加快启动", "② 核心优化"),
         _m("krypton", "Krypton", "优化网络包处理", "② 核心优化"),
@@ -1395,6 +1403,10 @@ MOD_TARGETS = {
     ],
 
     "forge": [
+        # ---- 第三方登录（★ V1.8.0：登录优先，放最前）----
+        _m("multiyggdrasil", "MultiYggdrasil",
+           "多源外置登录：正版 + 第三方皮肤站共存（Forge/Fabric/NeoForge）",
+           "① 第三方登录"),
         # ★ 修正：slug 是 ferrite-core 而非 ferritecore
         _m("ferrite-core", "FerriteCore",
            "减少内存占用（1.20.1 需在配置中开启 populateNeighborTable 防崩溃）",
@@ -1413,8 +1425,42 @@ MOD_TARGETS = {
     ],
 
     "vanilla": [],
-    "paper": [],
+    # ★ V1.8.0：Paper 服推荐区新增 Cupboard 生态分组（Cupboard 是
+    #   插件，装进 plugins/ 目录；其余插件走 PLUGIN_TARGETS 推荐清单）。
+    "paper": [
+        _m("cupboard", "Cupboard",
+           "提供 JSON 配置框架与崩溃追踪的核心前置", "① Cupboard 生态"),
+    ],
 }
+
+# ★ V1.8.0：内置插件推荐清单（与 MOD_TARGETS 并列）。
+#   下载时复用 resolve_selection（plugin=True）自动补前置 + 排序。
+#   multilogin 放最前（第三方登录优先）；essentialsx 绑定
+#   vault + luckperms 前置；vault 是经济基础必须存在。
+PLUGIN_TARGETS = [
+    _m("multilogin", "MultiLogin",
+       "多源登录：正版 + 第三方外置登录共存（插件版）", "① 第三方登录"),
+    _m("vault", "Vault",
+       "经济/权限接口，经济插件的地基，必须存在", "② 基础插件"),
+    _m("luckperms", "LuckPerms",
+       "权限管理（Multilogin/EssentialsX 都依赖它）", "② 基础插件"),
+    _m("essentialsx", "EssentialsX",
+       "基础指令/聊天/传送/经济桥（需 Vault + LuckPerms）",
+       "③ 功能插件", req=["vault", "luckperms"]),
+    _m("coreprotect", "CoreProtect",
+       "防熊回滚：方块/容器/聊天操作记录，被熊了能查能还原",
+       "④ 防熊插件"),
+    _m("ledger", "Ledger",
+       "方块/容器操作审计（CoreProtect 的现代替代）", "④ 防熊插件"),
+]
+
+
+def plugin_meta(slug):
+    """取某个插件在推荐清单里的元信息，不在清单里返回 None。"""
+    for m in PLUGIN_TARGETS:
+        if m["slug"] == slug:
+            return m
+    return None
 
 # ★ 这些模组"只在客户端生效"，装到服务端完全没用。
 #   v5.7 之前它们在清单里（Smooth Boot / EntityCulling），
@@ -1438,7 +1484,7 @@ def mod_meta(loader, slug):
     return None
 
 
-def resolve_selection(loader, slugs):
+def resolve_selection(loader, slugs, plugin=False):
     """把"用户勾了哪些"展开成"实际要装哪些"。
 
     做三件事（用户明确要求"有前置的绑死一起，不要只装一半"）：
@@ -1447,12 +1493,18 @@ def resolve_selection(loader, slugs):
       2. 排顺序：前置排在被依赖者前面，装的时候先装前置
       3. 查冲突：两个互相打架的模组同时被勾上，报出来
 
+    ★ V1.8.0：plugin=True 时按 PLUGIN_TARGETS（插件清单）解析，
+      模组模式仍走 MOD_TARGETS[loader]。
+
     返回 dict:
       install  实际要装的 slug 列表（已按依赖排好序）
       added    自动补进来的 slug（原本没勾）
       conflicts [(slug_a, slug_b, 说明), ...]
       notes    [给人看的一句话, ...]
     """
+    def _meta(s):
+        return plugin_meta(s) if plugin else mod_meta(loader, s)
+
     want = [s for s in (slugs or []) if s]
     have = set(want)
     added, notes = [], []
@@ -1464,7 +1516,7 @@ def resolve_selection(loader, slugs):
         changed = False
         guard += 1
         for s in list(have):
-            meta = mod_meta(loader, s)
+            meta = _meta(s)
             if not meta:
                 continue
             for r in meta.get("req") or []:
@@ -1484,7 +1536,7 @@ def resolve_selection(loader, slugs):
         if s in stack:      # 循环依赖，别死循环
             return
         stack.add(s)
-        meta = mod_meta(loader, s)
+        meta = _meta(s)
         for r in (meta.get("req") if meta else []) or []:
             _visit(r, stack)
         done.add(s)
@@ -1499,7 +1551,7 @@ def resolve_selection(loader, slugs):
     conflicts = []
     seen_cf = set()
     for s in ordered:
-        meta = mod_meta(loader, s)
+        meta = _meta(s)
         if not meta:
             continue
         for c in meta.get("conflict") or []:
@@ -1510,7 +1562,7 @@ def resolve_selection(loader, slugs):
             if key in seen_cf:
                 continue
             seen_cf.add(key)
-            cm = mod_meta(loader, c) or {}
+            cm = _meta(c) or {}
             conflicts.append((
                 s, c,
                 "%s 与 %s 抢同一块功能，同时装会互相打架"
@@ -1714,7 +1766,10 @@ def install_mods(server_dir, mc_version, loader, on_log=None,
         log("没有选中任何模组，跳过")
         return {"ok": [], "fail": [], "skipped": [], "notes": plan["notes"]}
 
-    mods_dir = os.path.join(server_dir, "mods")
+    # ★ V1.8.0：Paper 服的 MOD_TARGETS 只有 Cupboard（插件），
+    #   下载进 plugins/ 而不是 mods/。
+    mods_dir = os.path.join(
+        server_dir, "plugins" if loader == "paper" else "mods")
     os.makedirs(mods_dir, exist_ok=True)
     ok_list, fail_list, skipped = [], [], []
 
@@ -1809,22 +1864,45 @@ def install_plugins(server_dir, mc_version, loader="paper", only=None,
         project_type=plugin）勾选的 slug。
     ★ V1.7.0-3：加载器不再固定 paper —— Fabric / Forge /
       NeoForge 服也会按各自加载器过滤插件版本。
+    ★ V1.8.0：新增内置插件推荐清单 PLUGIN_TARGETS（multilogin 最前、
+      essentialsx 绑定 vault+luckperms、含 coreprotect 防熊）；
+      下载前用 resolve_selection(plugin=True) 自动补前置 + 拓扑排序，
+      保证"先装前置再装依赖"。
     """
     def log(m):
         if on_log:
             on_log(m)
 
-    want = list(only or [])
-    if not want:
+    # ★ V1.8.0：未指定时默认装内置推荐清单全部（与 install_mods 一致）
+    if only is not None:
+        want = list(only)
+    else:
+        want = [p["slug"] for p in PLUGIN_TARGETS]
+
+    # ★ V1.8.0：补前置 + 排顺序 + 查冲突（复用模组的 resolve_selection）
+    plan = resolve_selection(loader, want, plugin=True)
+    for n in plan.get("notes") or []:
+        log("  · %s" % n)
+    for a, b, why in plan.get("conflicts") or []:
+        log("  [!] 冲突：%s" % why)
+    slugs = plan.get("install") or []
+
+    # 用户手动添加的自定义 slug（不在内置清单里）也要装
+    for slug in (want or []):
+        if slug not in slugs:
+            slugs.append(slug)
+
+    if not slugs:
         log("没有选中任何插件，跳过")
-        return {"ok": [], "fail": [], "skipped": [], "notes": []}
+        return {"ok": [], "fail": [], "skipped": [], "notes": plan["notes"]}
 
     plugins_dir = os.path.join(server_dir, "plugins")
     os.makedirs(plugins_dir, exist_ok=True)
-    ok_list, fail_list = [], []
+    ok_list, fail_list, skipped = [], [], []
 
     def _download_task(slug):
-        desc = slug
+        meta = plugin_meta(slug)
+        desc = (meta or {}).get("name") or slug
         try:
             def _note(attempt, e, wait):
                 log("    [%s] 网络不稳（%s），%.1fs 后重试..."
@@ -1854,31 +1932,52 @@ def install_plugins(server_dir, mc_version, loader="paper", only=None,
             log("  [跳过] %s - %s" % (desc, _brief(e)))
             return False, slug, desc, _brief(e)
 
-    # ---- 并发下载（4 线程）----
-    log("开始并发下载 %d 个插件（4 线程）..." % len(want))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        future_to_slug = {
-            executor.submit(_download_task, slug): slug
-            for slug in want
-        }
-        for future in concurrent.futures.as_completed(future_to_slug):
-            try:
-                success, slug, desc, result = future.result()
-            except Exception as e:  # 任务本身异常也要兜住，别让 UI 崩
-                slug = future_to_slug[future]
-                success, desc, result = False, slug, _brief(e)
-            if success:
-                ok_list.append({"name": result, "slug": slug})
-            else:
-                fail_list.append({"slug": slug, "name": desc,
-                                  "reason": result})
+    # ---- 预检查前置依赖（没进清单的一律跳过，不留半个）----
+    valid_slugs = []
+    for slug in slugs:
+        meta = plugin_meta(slug)
+        desc = (meta or {}).get("name") or slug
+        missing = [r for r in ((meta or {}).get("req") or [])
+                   if r not in slugs]
+        if missing:
+            msg = "缺少前置 %s" % ", ".join(missing)
+            log("  [跳过] %s - %s" % (desc, msg))
+            skipped.append({"slug": slug, "name": desc, "reason": msg})
+        else:
+            valid_slugs.append(slug)
 
+    # ---- 并发下载（4 线程）----
+    if valid_slugs:
+        log("开始并发下载 %d 个插件（4 线程，前置优先）..."
+            % len(valid_slugs))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            future_to_slug = {
+                executor.submit(_download_task, slug): slug
+                for slug in valid_slugs
+            }
+            for future in concurrent.futures.as_completed(future_to_slug):
+                try:
+                    success, slug, desc, result = future.result()
+                except Exception as e:  # 任务本身异常也要兜住，别让 UI 崩
+                    slug = future_to_slug[future]
+                    success, desc, result = False, slug, _brief(e)
+                if success:
+                    ok_list.append({"name": result, "slug": slug})
+                else:
+                    fail_list.append({"slug": slug, "name": desc,
+                                      "reason": result})
+
+    if skipped:
+        log("")
+        log("★ 有 %d 个插件因前置没装上而跳过（不会留半个）"
+            % len(skipped))
     if fail_list and not ok_list:
         log("")
         log("★ 一个都没装上，通常是网络瞬时故障（不是插件的问题）。")
         log("  等几秒再点一次『开始』通常就好了。")
-    return {"ok": ok_list, "fail": fail_list, "skipped": [],
-            "notes": []}
+    return {"ok": ok_list, "fail": fail_list, "skipped": skipped,
+            "notes": plan.get("notes") or [],
+            "conflicts": plan.get("conflicts") or []}
 
 
 # ★ V1.3.0：多源登录组件（全部走 Modrinth 下载引擎，不写死第三方网址）
