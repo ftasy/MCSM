@@ -5,7 +5,7 @@ a = Analysis(
     ['mcserver/__main__.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('icon.ico', '.'), ('icon.png', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

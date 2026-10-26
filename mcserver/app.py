@@ -424,6 +424,9 @@ def app_icon():
 
     多路径查找：包内 mcserver/、包根、再上一级
     —— 不管用户把压缩包解到哪一层都能找到。
+    ★ V1.6.5：PyInstaller 打包后 __file__ 指向 _internal/mcserver 里，
+      icon.ico 由 --add-data 放进 _internal 根（sys._MEIPASS）。
+      不加这个路径，打包版窗口/任务栏图标会退回默认图标。
     """
     from PySide6.QtGui import QIcon
     here = os.path.dirname(os.path.abspath(__file__))
@@ -434,6 +437,14 @@ def app_icon():
         os.path.join(os.path.dirname(here), "icon.png"),
         os.path.join(os.path.dirname(os.path.dirname(here)), "icon.ico"),
     ]
+    if getattr(sys, "frozen", False):
+        try:
+            meipass = getattr(sys, "_MEIPASS", "") or ""
+            if meipass:
+                cands.insert(0, os.path.join(meipass, "icon.ico"))
+                cands.insert(1, os.path.join(meipass, "icon.png"))
+        except Exception:
+            pass
     for f in cands:
         try:
             if os.path.isfile(f):

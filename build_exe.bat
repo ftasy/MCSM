@@ -39,7 +39,9 @@ echo [3/3] Building EXE (--onedir, 2-5 min) ...
   --onedir ^
   --noconsole ^
   --name MCSM ^
-  --icon=icon.ico ^
+  --icon=icon.ico ^
+  --add-data "icon.ico;." ^
+  --add-data "icon.png;." ^
   --exclude-module PySide6.QtWebEngineCore ^
   --exclude-module PySide6.QtWebEngineWidgets ^
   --exclude-module PySide6.QtMultimedia ^
