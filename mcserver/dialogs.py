@@ -6226,10 +6226,18 @@ class ModBrowseDialog(QDialog):
         h = QHBoxLayout()
         self.ed_q = QLineEdit()
         self.ed_q.setPlaceholderText(
-            "输入关键词搜 Modrinth 全库（如 %s）"
+            "输入关键词搜全库（如 %s）"
             % ("essentialsx" if self.is_plugins else "sodium"))
         self.ed_q.returnPressed.connect(self.search)
         h.addWidget(self.ed_q, 1)
+        h.addWidget(QLabel("源:"))
+        self.cb_src = QComboBox()
+        self.cb_src.addItem("Modrinth", "modrinth")
+        self.cb_src.addItem("CurseForge", "curseforge")
+        self.cb_src.setToolTip(
+            "CurseForge 上有大量 Modrinth 没有的模组（如 Cupboard 生态）。\n"
+            "走 MCIM 镜像时不需要 API key。")
+        h.addWidget(self.cb_src)
         h.addWidget(QLabel("分类:"))
         self.cb_cat = QComboBox()
         self.cb_cat.addItem("(全部)", "")
@@ -6251,6 +6259,8 @@ class ModBrowseDialog(QDialog):
         # ★ V1.8.0：切分类 / 切排序 = 用户显式操作，触发全库搜索
         self.cb_cat.currentIndexChanged.connect(self.search)
         self.cb_sort.currentIndexChanged.connect(self.search)
+        # ★ V1.8.6：切下载源（Modrinth/CurseForge）同样触发重搜
+        self.cb_src.currentIndexChanged.connect(self.search)
 
         # 列表 + 中央"正在搜索..."占位（QStackedLayout 切换）
         self._lib_stack = QStackedLayout()
@@ -6363,6 +6373,7 @@ class ModBrowseDialog(QDialog):
             "category": self.cb_cat.currentData() or None,
             "sort": self.cb_sort.currentData() or "downloads",
             "offset": self.offset,
+            "source": self.cb_src.currentData() or "modrinth",
         }
 
     # ---------- ★ V1.8.0：双视图（推荐安装 / 全库搜索） ----------
@@ -6544,12 +6555,19 @@ class ModBrowseDialog(QDialog):
             pass
 
     def _do_search(self, query="", category=None, sort="downloads",
-                   offset=0, on_log=None):
-        """后台按批搜索（limit=batch_size=100，offset 为批次起点）。"""
+                   offset=0, source="modrinth", on_log=None):
+        """后台按批搜索（limit=batch_size=100，offset 为批次起点）。
+
+        ★ V1.8.6：支持 source="curseforge"（Modrinth/CurseForge 双源）。
+        CurseForge 的 category 是数字 categoryId，Modrinth 的 slug
+        不通用，切到 CF 时忽略分类过滤。
+        """
+        if source == "curseforge":
+            category = None
         r = modman.browse_projects(
             query=query, mc_version=self.mc_version,
             loader=self.loader, category=category, sort=sort,
-            limit=self.batch_size, offset=offset, source="modrinth",
+            limit=self.batch_size, offset=offset, source=source,
             project_type="plugin" if self.is_plugins else "mod")
         if r.get("err"):
             raise RuntimeError(r["err"])

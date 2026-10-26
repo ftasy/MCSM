@@ -140,3 +140,42 @@
 - **ZIP 版（推荐）**：解压后运行 `MCSM.exe`，无需安装，绿色免安装。
 - **EXE 版**：直接运行 `MCSM.exe`（含运行库，首次启动略慢）。
 - 软件支持在线检查更新：顶栏「检查更新」会自动跳转到本仓库 Release 页面。
+
+---
+
+# MCSM v1.8.6
+
+**Cupboard 生态强制走 CurseForge 下载 + 全库搜索双源切换 + 版本过滤放宽**
+
+## 修复内容
+
+1. **Cupboard 生态 6 模组强制指定 CurseForge 下载源**
+   - 经查证，`cupboard`（作者 someaddon）及其附属（`fastasyncworldsave`、`structureessentials`、`recipeessentials`、`connectivity`、`chunksending`）**只在 CurseForge 发布**，Modrinth 无此项目（之前的“暂无发布”是事实而非接口问题）。
+   - 内置推荐清单中这 6 项（Fabric / Forge / NeoForge / Paper 四组全部覆盖）统一加 `source="curseforge"`，下载时走 CurseForge 引擎，不再因为 Modrinth 查不到而失败。
+   - 下载前自动把 slug（如 `cupboard`）解析成 CurseForge 数字 project id，再取 jar 直链；走 MCIM 镜像无需 API key。
+
+2. **install_mods / install_plugins 按 source 分流**
+   - 内置清单条目带 `source="curseforge"` → 调 `install_from_project(source="curseforge")`。
+   - 其余保持 Modrinth 原逻辑；插件服（Paper）的 Cupboard 生态同样识别为 CF 源。
+   - 全库搜索切到 CurseForge 勾选的项目（CF 数字 id），Modrinth 查不到时自动回落到 CF 下载。
+
+3. **全库搜索 CurseForge 源可用**
+   - 全库搜索 Tab 新增源下拉：**[Modrinth] / [CurseForge]**，切换即重新搜索。
+   - CurseForge 搜索正确传递 `gameVersion` 与 `modLoaderType`：**Forge=1、Fabric=4、NeoForge=6**（补上了此前缺失的 neoforge 映射）。
+   - 切到 CF 源时忽略 Modrinth 分类 slug（CF 分类是数字 categoryId，两者不通用）。
+
+4. **推荐列表对 CF 来源模组放宽版本过滤**
+   - `mod_list_for` 不再按 `max_ver` 隐藏 `source="curseforge"` 的模组（如 26.x 新版本在 CF 暂无文件时仍展示条目），下载失败有日志提示，Modrinth 项保持严格过滤不变。
+
+## 下载说明
+
+- **ZIP 版（推荐）**：`MCSM_v1.8.6_安装包.zip` 解压后运行 `MCSM.exe`。
+- **EXE 版**：`MCSM.exe`（含运行库，首次启动略慢）。
+- 软件顶栏「检查更新」会自动提示本版本。
+
+## 历史版本
+
+- v1.8.4：全库搜索按批加载异步翻页（100 条/批 + 批内 5 页零网络）、铲除全部图标与 `?` 占位、Cupboard 生态补进四模组组并剔除 packetfixer/morechathistory
+- v1.8.2：推荐清单纯平铺标签化、全库搜索缓存翻页、loader 稳定版优先、页签重排合并
+- v1.8.0：分离双视图（打开/翻页不再卡 3-4 秒）+ 推荐清单重构 + 配置页补全 + 更新检测修复
+- v1.7.3-4：CreateDialog 子按钮悬停动效修复 + MC 版本多级回退识别

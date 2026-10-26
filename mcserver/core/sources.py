@@ -294,8 +294,9 @@ def cf_search(query="", mc_version=None, loader=None,
     if mc_version:
         params["gameVersion"] = mc_version
     if loader:
-        # CurseForge 用 modLoaderType：1=Forge 4=Fabric 5=Quilt
-        m = {"forge": 1, "fabric": 4, "quilt": 5}
+        # CurseForge 用 modLoaderType：1=Forge 4=Fabric 5=Quilt 6=NeoForge
+        # ★ V1.8.6：补上 neoforge=6（之前漏了，NeoForge 服搜 CF 会退化）
+        m = {"forge": 1, "fabric": 4, "quilt": 5, "neoforge": 6}
         if loader in m:
             params["modLoaderType"] = m[loader]
     if category:
@@ -338,6 +339,29 @@ def _cf_cats(m):
         if n:
             out.append(n)
     return out
+
+
+def cf_resolve_id(slug, mc_version=None, loader=None):
+    """把项目 slug（如 cupboard）解析成 CurseForge project id。
+
+    CurseForge API 只认数字 id，不认 slug 路径；内置推荐清单里
+    Cupboard 生态用的是 slug 形式，下载前先按名称搜索定位。
+    返回 int id 或 None。
+    """
+    try:
+        r = cf_search(query=slug, mc_version=mc_version, loader=loader,
+                      page_size=10)
+    except Exception:
+        return None
+    hits = r.get("hits") or []
+    s = (slug or "").lower().replace(" ", "")
+    for h in hits:
+        t = (h.get("title") or "").lower().replace(" ", "")
+        if s and (s in t or t == s):
+            return h.get("cf_id")
+    if hits:
+        return hits[0].get("cf_id")  # 兜底取第一个搜索结果
+    return None
 
 
 def cf_download_url(cf_id, mc_version=None, loader=None):

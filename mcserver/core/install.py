@@ -1329,14 +1329,18 @@ def collect_diag(server_dir, out_dir=None, extra_log=None):
 #   查得到版本的；查不到会在安装时明确提示，不会误导。
 
 
-def _m(slug, name, desc, group, req=(), max_ver=None):
+def _m(slug, name, desc, group, req=(), max_ver=None, source="modrinth"):
     """极简清单条目。
 
     max_ver：该模组最高支持的 MC 版本（如 LazyDFU 只到 1.18.2）。
     视图/列表展示时会严格过滤：当前服版本高于 max_ver 就不显示。
+    source：下载源，"modrinth"（默认）或 "curseforge"。
+      ★ V1.8.6：仅 CurseForge 发布的模组（如 Cupboard 生态）强制
+      指定 curseforge，install_mods / install_plugins 下载时按此分流。
     """
     return {"slug": slug, "name": name, "desc": desc,
-            "group": group, "req": list(req), "max_ver": max_ver}
+            "group": group, "req": list(req), "max_ver": max_ver,
+            "source": source}
 
 
 MOD_TARGETS = {
@@ -1529,6 +1533,20 @@ PLUGIN_TARGETS = [
     _m("spark", "spark", "性能分析，卡顿时 /spark profiler 排查 [监控]", ""),
 ]
 
+# ★ V1.8.6：Cupboard 生态 6 项**只在 CurseForge 发布**（Modrinth 无项目，
+#   作者 someaddon 维护；Modrinth 上的 cupboard 是无关存储模组）。
+#   统一强制指定下载源为 curseforge —— 下载走 cf_download_url，
+#   全库搜索走 sources.cf_search，推荐列表展示不受 Modrinth 404 影响。
+_CUPBOARD_CF_SLUGS = {
+    "cupboard", "fastasyncworldsave", "structureessentials",
+    "recipeessentials", "connectivity", "chunksending",
+}
+for _lt in MOD_TARGETS.values():
+    for _mi in _lt:
+        if _mi["slug"] in _CUPBOARD_CF_SLUGS:
+            _mi["source"] = "curseforge"
+
+
 
 def plugin_meta(slug):
     """取某个插件在推荐清单里的元信息，不在清单里返回 None。"""
@@ -1695,7 +1713,11 @@ def mod_list_for(loader, mc_version=None):
     out = []
     for m in lst:
         m_max = m.get("max_ver")
-        if m_max and vk > _V.mc_version_key(m_max, newest_first=False):
+        # ★ V1.8.6：CurseForge 来源的模组（Cupboard 生态）放宽版本过滤，
+        #   新版本在 CF 上可能暂无文件，但条目仍展示（下载失败有日志提示），
+        #   不因 26.3 等新版本被隐藏。
+        if m_max and m.get("source") != "curseforge" \
+                and vk > _V.mc_version_key(m_max, newest_first=False):
             continue  # ★ 版本不支持，剔除（如 1.20.1 看不到 LazyDFU）
         out.append(dict(m))
     return out
@@ -1852,7 +1874,29 @@ def install_mods(server_dir, mc_version, loader, on_log=None,
     def _download_task(slug):
         meta = mod_meta(loader, slug)
         desc = (meta or {}).get("name") or slug
+        # ★ V1.8.6：内置清单可指定 source="curseforge"（如 Cupboard 生态），
+        #   只有 CF 发布的项目走 CurseForge 下载引擎，其余保持 Modrinth。
+        src = (meta or {}).get("source") or "modrinth"
         try:
+            if src == "curseforge":
+                from . import modman as _mm
+                r = _mm.install_from_project(
+                    slug, mc_version, loader, mods_dir,
+                    on_log=log, source="curseforge")
+                if not r.get("ok"):
+                    return False, slug, desc, \
+                        r.get("reason") or "CurseForge 下载失败"
+                dest = os.path.join(mods_dir, r.get("file") or "")
+                if _scan_jar_virus(dest):
+                    try:
+                        os.remove(dest)
+                    except Exception:
+                        pass
+                    return False, slug, desc, \
+                        "拦截到恶意文件（Fractureiser 特征），已删除"
+                log("  [OK] %s" % (r.get("file") or desc))
+                return True, slug, desc, r.get("file") or desc
+
             def _note(attempt, e, wait):
                 log("    [%s] 网络不稳（%s），%.1fs 后重试..."
                     % (desc, _brief(e), wait))
@@ -1978,13 +2022,58 @@ def install_plugins(server_dir, mc_version, loader="paper", only=None,
     def _download_task(slug):
         meta = plugin_meta(slug)
         desc = (meta or {}).get("name") or slug
+        # ★ V1.8.6：插件清单 + paper 组（Cupboard 生态）都可指定
+        #   source="curseforge"，下载时按源分流。
+        _m2 = mod_meta(loader, slug) if loader == "paper" else None
+        src = "curseforge" if (
+            (meta or {}).get("source") == "curseforge"
+            or (_m2 or {}).get("source") == "curseforge") else "modrinth"
         try:
+            if src == "curseforge":
+                from . import modman as _mm
+                r = _mm.install_from_project(
+                    slug, mc_version, loader or "paper", plugins_dir,
+                    on_log=log, source="curseforge")
+                if not r.get("ok"):
+                    return False, slug, desc, \
+                        r.get("reason") or "CurseForge 下载失败"
+                dest = os.path.join(plugins_dir, r.get("file") or "")
+                if _scan_jar_virus(dest):
+                    try:
+                        os.remove(dest)
+                    except Exception:
+                        pass
+                    return False, slug, desc, \
+                        "拦截到恶意文件（Fractureiser 特征），已删除"
+                log("  [OK] %s" % (r.get("file") or desc))
+                return True, slug, desc, r.get("file") or desc
+
             def _note(attempt, e, wait):
                 log("    [%s] 网络不稳（%s），%.1fs 后重试..."
                     % (desc, _brief(e), wait))
             # ★ V1.7.0-3：插件按服务器实际加载器过滤（不再写死 paper）
             v = modrinth_pick(slug, mc_version, loader or "paper",
                               on_retry=_note)
+            # ★ V1.8.6：全库搜索切到 CurseForge 源时勾选的是 CF 数字 id，
+            #   Modrinth 查不到就回落到 CurseForge 下载引擎。
+            if not v and str(slug).isdigit():
+                from . import modman as _mm
+                r = _mm.install_from_project(
+                    slug, mc_version, loader or "paper", plugins_dir,
+                    on_log=log, source="curseforge")
+                if r.get("ok"):
+                    dest = os.path.join(plugins_dir, r.get("file") or "")
+                    if _scan_jar_virus(dest):
+                        try:
+                            os.remove(dest)
+                        except Exception:
+                            pass
+                        return False, slug, desc, \
+                            "拦截到恶意文件（Fractureiser 特征），已删除"
+                    log("  [OK] %s" % (r.get("file") or desc))
+                    return True, slug, desc, r.get("file") or desc
+                return False, slug, desc, \
+                    r.get("reason") or "CurseForge 下载失败"
             if not v:
                 return False, slug, desc, "无 %s+%s 版本" % (
                     mc_version, loader or "paper")

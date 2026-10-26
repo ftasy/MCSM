@@ -569,7 +569,17 @@ def install_from_project(slug, mc_version, loader, mods_dir,
 
     # ---- CurseForge ----
     if source == "curseforge":
-        r = sources.cf_download_url(slug, mc_version=mc_version,
+        # ★ V1.8.6：内置推荐里的 slug（如 cupboard）不是 CF 数字 id，
+        #   先解析成 project id 再取下载链接。
+        cf_id = slug
+        if not str(slug).isdigit():
+            cf_id = sources.cf_resolve_id(
+                slug, mc_version=mc_version, loader=loader)
+            if not cf_id:
+                return {"ok": False,
+                        "reason": "CurseForge 上找不到 %s"
+                                  "（可能需要 API key / MCIM 镜像）" % slug}
+        r = sources.cf_download_url(cf_id, mc_version=mc_version,
                                     loader=loader)
         if r.get("err"):
             return {"ok": False, "reason": r["err"]}
