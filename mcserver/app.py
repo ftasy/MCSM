@@ -839,6 +839,18 @@ class MainWindow(QMainWindow):
         ptr.end()
         return pm
 
+    def _clean_ver(self, e):
+        """★ V1.7.1-3：显示用版本净化 —— Paper 构建号等
+        不像 MC 版本的值显示层再兜底清洗一次。"""
+        try:
+            v = e.get("version")
+            if not v:
+                return None
+            cv = scanner.clean_mc_version(v)
+            return cv or v
+        except Exception:
+            return e.get("version")
+
     def _tip_for(self, e):
         """鼠标悬停时弹出的注释（PCL 风格）。
 
@@ -850,7 +862,7 @@ class MainWindow(QMainWindow):
         L.append(name)
         bits = []
         if e.get("version"):
-            bits.append("MC %s" % e["version"])
+            bits.append("MC %s" % self._clean_ver(e))
         if e.get("loader"):
             bits.append(versions.LOADER_LABEL.get(e["loader"],
                                                   e["loader"]))
@@ -893,7 +905,7 @@ class MainWindow(QMainWindow):
             lines.append(name)
         sub = []
         if "version" in show and e.get("version"):
-            sub.append(e["version"])
+            sub.append(self._clean_ver(e))
         if "loader" in show and e.get("loader"):
             sub.append(versions.LOADER_LABEL.get(
                 e["loader"], e["loader"]))

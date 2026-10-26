@@ -739,7 +739,17 @@ class CreateDialog(QDialog):
             "对应 server.properties 里的 level-name，"
             "必须与存档文件夹名一致")
         f.addRow("世界名(level-name):", self.ed_name)
-        self.ed_version = QLineEdit(entry.get("version") or "")
+        # ★ V1.7.1-3：回显前净化版本（旧 servers.json 里可能存着
+        #   Paper 构建号 "26.2.push" 之类脏串）
+        _init_ver = entry.get("version") or ""
+        try:
+            from .core import scanner as _sc
+            _cv = _sc.clean_mc_version(_init_ver) if _init_ver else None
+            if _cv:
+                _init_ver = _cv
+        except Exception:
+            pass
+        self.ed_version = QLineEdit(_init_ver)
         self.ed_version.setPlaceholderText("例如 1.21.7 / 26.2")
         try:
             from .core import versions as _V
@@ -805,35 +815,16 @@ class CreateDialog(QDialog):
         self.lbl_lver.setWordWrap(True)
         self.lbl_lver.setStyleSheet(_muted())
         f2.addRow("", self.lbl_lver)
+        # ---- 优化模组区 ----
+        # ★ V1.7.1-4：选择行包成容器，Paper 时整行隐藏，
+        #   取消勾选时也隐藏 —— 不再出现"选择要装哪些..."重复两行
         self.chk_mods = QCheckBox("同时下载优化模组")
         self.chk_mods.setChecked(True)
         f2.addRow("", self.chk_mods)
-
-        # ★ V1.2.0：插件（仅 Paper 显示）
-        self.chk_plugins = QCheckBox("同时下载插件")
-        self.chk_plugins.setChecked(True)
-        self.chk_plugins.setVisible(False)
-        f2.addRow("", self.chk_plugins)
-        self._picked_plugin_slugs = None
-        self._plugins_confirmed = False
-        hplg = QHBoxLayout()
-        self.btn_pick_plugins = QPushButton("选择要装哪些插件...")
-        self.btn_pick_plugins.clicked.connect(self.pick_plugins)
-        self.btn_pick_plugins.setVisible(False)
-        hplg.addWidget(self.btn_pick_plugins)
-        self.lbl_plugins = QLabel("（未选择，点开始时会弹选择界面）")
-        self.lbl_plugins.setWordWrap(True)
-        self.lbl_plugins.setStyleSheet(_muted())
-        self.lbl_plugins.setVisible(False)
-        hplg.addWidget(self.lbl_plugins, 1)
-        f2.addRow("", hplg)
-
-        self._picked_slugs = None
-        self._mod_fail = []
-        self._plugin_fail = []  # ★ V1.2.0
-        self._mods_confirmed = False
-        self._last_loader = None
-        self._rebuilding = False
+        self.w_mods_sel = QWidget()
+        _vm = QVBoxLayout(self.w_mods_sel)
+        _vm.setContentsMargins(0, 0, 0, 0)
+        _vm.setSpacing(2)
         hmod = QHBoxLayout()
         self.btn_pick_mods = QPushButton("选择要装哪些...")
         self.btn_pick_mods.clicked.connect(self.pick_mods)
@@ -842,7 +833,41 @@ class CreateDialog(QDialog):
         self.lbl_mods.setWordWrap(True)
         self.lbl_mods.setStyleSheet(_muted())
         hmod.addWidget(self.lbl_mods, 1)
-        f2.addRow("", hmod)
+        _vm.addLayout(hmod)
+        f2.addRow("", self.w_mods_sel)
+        self.chk_mods.toggled.connect(self.w_mods_sel.setVisible)
+
+        # ---- 插件区 ----
+        # ★ V1.7.1-4：默认不勾选，勾选后才出现选择行，
+        #   初始界面只显示一行选择按钮，不再重复
+        self.chk_plugins = QCheckBox("同时下载插件")
+        self.chk_plugins.setChecked(False)
+        f2.addRow("", self.chk_plugins)
+        self._picked_plugin_slugs = None
+        self._plugins_confirmed = False
+        self.w_plugins_sel = QWidget()
+        _vp = QVBoxLayout(self.w_plugins_sel)
+        _vp.setContentsMargins(0, 0, 0, 0)
+        _vp.setSpacing(2)
+        hplg = QHBoxLayout()
+        self.btn_pick_plugins = QPushButton("选择要装哪些插件...")
+        self.btn_pick_plugins.clicked.connect(self.pick_plugins)
+        hplg.addWidget(self.btn_pick_plugins)
+        self.lbl_plugins = QLabel("（未选择，点开始时会弹选择界面）")
+        self.lbl_plugins.setWordWrap(True)
+        self.lbl_plugins.setStyleSheet(_muted())
+        hplg.addWidget(self.lbl_plugins, 1)
+        _vp.addLayout(hplg)
+        f2.addRow("", self.w_plugins_sel)
+        self.chk_plugins.toggled.connect(self.w_plugins_sel.setVisible)
+        self.w_plugins_sel.setVisible(False)
+
+        self._picked_slugs = None
+        self._mod_fail = []
+        self._plugin_fail = []  # ★ V1.2.0
+        self._mods_confirmed = False
+        self._last_loader = None
+        self._rebuilding = False
 
         self.lbl_loader_hint = QLabel("")
         self.lbl_loader_hint.setWordWrap(True)
@@ -953,6 +978,13 @@ class CreateDialog(QDialog):
         #   让"初始化服务端"窗口先弹出来，Java 列表随后自动填充，
         #   不再因为逐个跑 java -version 而卡住弹窗。
         QTimer.singleShot(50, self.java_pick.rescan)
+        # ★ V1.7.1-2：强制给整个弹窗套主题样式（含 QPushButton 的
+        #   hover/pressed 动效），防止个别控件被局部样式或继承问题
+        #   盖掉，出现"按钮像死木头"。
+        try:
+            _themed(self)
+        except Exception:
+            pass
 
     def _refresh_versions(self):
         """从网上拉最新正式版列表，缓存到本地并刷新补全。
@@ -1074,15 +1106,13 @@ class CreateDialog(QDialog):
                 "甚至 1.7.10）虽被官方标为 unsupported，但 fill 站仍保留"
                 "构建，本软件会自动从那里下载。\n"
                 "⚠ 太老的版本官方不再修 bug / 补安全漏洞，出问题需自行承担。")
-            self.chk_mods.setEnabled(False)
-            self.chk_mods.setChecked(False)
-            # 删除了：self.chk_autoconf.setEnabled(False)
-            self.btn_pick_mods.setEnabled(False)
-            self.lbl_mods.setText("（Paper 装插件，不装模组）")
+            # ★ V1.7.1-4：Paper 不装优化模组 —— 整行隐藏，
+            #   不再显示一个禁用的死按钮造成"重复/没反应"
+            self.chk_mods.setVisible(False)
+            self.w_mods_sel.setVisible(False)
             # ★ V1.2.0：Paper -> 显示插件勾选与选择入口
             self.chk_plugins.setVisible(True)
-            self.btn_pick_plugins.setVisible(True)
-            self.lbl_plugins.setVisible(True)
+            self.w_plugins_sel.setVisible(self.chk_plugins.isChecked())
             if self._last_loader != l and not self._rebuilding:
                 self._picked_slugs = []
                 self._mods_confirmed = False
@@ -1095,13 +1125,12 @@ class CreateDialog(QDialog):
                 "（优化/光影/小地图），不能装添加内容的模组。\n"
                 "也可同时勾选『下载插件』安装插件类组件"
                 "（权限/语音/经济等，需该加载器支持）。")
-            self.chk_mods.setEnabled(True)
-            self.chk_mods.setChecked(True)
-            self.btn_pick_mods.setEnabled(True)
-            # ★ V1.7.0-3：插件支持放开给所有加载器
+            # ★ V1.7.1-4：模组区整行显示，插件区默认收起、
+            #   勾选『同时下载插件』才展开
+            self.chk_mods.setVisible(True)
+            self.w_mods_sel.setVisible(self.chk_mods.isChecked())
             self.chk_plugins.setVisible(True)
-            self.btn_pick_plugins.setVisible(True)
-            self.lbl_plugins.setVisible(True)
+            self.w_plugins_sel.setVisible(self.chk_plugins.isChecked())
             if self._last_loader != l and not self._rebuilding:
                 self._picked_slugs = None
                 self._mods_confirmed = False
@@ -1271,32 +1300,48 @@ class CreateDialog(QDialog):
                     self.java_pick.combo.setCurrentIndex(i)
 
     def pick_mods(self):
-        """弹出模组选择界面。"""
-        v = self.ed_version.text().strip()
-        loader = self.cb_loader.currentData()
-        if not loader:
-            QMessageBox.warning(self, "缺信息", "先选加载器")
-            return
-        if not install.mod_list_for(loader, v):
-            QMessageBox.information(
-                self, "这个加载器没有模组",
-                "%s 是插件服/原版，不装模组。\n\n"
-                "插件请在服务器目录的 plugins/ 里手动放。" % loader)
-            self._picked_slugs = []
-            self.lbl_mods.setText("（%s 不装模组）" % loader)
-            return
-        dlg = _themed(self._browse_dlg(v, loader))
-        if dlg.exec() != QDialog.Accepted:
-            return
-        self._picked_slugs = dlg.selected
-        self._mods_confirmed = True
-        n = len(self._picked_slugs)
-        if n == 0:
-            self.lbl_mods.setText("已选：0 个（只装核心）")
-        else:
-            self.lbl_mods.setText("已选 %d 个：%s"
-                                  % (n, "、".join(self._picked_slugs[:6])
-                                     + (" ..." if n > 6 else "")))
+        """弹出模组选择界面。
+
+        ★ V1.7.1-1：整体包 try/except —— 弹窗构造/查询如果抛异常，
+        以前会在信号槽里静默吞掉（点击无反应），现在打印到日志并
+        弹窗提示具体错误。
+        """
+        try:
+            v = self.ed_version.text().strip()
+            loader = self.cb_loader.currentData()
+            if not loader:
+                QMessageBox.warning(self, "缺信息", "先选加载器")
+                return
+            if not install.mod_list_for(loader, v):
+                QMessageBox.information(
+                    self, "这个加载器没有模组",
+                    "%s 是插件服/原版，不装模组。\n\n"
+                    "插件请在服务器目录的 plugins/ 里手动放。" % loader)
+                self._picked_slugs = []
+                self.lbl_mods.setText("（%s 不装模组）" % loader)
+                return
+            dlg = _themed(self._browse_dlg(v, loader))
+            if dlg.exec() != QDialog.Accepted:
+                return
+            self._picked_slugs = dlg.selected
+            self._mods_confirmed = True
+            n = len(self._picked_slugs)
+            if n == 0:
+                self.lbl_mods.setText("已选：0 个（只装核心）")
+            else:
+                self.lbl_mods.setText("已选 %d 个：%s"
+                                      % (n, "、".join(self._picked_slugs[:6])
+                                         + (" ..." if n > 6 else "")))
+        except Exception as ex:
+            import traceback as _tb
+            try:
+                _tb.print_exc()
+            except Exception:
+                pass
+            QMessageBox.warning(
+                self, "选择模组失败",
+                "打开模组选择界面时出错：\n%r\n\n"
+                "已把错误打印到日志，可反馈给作者。" % ex)
 
     def _browse_dlg(self, v, loader):
         """PCL2 风格模组选择视图（初始化向导共用）。"""
@@ -1306,33 +1351,52 @@ class CreateDialog(QDialog):
         return ModBrowseDialog(e, self, select_only=True)
 
     def _browse_plugins_dlg(self, v):
-        """★ V1.2.0：插件选择视图（数据源 project_type=plugin）。"""
+        """★ V1.2.0：插件选择视图（数据源 project_type=plugin）。
+
+        ★ V1.7.1-1：以前写死 loader="paper"，Fabric/Forge/NeoForge
+          服点插件按钮时按 Paper 过滤版本，查不到/异常 -> 弹窗无反应。
+          现在用当前实际加载器，插件版本按该加载器过滤。
+        """
         e = dict(self.entry)
         e["version"] = v
-        e["loader"] = "paper"
+        e["loader"] = self.cb_loader.currentData() or "paper"
         return ModBrowseDialog(e, self, select_only=True, mode="plugins")
 
     def pick_plugins(self):
-        """★ V1.2.0：弹出插件选择界面。"""
-        v = self.ed_version.text().strip()
-        if not v:
-            QMessageBox.warning(self, "缺信息", "先填 MC 版本")
-            return
-        dlg = _themed(self._browse_plugins_dlg(v))
-        if dlg.exec() != QDialog.Accepted:
-            return
-        self._picked_plugin_slugs = dlg.selected
-        self._plugins_confirmed = True
-        n = len(self._picked_plugin_slugs)
-        if n == 0:
-            self.lbl_plugins.setText("已选：0 个（只装核心）")
-        else:
-            self.lbl_plugins.setText("已选 %d 个：%s"
-                                     % (n, "、".join(
-                                         self._picked_plugin_slugs[:6])
-                                        + (" ..." if n > 6 else "")))
-        # ★ Paper 装了插件后自动勾上"同时下载插件"
-        self.chk_plugins.setChecked(True)
+        """★ V1.2.0：弹出插件选择界面。
+
+        ★ V1.7.1-1：同 pick_mods，加 try/except 防止点击无反应。
+        """
+        try:
+            v = self.ed_version.text().strip()
+            if not v:
+                QMessageBox.warning(self, "缺信息", "先填 MC 版本")
+                return
+            dlg = _themed(self._browse_plugins_dlg(v))
+            if dlg.exec() != QDialog.Accepted:
+                return
+            self._picked_plugin_slugs = dlg.selected
+            self._plugins_confirmed = True
+            n = len(self._picked_plugin_slugs)
+            if n == 0:
+                self.lbl_plugins.setText("已选：0 个（只装核心）")
+            else:
+                self.lbl_plugins.setText("已选 %d 个：%s"
+                                         % (n, "、".join(
+                                             self._picked_plugin_slugs[:6])
+                                            + (" ..." if n > 6 else "")))
+            # ★ Paper 装了插件后自动勾上"同时下载插件"
+            self.chk_plugins.setChecked(True)
+        except Exception as ex:
+            import traceback as _tb
+            try:
+                _tb.print_exc()
+            except Exception:
+                pass
+            QMessageBox.warning(
+                self, "选择插件失败",
+                "打开插件选择界面时出错：\n%r\n\n"
+                "已把错误打印到日志，可反馈给作者。" % ex)
 
     def start(self):
         v = self.ed_version.text().strip()
@@ -1364,9 +1428,11 @@ class CreateDialog(QDialog):
 
         server_dir = self.entry.get("server_dir") or self.entry.get("folder", "")
 
-        # ★ 模组选择：勾了"同时下载优化模组"就先弹选择界面
+        # ★ 模组选择：勾了"同时下载优化模组"就先弹选择界面。
+        #   Paper 不装模组（界面已隐藏该行，但勾选状态可能残留 True），
+        #   这里显式排除，避免 Paper 服点开始又弹出模组选择。
         mod_slugs = None
-        if self.chk_mods.isChecked():
+        if self.chk_mods.isChecked() and loader != "paper":
             # ★ 已经选过就用那份，不再弹第二次
             if self._mods_confirmed and self._picked_slugs is not None:
                 mod_slugs = self._picked_slugs
@@ -1389,9 +1455,11 @@ class CreateDialog(QDialog):
             self._picked_slugs = None
             self._mods_confirmed = False
 
-        # ★ 插件选择（Paper）：勾了"同时下载插件"就先弹选择界面
+        # ★ 插件选择：勾了"同时下载插件"就先弹选择界面
+        #   ★ V1.7.1-1：放开给所有加载器（v1.7.0 只改了界面显示，
+        #   start() 里还写死 paper，Fabric/Forge 勾了插件也不下载）
         plugin_slugs = None
-        if loader == "paper" and self.chk_plugins.isChecked():
+        if self.chk_plugins.isChecked():
             if self._plugins_confirmed and self._picked_plugin_slugs is not None:
                 plugin_slugs = self._picked_plugin_slugs
             else:
@@ -1438,11 +1506,11 @@ class CreateDialog(QDialog):
             # level-name 必须是"世界文件夹的名字"，不是显示名。
             # 显示名可能含冒号/颜色码，会导致启动崩溃。
             "level_name": self._pick_level_name(),
-            "want_mods": self.chk_mods.isChecked(),
+            "want_mods": (self.chk_mods.isChecked()
+                          and loader != "paper"),
             "mod_slugs": mod_slugs,
-            # ★ V1.2.0：插件（Paper 专用）
-            "want_plugins": (loader == "paper"
-                             and self.chk_plugins.isChecked()),
+            # ★ V1.7.1-1：插件放开给所有加载器（不再写死 paper）
+            "want_plugins": self.chk_plugins.isChecked(),
             "plugin_slugs": plugin_slugs,
             "entry": self.entry,
         }

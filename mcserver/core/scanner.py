@@ -2,9 +2,43 @@
 """扫描地图文件夹，识别版本 / 现有服务端 / 存档位置。"""
 
 import os
+import re
 import zipfile
 
 from . import nbt, versions
+
+# ★ V1.7.1-3：版本号净化 —— 只认长得像 MC 版本号的东西
+#   （1.7~1.21、以及 2026 新命名 25.x/26.x/27.x 这类两位数主号）。
+#   Paper 的构建号 / 分支名（20.2.1、26.2.push）会被当成 MC 版本
+#   显示到主界面卡片上，这里统一清洗。
+MC_VER_RE = re.compile(
+    r"^(?:1\.\d+(?:\.\d+)?|2[5-9]\.\d+(?:\.\d+)?|3[0-9]\.\d+(?:\.\d+)?)$")
+_MC_VER_ANY_RE = re.compile(
+    r"(?:1\.\d+(?:\.\d+)?|2[5-9]\.\d+(?:\.\d+)?|3[0-9]\.\d+(?:\.\d+)?)")
+
+
+def clean_mc_version(v):
+    """净化版本串：返回像 MC 版本的 token，不像就返回 None。
+
+    例： "1.21.1" -> "1.21.1"
+         "26.2"   -> "26.2"
+         "26.2.push" -> "26.2"   （剔除 Paper 分支/构建后缀）
+         "20.2.1" -> None        （Paper 构建号，不是 MC 版本）
+    """
+    if not v:
+        return None
+    s = str(v).strip()
+    if MC_VER_RE.match(s):
+        return s
+    m = _MC_VER_ANY_RE.search(s)
+    return m.group(0) if m else None
+
+
+def jar_name_version(name):
+    """从核心 jar 文件名里抠 MC 版本（paper-1.21.1-233.jar -> 1.21.1）。"""
+    m = _MC_VER_ANY_RE.search(os.path.basename(str(name)))
+    return m.group(0) if m else None
+
 
 # 从文件名判断加载器
 JAR_HINTS = [
@@ -283,6 +317,12 @@ def read_world_info(world_dir):
     if os.path.isdir(os.path.join(world_dir, "dimensions", "minecraft")):
         info["layout"] = "new(26.1+)"
 
+    # ★ V1.7.1-3：净化版本串（Paper 构建号等脏串不进入条目）
+    if info["version"]:
+        _clean = clean_mc_version(info["version"])
+        if _clean:
+            info["version"] = _clean
+
     return info
 
 
@@ -404,6 +444,15 @@ def scan_entry(folder):
     e["version_source"] = "level.dat"
     e["world_name"] = wi["name"]
     e["version"] = wi["version"]
+    # ★ V1.7.1-3：Paper 构建号/分支名被错当 MC 版本时，
+    #   回退从核心 jar 文件名抠真实版本（paper-1.21.1-233.jar）
+    if e["loader"] == "paper" and not clean_mc_version(e["version"]):
+        for j in e["jars"]:
+            jv = jar_name_version(j)
+            if jv:
+                e["version"] = jv
+                e["version_source"] = "jar 文件名"
+                break
     e["seed"] = wi["seed"]
     e["difficulty"] = wi["difficulty"]
     e["gamemode"] = wi["gamemode"]
