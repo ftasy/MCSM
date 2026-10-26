@@ -690,7 +690,9 @@ def _run_installer(server_dir, inst_jar, java_path, log, label):
             text=True,
             encoding="utf-8",
             errors="replace",  # 防止 Windows 下 GBK 编码导致崩溃
-            bufsize=1          # 行缓冲
+            bufsize=1,          # 行缓冲
+            # ★ V1.6.2：打包后禁止 java installer 弹出黑色 CMD 窗
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except Exception as e:
         raise InstallError("启动 installer 失败: %r" % e)

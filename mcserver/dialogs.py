@@ -994,6 +994,13 @@ class CreateDialog(QDialog):
         # 重建期间为了保住已选模组，跳过了文案更新；
         # 重建完再刷一次，把加载器说明/模组提示刷新成当前加载器的
         self._refresh_hint()
+        # ★ V1.6.2：加载器确定后立刻联动查询版本下拉框。
+        #   以前只在 textChanged / 换加载器时查，初始化时 ed_version
+        #   已填好（textChanged 不触发），cb_lver 就一直是空的。
+        try:
+            self._load_loader_versions()
+        except Exception:
+            pass
 
     def _do_refresh_loaders(self):
         v = self.ed_version.text().strip()
@@ -1071,12 +1078,17 @@ class CreateDialog(QDialog):
         # 重建期间不响应，避免 _do_refresh_loaders 引发连锁拉取
         if getattr(self, "_rebuilding", False):
             return
-        self.cb_lver.clear()
+        # ★ V1.6.2：网络未返回前保持禁用，显示"正在查询版本..."
+        self.cb_lver.blockSignals(True)
+        try:
+            self.cb_lver.clear()
+            self.cb_lver.addItem("正在查询版本...", None)
+        finally:
+            self.cb_lver.blockSignals(False)
         self._lver_loaded = False
         self._need_lver_async = True
-        self.cb_lver.addItem("(最新稳定版)", None)
-        self.cb_lver.setEnabled(True)
-        self.btn_lver.setEnabled(True)
+        self.cb_lver.setEnabled(False)
+        self.btn_lver.setEnabled(False)
         self.lbl_lver.setText("")
         self._load_loader_versions()
 
@@ -1114,9 +1126,16 @@ class CreateDialog(QDialog):
                 pass
 
         self.btn_lver.setEnabled(False)
-        # ★ 加载中禁用下拉框（防止旧选项被误用 / 边加载边改）
+        # ★ V1.6.2：查询期间下拉框保持禁用，显示"正在查询版本..."
+        #   （不显示"(最新稳定版)"占位，防止用户误点旧选项）
         self.cb_lver.setEnabled(False)
-        self.lbl_lver.setText("加载中 ...")
+        self.cb_lver.blockSignals(True)
+        try:
+            self.cb_lver.clear()
+            self.cb_lver.addItem("正在查询版本...", None)
+        finally:
+            self.cb_lver.blockSignals(False)
+        self.lbl_lver.setText("")
         
         # ★ 引入请求 ID 防止并发乱序（旧请求晚回来直接丢弃）
         self._lver_req_id = getattr(self, "_lver_req_id", 0) + 1
@@ -1792,7 +1811,11 @@ class ServerConfigDialog(QDialog):
         #   一点『更新 Fabric API』之类的按钮就 AttributeError。
         self.server_dir = sd
         self.props_path = os.path.join(sd, "server.properties")
-        self.values, self.lines = props.parse(self.props_path)
+        # ★ V1.6.2：读取失败绝不卡死/崩溃 —— 回退默认值并提示
+        try:
+            self.values, self.lines = props.parse(self.props_path)
+        except Exception:
+            self.values, self.lines = {}, []
         if not self.values:
             QMessageBox.information(
                 self, "提示",
@@ -3302,22 +3325,31 @@ class ServerConfigDialog(QDialog):
         f = QFormLayout()
         f.setLabelAlignment(Qt.AlignRight)
         for key, path, typ, name, default, desc in YAML_ITEMS:
-            cur = _yaml_get(self._yaml_data, path)
-            if typ == "bool":
-                ck = QCheckBox()
-                ck.setChecked(bool(cur if cur is not None else default))
-                ck.setToolTip(desc)
-                ck.toggled.connect(self._yaml_mark_dirty)
-                self._yaml_widgets[key] = ck
-                f.addRow(QLabel(name), ck)
-            else:
-                sp = QSpinBox()
-                sp.setRange(0, 10000)
-                sp.setValue(int(cur if cur is not None else default))
-                sp.setToolTip(desc)
-                sp.valueChanged.connect(self._yaml_mark_dirty)
-                self._yaml_widgets[key] = sp
-                f.addRow(QLabel(name), sp)
+            # ★ V1.6.2：单项读取/类型转换异常时跳过该项，
+            #   绝不让整个页签/对话框卡死或崩溃
+            try:
+                cur = _yaml_get(self._yaml_data, path)
+                if typ == "bool":
+                    ck = QCheckBox()
+                    ck.setChecked(bool(cur if cur is not None else default))
+                    ck.setToolTip(desc)
+                    ck.toggled.connect(self._yaml_mark_dirty)
+                    self._yaml_widgets[key] = ck
+                    f.addRow(QLabel(name), ck)
+                else:
+                    sp = QSpinBox()
+                    sp.setRange(0, 10000)
+                    try:
+                        sp.setValue(int(float(
+                            cur if cur is not None else default)))
+                    except Exception:
+                        sp.setValue(int(default))
+                    sp.setToolTip(desc)
+                    sp.valueChanged.connect(self._yaml_mark_dirty)
+                    self._yaml_widgets[key] = sp
+                    f.addRow(QLabel(name), sp)
+            except Exception:
+                continue
         v.addLayout(f)
         return w
 
@@ -4244,21 +4276,8 @@ class ModPickDialog(QDialog):
     def _fill(self):
         self.table.setRowCount(0)
         self.boxes = []
-        last_group = None
         for m in self.items:
-            # 分组标题行
-            if m.get("group") and m["group"] != last_group:
-                last_group = m["group"]
-                r = self.table.rowCount()
-                self.table.insertRow(r)
-                it = QTableWidgetItem(m["group"])
-                f = it.font(); f.setBold(True); it.setFont(f)
-                it.setBackground(QColor(_sec_bg()))
-                it.setForeground(QColor(_fg()))
-                it.setFlags(Qt.NoItemFlags)
-                self.table.setItem(r, 0, it)
-                self.table.setSpan(r, 0, 1, 3)
-
+            # ★ V1.6.2：不再插入"① 前置"这类分组标题行，全部平铺
             r = self.table.rowCount()
             self.table.insertRow(r)
             cb = QCheckBox()
@@ -4556,16 +4575,18 @@ class AnalyzeDialog(QDialog):
     def open_log_dir(self):
         import subprocess
         from . import core
+        nw = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         for d in (os.path.join(self.server_dir, "logs"),
                   os.path.join(self.server_dir, "server", "logs")):
             if os.path.isdir(d):
                 try:
-                    subprocess.Popen(["explorer", d])
+                    subprocess.Popen(["explorer", d], creationflags=nw)
                 except Exception:
                     pass
                 return
         try:
-            subprocess.Popen(["explorer", self.server_dir])
+            subprocess.Popen(["explorer", self.server_dir],
+                             creationflags=nw)
         except Exception:
             pass
 
@@ -5774,8 +5795,16 @@ class ModBrowseDialog(QDialog):
                      in self.installed)
 
         card = QWidget()
+        # ★ V1.6.2：卡片底色跟随主题（深色主题=深卡片，浅色主题=浅卡片），
+        #   标题文字用主题字体色，彻底解决"黑字黑底看不见"。
+        _card_bg = "#1e1f29"
+        try:
+            from .core import theme as _thm
+            _card_bg = _thm.field_bg() or _card_bg
+        except Exception:
+            pass
         card.setStyleSheet(
-            "QWidget { background: #1e1f29; border-radius: 8px; }")
+            "QWidget { background: %s; border-radius: 8px; }" % _card_bg)
         lay = QHBoxLayout(card)
         lay.setContentsMargins(10, 8, 10, 8)
         lay.setSpacing(10)
@@ -5813,7 +5842,9 @@ class ModBrowseDialog(QDialog):
         rt.setSpacing(2)
 
         h1 = QHBoxLayout()
-        lb_title = QLabel("<b style='font-size:13px;'>%s</b>" % title)
+        # ★ V1.6.2：标题颜色用当前主题字体色（深/浅主题都看得清）
+        lb_title = QLabel("<b style='font-size:13px; color:%s;'>%s</b>"
+                          % (_fg(), title))
         if installed:
             lb_title.setText(
                 "<b style='font-size:13px; color:#4ade80;'>✓已装 %s</b>"
@@ -5855,12 +5886,10 @@ class ModBrowseDialog(QDialog):
         lb_desc.setMaximumHeight(30)  # 最多两行
         rt.addWidget(lb_desc)
 
-        # 标签行
+        # 标签行（★ V1.6.2：去掉分组标题，直接平铺展示）
         tags = []
         if builtin:
             tags.append("[内置推荐]")
-            if group:
-                tags.append(group)
             if req:
                 tags.append("前置: " + "、".join(req))
             tags.append("版本兼容已按当前服过滤")
@@ -6452,9 +6481,14 @@ def _open_in_explorer(path):
         if sys.platform.startswith("win"):
             os.startfile(path)
         elif sys.platform == "darwin":
-            os.system('open "%s"' % path)
+            # ★ V1.6.2：os.system 全改 subprocess.run（跨平台无黑框）
+            import subprocess as _sp
+            _sp.run(["open", path],
+                    creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0))
         else:
-            os.system('xdg-open "%s"' % path)
+            import subprocess as _sp
+            _sp.run(["xdg-open", path],
+                    creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0))
     except Exception:
         pass
 

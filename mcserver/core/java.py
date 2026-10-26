@@ -44,7 +44,10 @@ def probe(path):
         return None
     try:
         r = subprocess.run([path, "-version"], capture_output=True,
-                           timeout=15)
+                           timeout=15,
+                           # ★ V1.6.2：禁止 java -version 闪黑框
+                           creationflags=getattr(subprocess,
+                                                 "CREATE_NO_WINDOW", 0))
         out = (r.stdout or b"").decode("utf-8", "replace") + (
               r.stderr or b"").decode("utf-8", "replace")
     except Exception:
@@ -75,7 +78,10 @@ def find_all():
     # 1) PATH 里的 java
     try:
         which = "where" if sys.platform == "win32" else "which"
-        r = subprocess.run([which, "java"], capture_output=True, timeout=10)
+        r = subprocess.run([which, "java"], capture_output=True, timeout=10,
+                           # ★ V1.6.2：禁止 where/which 闪黑框
+                           creationflags=getattr(subprocess,
+                                                 "CREATE_NO_WINDOW", 0))
         for line in (r.stdout or b"").decode("utf-8", "replace").splitlines():
             line = line.strip()
             if line and os.path.isfile(line):

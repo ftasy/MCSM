@@ -225,7 +225,9 @@ def _fast_extract(zip_path, dest):
         import subprocess as _sp
         r = _sp.run(
             ["tar", "-xf", zip_path, "-C", dest],
-            capture_output=True, timeout=1800)
+            capture_output=True, timeout=1800,
+            # ★ V1.6.2：tar 是控制台程序，禁止弹出黑色 CMD 窗
+            creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0))
         if r.returncode == 0:
             return
     except Exception:

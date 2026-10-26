@@ -1468,21 +1468,40 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QColorDialog
         from PySide6.QtGui import QColor
 
+        def _txt_on(hx):
+            """色块上的文字色：按亮度自动黑/白，保证可读。"""
+            try:
+                from .core import theme as _th
+                return _th.ensure_contrast("#ffffff", hx, 4.5)
+            except Exception:
+                return "#ffffff"
+
         def _mk(key, label):
             default = Console.DEFAULT_COLORS.get(key, "#d0d0d0")
             hexs = cur.get(key) or default
             b = QPushButton(hexs)
-            b.setStyleSheet("color:%s;" % hexs)
-            b.setToolTip("点击打开颜色选择器")
+            b.setStyleSheet(
+                "QPushButton{background:%s; color:%s;"
+                "border:1px solid rgba(128,128,128,90);"
+                "border-radius:4px; padding:4px 10px;}"
+                "QPushButton:hover{font-weight:bold;}"
+                % (hexs, _txt_on(hexs)))
+            b.setToolTip("点击打开颜色选择器，选中后按钮显示该颜色色块")
+            b.setMinimumHeight(28)
 
             def pick():
                 col = QColorDialog.getColor(
-                    QColor(b.text()), self,
+                    QColor(hexs), self,
                     "选择『%s』的颜色" % label)
                 if col.isValid():
                     hx = col.name()
                     b.setText(hx)
-                    b.setStyleSheet("color:%s;" % hx)
+                    b.setStyleSheet(
+                        "QPushButton{background:%s; color:%s;"
+                        "border:1px solid rgba(128,128,128,90);"
+                        "border-radius:4px; padding:4px 10px;}"
+                        "QPushButton:hover{font-weight:bold;}"
+                        % (hx, _txt_on(hx)))
 
             b.clicked.connect(pick)
             return b
@@ -1500,7 +1519,12 @@ class MainWindow(QMainWindow):
             for key, label in its:
                 d = Console.DEFAULT_COLORS.get(key, "#d0d0d0")
                 bts[key].setText(d)
-                bts[key].setStyleSheet("color:%s;" % d)
+                bts[key].setStyleSheet(
+                    "QPushButton{background:%s; color:%s;"
+                    "border:1px solid rgba(128,128,128,90);"
+                    "border-radius:4px; padding:4px 10px;}"
+                    "QPushButton:hover{font-weight:bold;}"
+                    % (d, _txt_on(d)))
 
         vv.addWidget(b_reset)
         vv.addStretch(1)
@@ -2202,10 +2226,26 @@ class MainWindow(QMainWindow):
         if not e:
             QMessageBox.information(self, "提示", "先选中一个服务器")
             return
-        saved = self._saved(e)
-        dlg = self._style_dlg(
-            ServerConfigDialog(e, saved=saved, parent=self))
-        if dlg.exec():
+        # ★ V1.6.2：外层 try/except —— 防止后台静默崩溃导致窗体出不来
+        try:
+            saved = self._saved(e)
+            dlg = self._style_dlg(
+                ServerConfigDialog(e, saved=saved, parent=self))
+        except Exception as ex:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(
+                self, "打开服务端配置失败",
+                "程序在创建配置窗口时遇到了错误：\n\n%s\n\n"
+                "详细追踪：\n%s" % (ex, traceback.format_exc()[-500:]))
+            return
+
+        # ★ V1.6.2：非模态打开 —— 用户改配置时主界面仍可操作
+        dlg.setWindowModality(Qt.NonModal)
+        self._dlg_refs = getattr(self, "_dlg_refs", [])
+        self._dlg_refs.append(dlg)
+
+        def _on_config_done():
             k = self._key(e)
             # ★ Bug 3 修复：merge，不再整条覆盖（保留 icon、last_start 等）
             sv = self.data.setdefault("servers", {}).setdefault(k, {})
@@ -2213,6 +2253,13 @@ class MainWindow(QMainWindow):
             self._save_data()
             self.do_scan()
             self.statusBar().showMessage("已保存 %s" % e.get("name"))
+            try:
+                self._dlg_refs.remove(dlg)
+            except ValueError:
+                pass
+
+        dlg.finished.connect(lambda _r: _on_config_done())
+        dlg.show()
 
 
     # ---------------- 备份 ----------------
@@ -3205,7 +3252,13 @@ class MainWindow(QMainWindow):
                 "详细追踪：\n%s" % (ex, traceback.format_exc()[-500:]))
             return
 
-        if dlg.exec():
+        # ★ V1.6.2：非模态打开 —— 用户在下载/初始化时仍可操作主界面
+        dlg.setWindowModality(Qt.NonModal)
+        # 保持引用，防止对话框被 GC 回收导致闪退
+        self._dlg_refs = getattr(self, "_dlg_refs", [])
+        self._dlg_refs.append(dlg)
+
+        def _on_create_done():
             info = getattr(dlg, "result_info", None) or {}
             if info:
                 # ★ 只更新 java / xms / xmx 三个字段。
@@ -3234,8 +3287,15 @@ class MainWindow(QMainWindow):
                             self.icon_view.setCurrentRow(i)
                         self.on_sel()  # 强制刷新信息面板
                         break
-            
+
             self.do_scan(then=select_me)
+            try:
+                self._dlg_refs.remove(dlg)
+            except ValueError:
+                pass
+
+        dlg.finished.connect(lambda _r: _on_create_done())
+        dlg.show()
 
     def do_gen_bat(self):
         e = self._cur()
@@ -3811,8 +3871,10 @@ class MainWindow(QMainWindow):
 
             def _run():
                 # ★ V1.4.0：防火墙命令挪到后台线程，主线程绝不同步等待
+                # ★ V1.6.2：加 CREATE_NO_WINDOW，禁止弹出黑色 CMD 窗
                 try:
-                    _sp.run(cmd, capture_output=True, timeout=30)
+                    _sp.run(cmd, capture_output=True, timeout=30,
+                            creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0))
                 except Exception:
                     pass  # 没权限就静默，别影响启动
 
