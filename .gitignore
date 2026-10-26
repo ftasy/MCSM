@@ -23,6 +23,9 @@ Thumbs.db
 .idea/
 .vscode/
 
+# 开发/验收过程文件（用户本地留存，不进 git）
+_create_v173.png
+
 # PyInstaller 打包产物
 build/
 dist/
