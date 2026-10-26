@@ -70,3 +70,42 @@
 - **ZIP 版（推荐）**：解压后运行 `MCSM.exe`，无需安装，绿色免安装。
 - **EXE 版**：直接运行 `MCSM.exe`（含运行库，首次启动略慢）。
 - 软件支持在线检查更新：顶栏「检查更新」会自动跳转到本仓库 Release 页面。
+
+---
+
+## v1.8.2
+
+**最终版重构：剔除冲突模组、纯平铺标签化、零延迟翻页与页签重排**
+
+## 重构内容
+
+1. **推荐模组清单 MOD_TARGETS 纯平铺（彻底去掉分组标题）**
+   - 所有 `group` 一律置空，界面不再有「=== 前置库 ===」这类大标题行；卡片像 PCL2 一样一个接一个往下排。
+   - 每个条目描述末尾带彩色小标签：`[第三方登录]`（蓝）、`[前置库]` / `[Cupboard附属]`（橙）、`[优化]`（绿）、`[监控]`（紫）、`[崩溃分析]` / `[防熊]`（红）、`[工具]` / `[建筑]`（青）、`[权限]`（黄）、`[聊天]` / `[聊天扩展]`（粉）等。
+   - **第三方登录排最前**：`multiyggdrasil`、`akiyggdrasil`（1.21.1 NeoForge）。
+   - **Cupboard 生态**：`cupboard`（核心前置）+ `fastasyncworldsave` / `structureessentials` / `recipeessentials` / `connectivity` / `chunksending`。
+   - **冲突项已剔除**：`packetfixer` 不装（Connectivity 功能更全，防卡包更强）；`morechathistory` 不装（Chat Patches 包含聊天记录上限，功能更强）。
+   - 性能/工具项：`clumps`、`tabtps`、`crashassistant`、`spark`、`chunky`、`luckperms`、`chatpatches`。
+   - 注：Cupboard 生态插件及 `crashassistant` / `essentialsxchat` / `multilogin` / `akiyggdrasil` 在 Modrinth 暂无发布，下载失败会在日志提示，请按指引手动安装 jar。
+
+2. **推荐插件清单 PLUGIN_TARGETS 平铺 + 前置严格绑定**
+   - 顺序：`multilogin`（第三方登录第一）→ `luckperms` → `vault` → `essentialsx`（`req=["vault","luckperms"]`）→ `essentialsxchat`（`req=["essentialsx"]`）→ `coreprotect`（防熊）→ `worldedit`（建筑）→ `worldguard`（区域保护）→ `tabtps` → `spark`（监控）。
+   - 插件服推荐列表 = 插件清单 + Cupboard 生态，去重平铺合并，下载时 `resolve_selection` 自动先装前置。
+
+3. **全库搜索翻页彻底零网络**
+   - 搜索改为**一次拉取 `limit=100`**，结果与图标全部缓存到内存（`_search_cache` / `_icons_cache`）。
+   - 上一页 / 下一页直接读缓存切片，**不再发任何网络请求**；只有点「搜索」或回车才重新请求。
+   - 等待时列表中央仍显示「正在搜索...」。
+
+4. **Fabric loader 稳定版优先**
+   - `fabric_loader_candidates` 排序修复：稳定版全部排在测试版之前，同 stable 内按版本号新→旧，避免 beta 排前面导致取到旧稳定版。
+
+5. **配置页页签重排 + 合并**
+   - `ServerConfigDialog` 页签顺序固定为：**登录 → server.properties → 核心 → 模组 → 插件 → 模组与插件配置 → 备份 → 白名单 → 启动设置 → 性能优化**。
+   - 原「插件配置」与「模组配置」合并为**「模组与插件配置」**一个页签（模组配置在上、插件配置在下），不再单独占两个页签。
+
+## 下载说明
+
+- **ZIP 版（推荐）**：解压后运行 `MCSM.exe`，无需安装，绿色免安装。
+- **EXE 版**：直接运行 `MCSM.exe`（含运行库，首次启动略慢）。
+- 软件支持在线检查更新：顶栏「检查更新」会自动跳转到本仓库 Release 页面。

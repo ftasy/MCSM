@@ -2,6 +2,7 @@
 """各种对话框：创建向导 / Java 管理 / 搬迁。"""
 
 import os
+import re
 import sys
 
 from PySide6.QtGui import (QColor, QDesktopServices, QTextCursor,
@@ -2004,6 +2005,10 @@ class ServerConfigDialog(QDialog):
             out.addWidget(gb)
         out.addStretch(1)
         sa.setWidget(w)
+        # ===== 页签 1：登录（★ V1.8.2：移到最前）=====
+        self.tabs.addTab(self._auth_tab(), "登录")
+
+        # ===== 页签 2：server.properties =====
         self.tabs.addTab(sa, "server.properties")
         v.addWidget(self.tabs, 1)
 
@@ -2013,24 +2018,23 @@ class ServerConfigDialog(QDialog):
         # ===== 页签 3：模组 =====
         self.tabs.addTab(self._mod_tab(), "模组")
 
-        # ===== 页签 3.5：插件（★ V1.7.0-3：放开所有加载器，
+        # ===== 页签 5：插件（★ V1.7.0-3：放开所有加载器，
         #   Fabric / Forge / NeoForge 也支持装插件类组件）=====
         ldr_cfg = (entry.get("loader") or "").lower()
         if ldr_cfg not in ("", "vanilla", "unknown"):
             self.tabs.addTab(self._plugin_tab(), "插件")
-            # ★ V1.8.0：插件配置页签（LuckPerms 简单配置界面等）
-            self.tabs.addTab(self._plugincfg_tab(), "插件配置")
 
-        # ===== 页签 3.5：模组配置（装了还要配的那些）=====
-        self.tabs.addTab(self._modconf_tab(), "模组配置")
+        # ===== 页签 6：模组与插件配置（★ V1.8.2：原"插件配置"+
+        #   "模组配置"合并为一个页签，位于插件之后）=====
+        self.tabs.addTab(self._modplugin_tab(ldr_cfg), "模组与插件配置")
 
-        # ===== 页签 4：备份 =====
+        # ===== 页签 7：备份 =====
         self.tabs.addTab(self._backup_tab(), "备份")
 
-        # ===== 页签 4.5：登录（★ V1.3.0 多源共存）=====
-        self.tabs.addTab(self._auth_tab(), "登录")
+        # ===== 页签 8：白名单 =====
+        self.tabs.addTab(self._whitelist_tab(), "白名单")
 
-        # ===== 页签 5：启动设置 =====
+        # ===== 页签 9：启动设置 =====
         gj = QGroupBox("Java 与内存（仅本服）", self)
         self._w_java = gj
         gv = QVBoxLayout(gj)
@@ -2065,9 +2069,6 @@ class ServerConfigDialog(QDialog):
             lambda: _apply_mem_unit(self.sp_xms, self.cb_xms_unit))
         self.cb_xmx_unit.currentIndexChanged.connect(
             lambda: _apply_mem_unit(self.sp_xmx, self.cb_xmx_unit))
-
-                # ===== 页签 6：白名单 =====
-        self.tabs.addTab(self._whitelist_tab(), "白名单")
 
         # ★ run.bat 结束时要不要 pause（那个"按任意键继续"）
         hp = QHBoxLayout()
@@ -2613,6 +2614,23 @@ class ServerConfigDialog(QDialog):
         except Exception:
             d = {}
         return defaults, p
+
+    def _modplugin_tab(self, ldr_cfg):
+        """★ V1.8.2：『模组与插件配置』合并页签。
+
+        上半部 = 原模组配置（_modconf_tab），下半部 = 原插件配置
+        （_plugincfg_tab，仅非 vanilla 服显示）。两个页签内容合并
+        为一个页签，位于『插件』之后。
+        """
+        w = QWidget(self)
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(6)
+        v.addWidget(self._modconf_tab())
+        if ldr_cfg not in ("", "vanilla", "unknown"):
+            v.addWidget(self._plugincfg_tab())
+        v.addStretch(1)
+        return w
 
     def _plugincfg_tab(self):
         """插件配置页签：LuckPerms 简单配置界面 + EssentialsX 一键生成。"""
@@ -6135,6 +6153,10 @@ class ModBrowseDialog(QDialog):
         self.builtin_hits = []      # 推荐清单全量（内存）
         self.builtin_offset = 0     # 推荐分页偏移（内存）
         self.builtin_total = 0
+        # ★ V1.8.2：全库搜索一次拉取（limit=100）后的本地缓存，
+        #   翻页直接切片、零网络。
+        self._search_cache = []
+        self._icons_cache = {}
 
         v = QVBoxLayout(self)
 
@@ -6362,11 +6384,21 @@ class ModBrowseDialog(QDialog):
         ★ V1.8.0：绝对不发任何网络请求 —— 不查 Modrinth、不拉图标
           （图标统一走卡片占位）。数据只来自 MOD_TARGETS / PLUGIN_TARGETS，
           分页在内存中完成（每页 20）。
+        ★ V1.8.2：插件服推荐 = PLUGIN_TARGETS + MOD_TARGETS["paper"]
+          （Cupboard 生态）按清单顺序平铺去重，无任何分组标题。
         """
         hits = []
+        seen = set()
         if self.is_plugins:
-            # ★ V1.8.0：插件推荐清单（multilogin 最前 + 前置绑定）
-            for m in install.PLUGIN_TARGETS:
+            # ★ V1.8.2：multilogin 最前（PLUGIN_TARGETS 已排好），
+            #   随后追加 MOD_TARGETS["paper"] 的 Cupboard 生态，去重平铺。
+            sources = []
+            sources.extend(install.PLUGIN_TARGETS)
+            sources.extend(install.MOD_TARGETS.get("paper") or [])
+            for m in sources:
+                if m["slug"] in seen:
+                    continue
+                seen.add(m["slug"])
                 hits.append({
                     "slug": m["slug"], "title": m["name"],
                     "description": m["desc"],
@@ -6449,12 +6481,17 @@ class ModBrowseDialog(QDialog):
         self._run()
 
     def _page(self, d):
-        """全库翻页：携带正确 offset 重新搜索。"""
+        """★ V1.8.2：全库翻页零网络 —— 直接读 _search_cache 切片。
+
+        只有点『搜索』/回车/切分类排序才重新请求（search -> _run）。
+        """
         new = self.offset + d * 20
-        if new < 0 or (self.total and new >= self.total):
+        if new < 0 or (self._search_cache
+                       and new >= len(self._search_cache)):
             return
         self.offset = new
-        self._run()
+        self._fill_lib(self._icons_cache)
+        self._sync_page()
 
     def _run(self):
         self._lib_searched = True
@@ -6477,19 +6514,22 @@ class ModBrowseDialog(QDialog):
 
     def _do_search(self, query="", category=None, sort="downloads",
                    offset=0, on_log=None):
-        """后台搜索 Modrinth 全库（推荐 Tab 不走这里）。"""
+        """后台搜索 Modrinth 全库（推荐 Tab 不走这里）。
+
+        ★ V1.8.2：一次性拉取 limit=100，结果存 self._search_cache；
+          翻页不再发网络。icons 也一次拉齐缓存。
+        """
         r = modman.browse_projects(
             query=query, mc_version=self.mc_version,
             loader=self.loader, category=category, sort=sort,
-            limit=20, offset=offset, source="modrinth",
+            limit=100, offset=0, source="modrinth",
             project_type="plugin" if self.is_plugins else "mod")
         if r.get("err"):
             raise RuntimeError(r["err"])
         hits = r.get("hits") or []
         icons = self._fetch_icons([(h.get("slug"), h.get("icon_url"))
                                    for h in hits])
-        return {"hits": hits, "total": r.get("total"),
-                "icons": icons, "offset": offset,
+        return {"hits": hits, "icons": icons,
                 "error": r.get("error"), "builtin": False}
 
     @staticmethod
@@ -6527,10 +6567,14 @@ class ModBrowseDialog(QDialog):
             self.lbl_stat.setText("搜索失败")
             self._log("[错误] %r" % (res,))
             return
-        self.hits = res.get("hits") or []
-        self.total = res.get("total") or 0
+        # ★ V1.8.2：结果整批进缓存，之后翻页纯本地。
+        self._search_cache = res.get("hits") or []
+        self._icons_cache = res.get("icons") or {}
+        self.hits = self._search_cache
+        self.total = len(self._search_cache)
+        self.offset = 0
         self._lib_wait(False)
-        self._fill_lib(res.get("icons") or {})
+        self._fill_lib(self._icons_cache)
         self._sync_page()
         err = res.get("error")
         if err:
@@ -6545,11 +6589,12 @@ class ModBrowseDialog(QDialog):
             self._log("[空] 试试放宽分类或换个关键词")
 
     def _fill_lib(self, icons):
-        """渲染全库搜索结果（带图标）。"""
+        """渲染全库搜索结果当前页（缓存切片 20 个，带图标）。"""
         self.list_lib.blockSignals(True)
         self.list_lib.clear()
         self._slug_title = {}
-        for h in self.hits:
+        page = self._search_cache[self.offset:self.offset + 20]
+        for h in page:
             slug = h.get("slug") or ""
             title = h.get("title") or slug
             self._slug_title[slug] = title
@@ -6568,11 +6613,24 @@ class ModBrowseDialog(QDialog):
         self._sync_count()
 
     # ---------- PCL2 风格卡片 ----------
+    # ★ V1.8.2：desc 末尾 [标签] → 彩色小标签（第三行渲染）。
+    _TAG_COLORS = {
+        "第三方登录": "#5b8def", "前置库": "#f59e0b",
+        "Cupboard附属": "#f59e0b", "优化": "#4ade80",
+        "监控": "#a78bfa", "崩溃分析": "#f87171", "工具": "#22d3ee",
+        "权限": "#facc15", "聊天": "#f472b6", "聊天扩展": "#f472b6",
+        "基础指令": "#60a5fa", "防熊": "#f87171", "建筑": "#22d3ee",
+        "区域保护": "#4ade80", "基础前置": "#f59e0b",
+    }
+
     def _make_card(self, h, icons, builtin):
         """一行卡片：左侧勾选框 + 64x64 图标，右侧名称/简介/标签/百科按钮。"""
         slug = h.get("slug") or ""
         title = h.get("title") or slug
-        desc = (h.get("description") or "").replace("\n", " ")
+        _raw_desc = (h.get("description") or "").replace("\n", " ")
+        # ★ V1.8.2：提取 desc 里的 [标签] 用于彩色渲染，简介正文去掉标签
+        _tags_desc = re.findall(r"\[([^\[\]]+)\]", _raw_desc)
+        desc = re.sub(r"\[[^\[\]]*\]", " ", _raw_desc).strip()
         if len(desc) > 120:
             desc = desc[:117] + "..."
         dl = h.get("downloads")
@@ -6675,10 +6733,14 @@ class ModBrowseDialog(QDialog):
         lb_desc.setMaximumHeight(30)  # 最多两行
         rt.addWidget(lb_desc)
 
-        # 标签行（★ V1.6.2：去掉分组标题，直接平铺展示）
+        # 标签行（★ V1.8.2：纯平铺、无分组标题；desc 的 [标签] 彩色渲染）
         tags = []
         if builtin:
-            tags.append("[内置推荐]")
+            # 彩色小标签排最前（PCL2 风格，第三行灰字）
+            for t in _tags_desc:
+                tags.append('<span style="color:%s; font-weight:bold;">'
+                            '[%s]</span>'
+                            % (self._TAG_COLORS.get(t, "#8ab4ff"), t))
             if req:
                 tags.append("前置: " + "、".join(req))
             tags.append("版本兼容已按当前服过滤")
@@ -6692,6 +6754,7 @@ class ModBrowseDialog(QDialog):
         if installed:
             tags.append("已安装（勾选可覆盖更新）")
         lb_tags = QLabel("  ".join(tags))
+        lb_tags.setTextFormat(Qt.RichText)
         lb_tags.setStyleSheet(
             "color:#6b7280; font-size:10px; background:transparent;")
         rt.addWidget(lb_tags)

@@ -409,7 +409,9 @@ def fill_builds(mc_version):
 def fabric_loader_candidates(mc_version):
     """列出 Fabric loader 所有可用版本（含测试版）。
 
-    返回 [{version, stable}]，新的在前。
+    返回 [{version, stable}]，★ V1.8.2：稳定版全部排在测试版前面，
+    同 stable 内按版本号新→旧排序（官方列表可能把 beta 排在前头，
+    不重排的话 fabric_loader_version 会取到旧稳定版）。
     官方 meta 里 stable=false 的就是测试版（如 0.20.x 曾经是 beta）。
     """
     # ★ 拉版本列表不该等 60 秒，15 秒没回就当网络不通，直接抛错（让界面提示重试）
@@ -423,6 +425,14 @@ def fabric_loader_candidates(mc_version):
                     "stable": bool((a.get("loader") or {}).get("stable"))})
     if not out:
         raise InstallError("Fabric 没有 %s 的 loader" % mc_version)
+
+    # ★ V1.8.2：稳定版排前 + 版本号倒序（新的在前）
+    def _nums(v):
+        return [int(x) for x in re.findall(r"\d+", v)] or [0]
+
+    out.sort(key=lambda c: (
+        0 if c["stable"] else 1,
+        tuple(-n for n in _nums(c["version"]))))
     return out
 
 
@@ -1330,128 +1340,152 @@ def _m(slug, name, desc, group, req=(), max_ver=None):
 
 
 MOD_TARGETS = {
+    # ★ V1.8.2：纯平铺重构 —— 绝对不设分组标题（group 一律空串），
+    #   desc 末尾用方括号 [标签] 标识用途，UI 卡片第三行彩色渲染。
+    #   冲突项已剔除：不装 packetfixer（Connectivity 更全）、
+    #   不装 morechathistory（Chat Patches 更强）。
     "fabric": [
-        # ---- 第三方登录（★ V1.8.0：登录优先，放最前）----
+        # 1. 第三方登录（排最前）
         _m("multiyggdrasil", "MultiYggdrasil",
-           "多源外置登录：正版 + 第三方皮肤站共存（Fabric/Forge/NeoForge）",
-           "① 第三方登录"),
-        # ---- 前置 ----
-        _m("fabric-api", "Fabric API",
-           "绝大多数模组的前置，建议勾选", "① 前置"),
-
-        # ---- 核心优化（全是服务端生效）----
-        _m("lithium", "Lithium",
-           "优化游戏逻辑（实体AI/红石/区块刻），收益最大", "② 核心优化"),
-        _m("ferrite-core", "FerriteCore",
-           "减少内存占用，小内存服必装", "② 核心优化"),
-        _m("c2me-fabric", "C2ME",
-           "多线程区块生成与保存，跑图/预生成快很多", "② 核心优化"),
-        _m("modernfix", "ModernFix",
-           "修复 Mojang 的性能 bug，还加快启动", "② 核心优化"),
-        _m("krypton", "Krypton",
-           "优化网络包处理，人多时明显", "② 核心优化"),
-        _m("servercore", "ServerCore",
-           "服务端综合优化，可按 MSPT 动态调视距（可配置）", "② 核心优化"),
-        _m("saturn", "Saturn",
-           "减少内存占用（与 FerriteCore 互补，可同时装）", "② 核心优化"),
-        _m("alternate-current", "Alternate Current",
-           "重写红石粉更新逻辑，大型红石机械明显变快", "② 核心优化"),
-
-        # ---- 启动与内存 ----
-        _m("lazydfu", "LazyDFU",
-           "延迟加载 DataFixer，启动快几秒（仅 1.18.2 及以前）",
-           "③ 启动与内存", max_ver="1.18.2"),
-        _m("put-a-plug-in-it!", "Put A Plug In It!",
-           "修内存泄漏（替代已停更的 Memory Leak Fix）", "③ 启动与内存"),
-
-        # ---- 区块与视距 ----
-        _m("noisium", "Noisium",
-           "加速新区块生成（仅服务端生效；26.3 起停更）", "④ 区块与视距"),
-
-        # ---- 服主工具 ----
-        _m("spark", "spark",
-           "性能分析，卡顿时 /spark profiler 排查", "⑤ 服主工具"),
-        _m("chunky", "Chunky",
-           "预生成地形，新图跑图不卡", "⑤ 服主工具",
+           "多源外置登录：正版+第三方皮肤站共存 [第三方登录]", ""),
+        # 3. 性能/聊天工具
+        _m("clumps", "Clumps", "合并经验球，降低服务器压力 [优化]", ""),
+        _m("tabtps", "TabTPS", "TPS/MSPT 监控，Tab 列表实时显示 [监控]", ""),
+        _m("crashassistant", "Crash Assistant",
+           "崩溃报告收集分析（Modrinth 暂无发布，失败按日志手动装） [崩溃分析]", ""),
+        _m("spark", "spark", "性能分析，卡顿时 /spark profiler 排查 [监控]", ""),
+        _m("chunky", "Chunky", "预生成地形，新图跑图不卡 [工具]", "",
            req=["fabric-api"]),
-        _m("luckperms", "LuckPerms",
-           "权限管理，要给朋友开指令时很有用", "⑤ 服主工具"),
+        _m("luckperms", "LuckPerms", "权限管理 [权限]", ""),
+        _m("chatpatches", "Chat Patches", "聊天记录上限与历史增强 [聊天]", ""),
+        # 保留核心项（同样平铺 + 标签）
+        _m("fabric-api", "Fabric API", "绝大多数模组的前置 [前置库]", ""),
+        _m("lithium", "Lithium",
+           "优化游戏逻辑（实体AI/红石/区块刻），收益最大 [优化]", ""),
+        _m("ferrite-core", "FerriteCore",
+           "减少内存占用，小内存服必装 [优化]", ""),
+        _m("c2me-fabric", "C2ME",
+           "多线程区块生成与保存，跑图/预生成快很多 [优化]", ""),
+        _m("modernfix", "ModernFix",
+           "修复 Mojang 的性能 bug，还加快启动 [优化]", ""),
+        _m("krypton", "Krypton", "优化网络包处理，人多时明显 [优化]", ""),
+        _m("servercore", "ServerCore",
+           "服务端综合优化，可按 MSPT 动态调视距 [优化]", ""),
+        _m("saturn", "Saturn",
+           "减少内存占用（与 FerriteCore 互补） [优化]", ""),
+        _m("alternate-current", "Alternate Current",
+           "重写红石粉更新逻辑，大型红石机械明显变快 [优化]", ""),
+        _m("lazydfu", "LazyDFU",
+           "延迟加载 DataFixer，启动快几秒（仅 1.18.2 及以前） [优化]",
+           "", max_ver="1.18.2"),
+        _m("put-a-plug-in-it!", "Put A Plug In It!",
+           "修内存泄漏（替代已停更的 Memory Leak Fix） [优化]", ""),
+        _m("noisium", "Noisium",
+           "加速新区块生成（26.3 起停更） [优化]", ""),
         _m("simple-voice-chat", "Simple Voice Chat",
-           "近距离语音，客户端也要装同名模组", "⑤ 服主工具",
+           "近距离语音，客户端也要装同名模组 [聊天]", "",
            req=["fabric-api"]),
     ],
 
     "neoforge": [
-        # ---- 第三方登录（★ V1.8.0：登录优先，放最前）----
-        _m("akiyggdrasil", "AkiYggdrasil",
-           "第三方外置登录（1.21.1 NeoForge；若 Modrinth 暂无发布，"
-           "按日志提示手动装 jar）", "① 第三方登录", max_ver="1.21.1"),
+        # 1. 第三方登录（排最前）
         _m("multiyggdrasil", "MultiYggdrasil",
-           "多源外置登录：正版 + 第三方皮肤站共存", "① 第三方登录"),
-        _m("ferrite-core", "FerriteCore", "减少内存占用", "② 核心优化"),
-        _m("modernfix", "ModernFix", "修复性能 bug + 加快启动", "② 核心优化"),
-        _m("krypton", "Krypton", "优化网络包处理", "② 核心优化"),
-        _m("saturn", "Saturn", "减少内存占用", "② 核心优化"),
-        _m("lithium", "Lithium", "优化游戏逻辑", "② 核心优化"),
-        _m("alternate-current", "Alternate Current", "重写红石粉更新逻辑",
-           "② 核心优化"),
-        _m("memoryleakfix", "Memory Leak Fix", "修内存泄漏", "③ 启动与内存"),
-        _m("noisium", "Noisium", "加速新区块生成", "④ 区块与视距"),
-        _m("chunky", "Chunky", "预生成地形", "⑤ 服主工具"),
-        _m("spark", "spark", "性能分析", "⑤ 服主工具"),
-        _m("luckperms", "LuckPerms", "权限管理", "⑤ 服主工具"),
+           "多源外置登录：正版+第三方皮肤站共存 [第三方登录]", ""),
+        _m("akiyggdrasil", "AkiYggdrasil",
+           "第三方外置登录（1.21.1 NeoForge；Modrinth 暂无发布，"
+           "失败按日志手动装 jar） [第三方登录]", "", max_ver="1.21.1"),
+        # 3. 性能/聊天工具
+        _m("clumps", "Clumps", "合并经验球，降低服务器压力 [优化]", ""),
+        _m("tabtps", "TabTPS", "TPS/MSPT 监控 [监控]", ""),
+        _m("crashassistant", "Crash Assistant",
+           "崩溃报告收集分析（Modrinth 暂无发布，失败按日志手动装） [崩溃分析]", ""),
+        _m("spark", "spark", "性能分析，卡顿时 /spark profiler 排查 [监控]", ""),
+        _m("chunky", "Chunky", "预生成地形，新图跑图不卡 [工具]", ""),
+        _m("luckperms", "LuckPerms", "权限管理 [权限]", ""),
+        _m("chatpatches", "Chat Patches",
+           "聊天记录上限与历史增强（暂无 NeoForge 版，失败按日志提示） [聊天]", ""),
+        # 保留核心项
+        _m("ferrite-core", "FerriteCore", "减少内存占用 [优化]", ""),
+        _m("modernfix", "ModernFix", "修复性能 bug + 加快启动 [优化]", ""),
+        _m("krypton", "Krypton", "优化网络包处理 [优化]", ""),
+        _m("saturn", "Saturn", "减少内存占用 [优化]", ""),
+        _m("lithium", "Lithium", "优化游戏逻辑 [优化]", ""),
+        _m("alternate-current", "Alternate Current",
+           "重写红石粉更新逻辑 [优化]", ""),
+        _m("memoryleakfix", "Memory Leak Fix", "修内存泄漏 [优化]", ""),
+        _m("noisium", "Noisium", "加速新区块生成 [优化]", ""),
     ],
 
     "forge": [
-        # ---- 第三方登录（★ V1.8.0：登录优先，放最前）----
+        # 1. 第三方登录（排最前）
         _m("multiyggdrasil", "MultiYggdrasil",
-           "多源外置登录：正版 + 第三方皮肤站共存（Forge/Fabric/NeoForge）",
-           "① 第三方登录"),
-        # ★ 修正：slug 是 ferrite-core 而非 ferritecore
+           "多源外置登录：正版+第三方皮肤站共存 [第三方登录]", ""),
+        # 3. 性能/聊天工具
+        _m("clumps", "Clumps", "合并经验球，降低服务器压力 [优化]", ""),
+        _m("crashassistant", "Crash Assistant",
+           "崩溃报告收集分析（Modrinth 暂无发布，失败按日志手动装） [崩溃分析]", ""),
+        _m("spark", "spark", "性能分析，卡顿时 /spark profiler 排查 [监控]", ""),
+        _m("chunky", "Chunky", "预生成地形，新图跑图不卡 [工具]", ""),
+        _m("luckperms", "LuckPerms", "权限管理 [权限]", ""),
+        _m("chatpatches", "Chat Patches",
+           "聊天记录上限与历史增强（暂无 Forge 版，失败按日志提示） [聊天]", ""),
+        # 保留核心项
         _m("ferrite-core", "FerriteCore",
-           "减少内存占用（1.20.1 需在配置中开启 populateNeighborTable 防崩溃）",
-           "② 核心优化"),
-        _m("modernfix", "ModernFix", "修复性能 bug + 加快启动", "② 核心优化"),
-        # ★ 修正：Forge 版 Krypton 的 slug 是 krypton-fnp
+           "减少内存占用（1.20.1 需开 populateNeighborTable 防崩溃） [优化]", ""),
+        _m("modernfix", "ModernFix", "修复性能 bug + 加快启动 [优化]", ""),
         _m("krypton-fnp", "Krypton FNP (Forge版)",
-           "优化网络包处理（Forge 非官方重构版）", "② 核心优化"),
+           "优化网络包处理（Forge 非官方重构版） [优化]", ""),
         _m("alternate-current", "Alternate Current",
-           "重写红石粉更新逻辑（Forge 版最高到 1.20.4）", "② 核心优化"),
-        _m("memoryleakfix", "Memory Leak Fix", "修内存泄漏", "③ 启动与内存"),
-        _m("noisium", "Noisium", "加速新区块生成", "④ 区块与视距"),
-        _m("chunky", "Chunky", "预生成地形", "⑤ 服主工具"),
-        _m("spark", "spark", "性能分析", "⑤ 服主工具"),
-        _m("luckperms", "LuckPerms", "权限管理", "⑤ 服主工具"),
+           "重写红石粉更新逻辑（Forge 版最高到 1.20.4） [优化]", ""),
+        _m("memoryleakfix", "Memory Leak Fix", "修内存泄漏 [优化]", ""),
+        _m("noisium", "Noisium", "加速新区块生成 [优化]", ""),
     ],
 
     "vanilla": [],
-    # ★ V1.8.0：Paper 服推荐区新增 Cupboard 生态分组（Cupboard 是
-    #   插件，装进 plugins/ 目录；其余插件走 PLUGIN_TARGETS 推荐清单）。
+    # ★ V1.8.2：Paper 服推荐区 —— Cupboard 生态 6 项（都是插件，
+    #   装进 plugins/）+ 适用的监控/权限工具，全平铺无分组标题。
     "paper": [
         _m("cupboard", "Cupboard",
-           "提供 JSON 配置框架与崩溃追踪的核心前置", "① Cupboard 生态"),
+           "提供 JSON 配置框架与崩溃追踪的核心前置 [前置库]", ""),
+        _m("fastasyncworldsave", "Faster Async World Save",
+           "异步保存世界，卡顿明显减少（Modrinth 暂无发布，失败手动装） [Cupboard附属]", ""),
+        _m("structureessentials", "Structure Essentials",
+           "预生成结构/史莱姆区块工具（Modrinth 暂无发布，失败手动装） [Cupboard附属]", ""),
+        _m("recipeessentials", "Recipe Essentials",
+           "配方管理框架（Modrinth 暂无发布，失败手动装） [Cupboard附属]", ""),
+        _m("connectivity", "Connectivity",
+           "网络握手与防卡包优化（替代 Packet Fixer） [Cupboard附属]", ""),
+        _m("chunksending", "ChunkSending",
+           "区块发送速度优化（Modrinth 暂无发布，失败手动装） [Cupboard附属]", ""),
+        _m("tabtps", "TabTPS", "TPS/MSPT 监控，Tab 列表实时显示 [监控]", ""),
+        _m("spark", "spark", "性能分析，卡顿时 /spark profiler 排查 [监控]", ""),
+        _m("luckperms", "LuckPerms", "权限管理 [权限]", ""),
     ],
 }
 
-# ★ V1.8.0：内置插件推荐清单（与 MOD_TARGETS 并列）。
+# ★ V1.8.2：内置插件推荐清单（纯平铺 + desc 标签 + 严格 req）。
 #   下载时复用 resolve_selection（plugin=True）自动补前置 + 排序。
-#   multilogin 放最前（第三方登录优先）；essentialsx 绑定
-#   vault + luckperms 前置；vault 是经济基础必须存在。
+#   multilogin 最前（第三方登录第一）；essentialsx 绑定
+#   vault + luckperms；essentialsxchat 绑定 essentialsx。
 PLUGIN_TARGETS = [
     _m("multilogin", "MultiLogin",
-       "多源登录：正版 + 第三方外置登录共存（插件版）", "① 第三方登录"),
-    _m("vault", "Vault",
-       "经济/权限接口，经济插件的地基，必须存在", "② 基础插件"),
-    _m("luckperms", "LuckPerms",
-       "权限管理（Multilogin/EssentialsX 都依赖它）", "② 基础插件"),
+       "多源登录：正版+第三方外置登录共存（Modrinth 暂无官方发布，"
+       "失败请到 GitHub Ink33/MultiLogin 手动装） [第三方登录]", ""),
+    _m("luckperms", "LuckPerms", "权限管理，几乎所有插件服的地基 [权限]", ""),
+    _m("vault", "Vault", "经济/权限接口，经济插件的地基 [基础前置]", ""),
     _m("essentialsx", "EssentialsX",
-       "基础指令/聊天/传送/经济桥（需 Vault + LuckPerms）",
-       "③ 功能插件", req=["vault", "luckperms"]),
+       "基础指令/聊天/传送/经济桥 [基础指令]", "", req=["vault", "luckperms"]),
+    _m("essentialsxchat", "EssentialsXChat",
+       "聊天格式化与频道扩展（Modrinth 暂无独立发布，失败手动装） [聊天扩展]", "",
+       req=["essentialsx"]),
     _m("coreprotect", "CoreProtect",
-       "防熊回滚：方块/容器/聊天操作记录，被熊了能查能还原",
-       "④ 防熊插件"),
-    _m("ledger", "Ledger",
-       "方块/容器操作审计（CoreProtect 的现代替代）", "④ 防熊插件"),
+       "防熊回滚：方块/容器/聊天操作记录，被熊了能查能还原 [防熊]", ""),
+    _m("worldedit", "WorldEdit",
+       "建筑工具：选区/复制/粘贴/替换 [建筑]", ""),
+    _m("worldguard", "WorldGuard",
+       "区域保护：圈地/防破坏/出生点保护 [区域保护]", ""),
+    _m("tabtps", "TabTPS", "TPS/MSPT 监控，Tab 列表实时显示 [监控]", ""),
+    _m("spark", "spark", "性能分析，卡顿时 /spark profiler 排查 [监控]", ""),
 ]
 
 
