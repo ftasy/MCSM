@@ -18,6 +18,8 @@ from PySide6.QtWidgets import (
     QWidget, QApplication, QTableWidget, QTableWidgetItem,
     QHeaderView, QInputDialog, QCompleter, QListView,
     QTimeEdit,  # ★ V1.6.3：定时重启时间框之前漏导，配置窗一点就 NameError
+    QRadioButton,  # ★ V1.7.2：ModBrowseDialog 双分组用了但一直没导，
+                   #   弹窗一构造就 NameError、点击毫无反应（静默失败）
 )
 
 from .core import (versions, java as javacore, install, builder,
@@ -729,7 +731,9 @@ class CreateDialog(QDialog):
         scroll.setFrameShape(QFrame.NoFrame)
         scroll_widget = QWidget()
         scroll_layout = QVBoxLayout(scroll_widget)
-        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        # ★ V1.7.2-3：给滚动内容留出边距，防止 QGroupBox 贴边/溢出
+        scroll_layout.setContentsMargins(8, 8, 8, 8)
+        scroll_layout.setSpacing(10)
 
         # ---- 基本信息 ----
         g1 = QGroupBox("识别结果")
@@ -882,6 +886,7 @@ class CreateDialog(QDialog):
         # ---- 内存（★ V1.6.1：MB/G 单位可切换，底层统一整数 MB）----
         g3 = QGroupBox("内存")
         h3 = QHBoxLayout(g3)
+        h3.setContentsMargins(10, 10, 10, 10)
         h3.addWidget(QLabel("最小:"))
         # ★ QDoubleSpinBox：G 模式允许小数（0.5 步进）；MB 模式整数
         self.sp_xms = QDoubleSpinBox()
@@ -918,8 +923,11 @@ class CreateDialog(QDialog):
         scroll_layout.addWidget(g3)
 
         # ---- 自动化功能（初始化默认勾选，可随时在服务器配置里改）----
-        g_auto = QGroupBox("自动化功能")
+        # ★ V1.7.2-3：分组框改名"性能与自动化"，把 Aikar 优化 /
+        #   自动重启 / 定时备份统一收纳，界面层级更清楚
+        g_auto = QGroupBox("性能与自动化")
         v_auto = QVBoxLayout(g_auto)
+        v_auto.setContentsMargins(10, 10, 10, 10)
         self.chk_aikar = QCheckBox("启用 Aikar 性能优化 (G1GC)")
         self.chk_aikar.setToolTip(
             "目前公认最优的 Java 启动参数，可大幅减少 GC 卡顿。\n"
@@ -2512,10 +2520,30 @@ class ServerConfigDialog(QDialog):
         _open_in_explorer(self._plugins_dir_here())
 
     def _add_plugin_here(self):
-        """在这里直接搜装插件（装完自动刷新列表）。"""
-        dlg = _themed(ModBrowseDialog(self.entry, self, mode="plugins"))
-        dlg.exec()
-        self._refresh_plugins_here()
+        """在这里直接搜装插件（装完自动刷新列表）。
+
+        ★ V1.7.2-2：用 self._plugin_dialog 持有引用（防止局部变量被
+        GC 回收导致窗口一闪没），外层包 try/except（防止异常被事件
+        循环静默吞掉、点击毫无反应），show 后 raise_+activateWindow
+        保证弹窗在顶层。
+        """
+        try:
+            self._plugin_dialog = _themed(ModBrowseDialog(
+                self.entry, self, mode="plugins"))
+            self._plugin_dialog.show()
+            self._plugin_dialog.raise_()
+            self._plugin_dialog.activateWindow()
+            self._plugin_dialog.finished.connect(
+                lambda _res: self._refresh_plugins_here())
+        except Exception as e:
+            import traceback as _tb
+            try:
+                _tb.print_exc()
+            except Exception:
+                pass
+            QMessageBox.critical(
+                self, "打开插件搜索失败",
+                "错误详情：%r" % (e,))
 
     def _refresh_plugins_here(self):
         try:
@@ -2649,16 +2677,33 @@ class ServerConfigDialog(QDialog):
         return d
 
     def _add_mod_here(self):
-        """在这里直接搜装模组（装完自动刷新列表）。"""
-        if (self.entry.get("loader") or "") == "paper":
-            QMessageBox.information(
-                self, "这是插件服",
-                "Paper 装的是插件不是模组。\n\n"
-                "要用模组的话，得把核心换成 Fabric / Forge。")
-            return
-        dlg = _themed(ModBrowseDialog(self.entry, self))
-        dlg.exec()
-        self._refresh_mods_here()
+        """在这里直接搜装模组（装完自动刷新列表）。
+
+        ★ V1.7.2-2：同 _add_plugin_here —— self._mod_dialog 持有
+        引用 + try/except + raise_/activateWindow，杜绝"点击无反应"。
+        """
+        try:
+            if (self.entry.get("loader") or "") == "paper":
+                QMessageBox.information(
+                    self, "这是插件服",
+                    "Paper 装的是插件不是模组。\n\n"
+                    "要用模组的话，得把核心换成 Fabric / Forge。")
+                return
+            self._mod_dialog = _themed(ModBrowseDialog(self.entry, self))
+            self._mod_dialog.show()
+            self._mod_dialog.raise_()
+            self._mod_dialog.activateWindow()
+            self._mod_dialog.finished.connect(
+                lambda _res: self._refresh_mods_here())
+        except Exception as e:
+            import traceback as _tb
+            try:
+                _tb.print_exc()
+            except Exception:
+                pass
+            QMessageBox.critical(
+                self, "打开模组搜索失败",
+                "错误详情：%r" % (e,))
 
     def _refresh_mods_here(self):
         try:
