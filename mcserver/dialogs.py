@@ -530,9 +530,36 @@ class JavaPick(QGroupBox):
         self._check()
 
     def rescan(self):
+        # ★ V1.6.4：Java 扫描放进后台线程。
+        #   javacore.find_all() 要逐个跑 `java -version`（subprocess），
+        #   同步执行会卡主线程 2~3 秒 —— 正是"点初始化要等两三秒"的元凶。
+        #   现在先显示"正在扫描..."占位，结果回来后再填充下拉框。
         self.combo.blockSignals(True)
         self.combo.clear()
-        self.javas = javacore.find_all()
+        self.combo.addItem("正在扫描 Java...", None)
+        self.combo.blockSignals(False)
+        self.lbl.setText("正在扫描系统里的 Java ...")
+        self.lbl.setStyleSheet("color:%s;" % _on_bg("#9aa4b2"))
+        w = _track(self, Worker(self._scan_job, {}, self))
+        w.done.connect(self._on_scan_done)
+        w.start()
+
+    def _scan_job(self, on_log=None):
+        return javacore.find_all()
+
+    def _on_scan_done(self, ok, res):
+        if not ok or not isinstance(res, list):
+            self.javas = []
+            self.combo.blockSignals(True)
+            self.combo.clear()
+            self.combo.addItem("(扫描失败：%s)" % (res,), None)
+            self.combo.blockSignals(False)
+            self.lbl.setText("Java 扫描失败：%r" % (res,))
+            self.lbl.setStyleSheet("color:%s;" % _on_bg("#c62828"))
+            return
+        self.javas = res
+        self.combo.blockSignals(True)
+        self.combo.clear()
         if not self.javas:
             self.combo.addItem("(未找到 Java，请点『浏览』手动指定)", None)
             self.combo.blockSignals(False)
@@ -668,6 +695,12 @@ class CreateDialog(QDialog):
         """
         try:
             _stop_threads(self)
+        except Exception:
+            pass
+        # ★ V1.6.4：JavaPick 的扫描线程挂在它自己身上，
+        #   窗口关闭时也要一起停掉，避免线程残留导致崩溃。
+        try:
+            _stop_threads(self.java_pick)
         except Exception:
             pass
         try:
@@ -910,15 +943,16 @@ class CreateDialog(QDialog):
         v.addWidget(btns)
 
         # 初始化时 ed_version 已经填好了（发生在 JavaPick 创建之前，
-        # 所以 textChanged 不会触发）。这里手动同步一次，
-        # 否则 mc_version 是 None，Java 偏高警告不会生效。
-        self.java_pick.rescan()
+        # 所以 textChanged 不会触发）。这里先算好 Java 需求。
         self._sync_java_need()
 
         wd = entry.get("world_dir")
         self.lbl_info.setText(wd or "(未发现存档)")
         self._refresh_loaders()
-        self.java_pick.rescan()
+        # ★ V1.6.4：Java 扫描已异步化，再延迟到窗口显示之后触发，
+        #   让"初始化服务端"窗口先弹出来，Java 列表随后自动填充，
+        #   不再因为逐个跑 java -version 而卡住弹窗。
+        QTimer.singleShot(50, self.java_pick.rescan)
 
     def _refresh_versions(self):
         """从网上拉最新正式版列表，缓存到本地并刷新补全。
@@ -1785,6 +1819,11 @@ class ServerConfigDialog(QDialog):
         """
         try:
             _stop_threads(self)
+        except Exception:
+            pass
+        # ★ V1.6.4：JavaPick 的扫描线程挂在它自己身上，同样要停。
+        try:
+            _stop_threads(self.java_pick)
         except Exception:
             pass
         try:
