@@ -658,12 +658,29 @@ def apply_palette(root):
                     if vp is not None:
                         vp.setPalette(p)
                         vp.setAutoFillBackground(True)
-                        # ★ 光设调色板还不够：实测表格内容区仍会白。
-                        #   直接给 viewport 本身写一条 stylesheet 才压得住
-                        #   （palette 会被上层样式表的 transparent 吃掉）。
+                        # ★ V1.7.3-4：以前这里只给 viewport 写一条
+                        #   background/color 的【局部样式表】—— 但 Qt 里
+                        #   任何自带局部样式表的控件都会成为样式表的
+                        #   “分界点”，上层（对话框/主窗口）的
+                        #   QPushButton:hover / QPushButton:pressed 等规则
+                        #   从此无法级联到它的子孙控件 —— 表现就是
+                        #   QScrollArea 里的按钮只剩边框、没有悬停/按下动效
+                        #   （真机实测：CreateDialog 里“刷新版本列表”“浏览”
+                        #   等按钮全中招，只有弹窗直下的“开始/Cancel”正常）。
+                        #   现在给 viewport 套【完整主题样式表】+ 一条
+                        #   viewport 自身的底色/字色覆盖：
+                        #     · 完整样式表把 QPushButton 动效等所有规则
+                        #       送进滚动区内部（按钮恢复悬停/按下反馈）
+                        #     · 底部那条 QWidget#<objname> 覆盖保住原有的
+                        #       表格/滚动区白底修复（palette 会被上层
+                        #       样式表的 transparent 吃掉，仍需要这一条）。
                         try:
-                            vp.setStyleSheet(
-                                "background-color: %s; color: %s;" % (fb, fg))
+                            _full = stylesheet(None)
+                            _on = vp.objectName()
+                            if _on:
+                                _full += ("\nQWidget#%s { background-color: %s;"
+                                          " color: %s; }" % (_on, fb, fg))
+                            vp.setStyleSheet(_full)
                         except Exception:
                             pass
                         n += 1

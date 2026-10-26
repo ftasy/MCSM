@@ -3,6 +3,7 @@
 
 import os
 import re
+import json
 import zipfile
 
 from . import nbt, versions
@@ -38,6 +39,124 @@ def jar_name_version(name):
     """从核心 jar 文件名里抠 MC 版本（paper-1.21.1-233.jar -> 1.21.1）。"""
     m = _MC_VER_ANY_RE.search(os.path.basename(str(name)))
     return m.group(0) if m else None
+
+
+def _ver_from_props(txt):
+    """从 install.properties / installer.properties 文本里抠 MC 版本。
+
+    只认明确的“游戏版本”键（fabric 的 game-version、
+    forge/neoforge 的 minecraft_version 等），
+    不整段瞎扫 —— 否则 fabric-loader-version=0.17.3.12 这类
+    加载器版本可能被误认成 MC 版本。
+    """
+    if not txt:
+        return None
+    for line in txt.splitlines():
+        line = line.strip()
+        if not line or "=" not in line or line.startswith("#"):
+            continue
+        k, _, v = line.partition("=")
+        k = k.strip().lower()
+        v = v.strip()
+        if k in ("game-version", "minecraft-version", "minecraft_version",
+                 "mc-version", "mcversion", "mc_version", "gameversion"):
+            m = _MC_VER_ANY_RE.search(v)
+            if m:
+                return m.group(0)
+    return None
+
+
+def jar_internal_version(path):
+    """从核心 jar 内部读 MC 版本，读不到返回 None。
+
+    各种核心的版本藏身之处：
+      · 原版 1.18+ bundler / Paper：jar 根目录的 version.json
+        （{"id": "1.21.7", ...}）
+      · Fabric：install.properties 里的 game-version=
+      · Forge / NeoForge 安装产物：install.properties 的
+        minecraft_version=（部分版本叫 installer.properties）
+      · bundler 系兜底：META-INF/versions.list 里的版本号
+    返回的是“原始版本串”，调用方再交给 clean_mc_version 净化。
+    """
+    try:
+        with zipfile.ZipFile(path) as z:
+            names = z.namelist()
+            name_set = set(names)
+            low_set = {n.lower() for n in names}
+            # 1) version.json（不限路径，先根目录再全库找）
+            cands = [c for c in ("version.json",) if c in name_set]
+            if not cands:
+                cands = [c for c in names if c.lower().endswith(
+                    "version.json")]
+            for cand in cands:
+                try:
+                    data = json.loads(
+                        z.read(cand).decode("utf-8", "ignore"))
+                    v = (data or {}).get("id")
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+                except Exception:
+                    continue
+            # 2) install.properties / installer.properties
+            for cand in ("install.properties", "installer.properties"):
+                if cand in name_set:
+                    v = _ver_from_props(z.read(cand).decode(
+                        "utf-8", "ignore"))
+                    if v:
+                        return v
+            # 3) bundler 系 versions.list 兜底
+            for cand in ("META-INF/versions.list",
+                         "META-INF/VERSIONS.LIST"):
+                if cand in name_set or cand.lower() in low_set:
+                    m = _MC_VER_ANY_RE.search(z.read(
+                        cand).decode("utf-8", "ignore"))
+                    if m:
+                        return m.group(0)
+    except Exception:
+        return None
+    return None
+
+
+def detect_mc_version(folder, server_dir=None, world_dir=None):
+    """多级回退识别 MC 版本（V1.7.3-4）。
+
+    优先级：
+      1. 存档：目录下有 level.dat 就优先读它（最准）；
+      2. 核心 jar：没有可用存档时，读 server.jar / fabric.jar /
+         forge.jar 等核心内部的 version.json / install.properties
+         （读不出再退到 jar 文件名里的版本号）；
+      3. 文件夹名：既没有存档也没有核心时，用正则从文件夹名里
+         提取（1.20.1forge -> 1.20.1，26.2push -> 26.2）；
+      4. 兜底：全部失败返回 (None, None)，由调用方把版本留空并
+         提示“未能自动识别版本，请手动填写”。
+
+    返回 (版本串, 来源说明)，版本串已经 clean_mc_version 净化，
+    来源用于界面回显“读自 …”。
+    """
+    # 1) 存档最准
+    if world_dir and os.path.isfile(os.path.join(world_dir, "level.dat")):
+        v = clean_mc_version(read_world_info(world_dir).get("version"))
+        if v:
+            return v, "level.dat"
+    # 2) 核心 jar：先内部，再文件名
+    if server_dir and os.path.isdir(server_dir):
+        jars = find_server_jars(server_dir)
+        for j in jars:
+            v = clean_mc_version(jar_internal_version(
+                os.path.join(server_dir, j)))
+            if v:
+                return v, "核心 jar 内部（%s）" % j
+        for j in jars:
+            v = clean_mc_version(jar_name_version(j))
+            if v:
+                return v, "核心 jar 文件名（%s）" % j
+    # 3) 文件夹名
+    base = os.path.basename(os.path.normpath(str(folder)))
+    v = clean_mc_version(base)
+    if v:
+        return v, "文件夹名"
+    # 4) 兜底
+    return None, None
 
 
 # 从文件名判断加载器
@@ -409,55 +528,61 @@ def scan_entry(folder):
                 pass
 
     worlds_all = find_worlds(server_dir, max_depth=3)
+    main = None
     if not worlds_all:
         e["notes"].append("未发现存档(level.dat)")
-        return e
-    # ★ 不能把 backups/ 里备份的存档当成本服主存档：
-    #   以前 os.walk 先走到 backups，信息面板显示的"存档"就变成了
-    #   ...\backups\xxx_20261021_231932，region/版本也跟着读错。
-    worlds = [w for w in worlds_all
-              if "backups" not in [p.lower() for p in os.path.relpath(
-                  w, server_dir).split(os.sep)]]
-    if not worlds:
-        worlds = worlds_all
-        e["notes"].append("主存档没找到，只找到备份里的存档")
+    else:
+        # ★ 不能把 backups/ 里备份的存档当成本服主存档：
+        #   以前 os.walk 先走到 backups，信息面板显示的"存档"就变成了
+        #   ...\backups\xxx_20261021_231932，region/版本也跟着读错。
+        worlds = [w for w in worlds_all
+                  if "backups" not in [p.lower() for p in os.path.relpath(
+                      w, server_dir).split(os.sep)]]
+        if not worlds:
+            worlds = worlds_all
+            e["notes"].append("主存档没找到，只找到备份里的存档")
 
-    # 选主世界：优先 server.properties 的 level-name，
-    # 其次叫 world 的，最后第一个（都已排除 backups）
-    main = None
-    lname = ((e.get("props") or {}).get("level-name") or "").strip()
-    if lname:
-        for w in worlds:
-            if os.path.basename(w).lower() == lname.lower():
-                main = w
-                break
-    if main is None:
-        for w in worlds:
-            if os.path.basename(w).lower() == "world":
-                main = w
-                break
-    if main is None:
-        main = worlds[0]
-    e["world_dir"] = main
+        # 选主世界：优先 server.properties 的 level-name，
+        # 其次叫 world 的，最后第一个（都已排除 backups）
+        lname = ((e.get("props") or {}).get("level-name") or "").strip()
+        if lname:
+            for w in worlds:
+                if os.path.basename(w).lower() == lname.lower():
+                    main = w
+                    break
+        if main is None:
+            for w in worlds:
+                if os.path.basename(w).lower() == "world":
+                    main = w
+                    break
+        if main is None:
+            main = worlds[0]
+        e["world_dir"] = main
 
-    wi = read_world_info(main)
-    e["version_source"] = "level.dat"
-    e["world_name"] = wi["name"]
-    e["version"] = wi["version"]
-    # ★ V1.7.1-3：Paper 构建号/分支名被错当 MC 版本时，
-    #   回退从核心 jar 文件名抠真实版本（paper-1.21.1-233.jar）
-    if e["loader"] == "paper" and not clean_mc_version(e["version"]):
-        for j in e["jars"]:
-            jv = jar_name_version(j)
-            if jv:
-                e["version"] = jv
-                e["version_source"] = "jar 文件名"
-                break
-    e["seed"] = wi["seed"]
-    e["difficulty"] = wi["difficulty"]
-    e["gamemode"] = wi["gamemode"]
-    e["layout"] = wi["layout"]
-    e["regions"] = count_region(main, "overworld")
+        wi = read_world_info(main)
+        e["world_name"] = wi["name"]
+        e["seed"] = wi["seed"]
+        e["difficulty"] = wi["difficulty"]
+        e["gamemode"] = wi["gamemode"]
+        e["layout"] = wi["layout"]
+        e["regions"] = count_region(main, "overworld")
+
+    # ★ V1.7.3-4：多级回退识别版本
+    #   1) level.dat 存档最准；2) 没有可用存档就读核心 jar 内部
+    #   version.json / install.properties（读不出再退 jar 文件名）；
+    #   3) 再不行从文件夹名正则提取；4) 全失败留空由界面提示手填。
+    #   这把以前只针对 Paper 的"jar 文件名回退"统一收进了检测链，
+    #   还补上了 jar 内部版本（Fabric/Forge/原版 bundler）这一级。
+    ver, ver_src = detect_mc_version(
+        folder, server_dir=server_dir, world_dir=e["world_dir"])
+    if ver:
+        e["version"] = ver
+        e["version_source"] = ver_src
+    else:
+        e["version"] = None
+        e["version_source"] = None
+        if not main:
+            e["notes"].append("未能自动识别版本，请手动填写")
 
     return e
 

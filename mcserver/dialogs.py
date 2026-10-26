@@ -745,12 +745,24 @@ class CreateDialog(QDialog):
         f.addRow("世界名(level-name):", self.ed_name)
         # ★ V1.7.1-3：回显前净化版本（旧 servers.json 里可能存着
         #   Paper 构建号 "26.2.push" 之类脏串）
+        # ★ V1.7.3-4：条目里没版本（或版本是脏串）时，当场再跑一遍
+        #   多级回退识别 —— 存档 level.dat > 核心 jar 内部
+        #   version.json/install.properties > jar 文件名 > 文件夹名。
+        #   兜底仍识别不出就把输入框留空、提示手动填写。
         _init_ver = entry.get("version") or ""
+        _init_src = entry.get("version_source") or ""
         try:
             from .core import scanner as _sc
-            _cv = _sc.clean_mc_version(_init_ver) if _init_ver else None
-            if _cv:
-                _init_ver = _cv
+            if _init_ver:
+                _cv = _sc.clean_mc_version(_init_ver)
+                _init_ver = _cv if _cv else ""
+            if not _init_ver:
+                _det_v, _det_src = _sc.detect_mc_version(
+                    entry.get("folder") or entry.get("server_dir") or "",
+                    server_dir=entry.get("server_dir"),
+                    world_dir=entry.get("world_dir"))
+                if _det_v:
+                    _init_ver, _init_src = _det_v, _det_src
         except Exception:
             pass
         self.ed_version = QLineEdit(_init_ver)
@@ -764,11 +776,6 @@ class CreateDialog(QDialog):
                 QCompleter.PopupCompletion)
             self.ed_version.setCompleter(self._vcompleter)
         except Exception:
-            pass
-        src = entry.get("version_source")
-        if entry.get("version") and not os.path.isfile(
-                os.path.join(entry.get("server_dir") or "",
-                             "server.jar")):
             pass
         vrow = QHBoxLayout()
         vrow.addWidget(self.ed_version, 1)
@@ -785,11 +792,11 @@ class CreateDialog(QDialog):
         hint = QLabel("")
         hint.setWordWrap(True)
         hint.setStyleSheet(_muted())
-        if entry.get("version"):
+        if _init_ver:
             hint.setText("读自 %s。若识别错了（比如存档实际是别的版本），"
-                         "直接改这里。" % (src or "level.dat"))
+                         "直接改这里。" % (_init_src or "自动识别"))
         else:
-            hint.setText("未能识别版本，请手动填写，例如 1.21.10")
+            hint.setText("未能自动识别版本，请手动填写")
         f.addRow("", hint)
         self.lbl_info = QLabel("")
         self.lbl_info.setWordWrap(True)
@@ -986,11 +993,19 @@ class CreateDialog(QDialog):
         #   让"初始化服务端"窗口先弹出来，Java 列表随后自动填充，
         #   不再因为逐个跑 java -version 而卡住弹窗。
         QTimer.singleShot(50, self.java_pick.rescan)
-        # ★ V1.7.1-2：强制给整个弹窗套主题样式（含 QPushButton 的
-        #   hover/pressed 动效），防止个别控件被局部样式或继承问题
-        #   盖掉，出现"按钮像死木头"。
+        # ★ V1.7.1-2 / V1.7.3-4：强制给整个弹窗套主题样式。
+        #   显式调用 self.setStyleSheet(theme.stylesheet(None)) 覆盖
+        #   弹窗自身及所有子控件，恢复 QPushButton:hover / :pressed 的
+        #   悬停/按下动效 —— 防止个别控件被局部样式或继承问题盖掉，
+        #   出现"按钮像死木头"。再补 apply_palette 兜底：
+        #   它现在会给滚动区 viewport 套【完整主题样式表】，让
+        #   QScrollArea 内部（刷新版本列表/浏览/重新扫描/下载 Java…）
+        #   的按钮同样拿到动效规则。
         try:
-            _themed(self)
+            from .core import theme as _th
+            _th.load()
+            self.setStyleSheet(_th.stylesheet(None))
+            _th.apply_palette(self)
         except Exception:
             pass
 
