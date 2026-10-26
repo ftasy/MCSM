@@ -4510,7 +4510,28 @@ def _force_utf8():
       UnicodeEncodeError。
       这里显式改成 utf-8 并 errors='replace'，
       保证最坏情况也只是显示成 ?，不会整个崩掉。
+
+      另外：--noconsole 打包（EXE）后，sys.stdin / stdout / stderr
+      可能是 None。此时任何 print() 或 sys.stderr.write() 都会抛
+      RuntimeError: lost sys.stdin —— 引发二次崩溃闪退。
+      所以先给 None 的流挂上空设备替身，保证无控制台也能安全运行。
     """
+    # ★ --noconsole 保护：None 的流换成空设备，绝不二次崩溃
+    if sys.stdin is None:
+        try:
+            sys.stdin = open(os.devnull, "r")
+        except Exception:
+            pass
+    if sys.stdout is None:
+        try:
+            sys.stdout = open(os.devnull, "w")
+        except Exception:
+            pass
+    if sys.stderr is None:
+        try:
+            sys.stderr = open(os.devnull, "w")
+        except Exception:
+            pass
     for name in ("stdout", "stderr"):
         try:
             getattr(sys, name).reconfigure(
@@ -4558,6 +4579,19 @@ def check_environment():
         QMessageBox.warning(None, "路径警告", msg)
 
 
+def get_base_dir():
+    """获取软件基目录（日志 / 用户数据都落在这里）。
+
+    - 打包环境（PyInstaller --noconsole EXE）：
+      sys.executable 是 EXE 本身，__file__ 则指向只读的 _internal，
+      所以返回 EXE 所在的最外层目录。
+    - 开发环境：返回 app.py 所在目录。
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 def main():
     _force_utf8()
     # ★ 1. 强制系统代理支持：
@@ -4565,17 +4599,40 @@ def main():
     #   这里显式装一个用系统代理的 opener，防止 urllib 直连被卡死。
     urllib.request.install_opener(
         urllib.request.build_opener(urllib.request.ProxyHandler()))
-    # ★ 2. 全局文件日志：写入软件目录下的 manager.log
-    #   （用 __file__ 定位软件目录，而不是 CWD —— 快捷方式/命令行
-    #    启动时 CWD 不一定在软件目录。）
-    log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "manager.log")
-    logging.basicConfig(
-        filename=log_file,
-        level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        encoding="utf-8",
-    )
+    # ★ 2. 全局文件日志：写入软件基目录下的 manager.log
+    #   （用 get_base_dir() 定位，而不是 CWD / __file__ ——
+    #     打包后 __file__ 指向 _internal 只读目录，CWD 也不可靠。）
+    base_dir = get_base_dir()
+    log_file = os.path.join(base_dir, "manager.log")
+    try:
+        logging.basicConfig(
+            filename=log_file,
+            level=logging.INFO,
+            format="%(asctime)s - %(levelname)s - %(message)s",
+            encoding="utf-8",
+        )
+    except Exception:
+        # ★ 兜底：软件可能被放在 C 盘等无写权限的位置，
+        #   此时绝不因"写不了日志"而崩溃，回退到用户目录。
+        try:
+            local_log_dir = os.path.join(
+                os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+                "MCSM")
+            os.makedirs(local_log_dir, exist_ok=True)
+            log_file = os.path.join(local_log_dir, "manager.log")
+            logging.basicConfig(
+                filename=log_file,
+                level=logging.INFO,
+                format="%(asctime)s - %(levelname)s - %(message)s",
+                encoding="utf-8",
+            )
+        except Exception:
+            # 最后兜底：连用户目录都写不了，就只保留内存日志，
+            #   程序照常运行。
+            logging.basicConfig(
+                level=logging.INFO,
+                format="%(asctime)s - %(levelname)s - %(message)s",
+            )
     logging.info("=== MCServerManager 启动 ===")
     # 先读源设置（镜像 / CF key），后面所有联网都用它
     try:
