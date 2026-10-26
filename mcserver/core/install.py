@@ -1798,14 +1798,17 @@ def install_mods(server_dir, mc_version, loader, on_log=None,
             "conflicts": plan.get("conflicts") or []}
 
 
-def install_plugins(server_dir, mc_version, only=None, on_log=None):
-    """并发下载插件到 server_dir/plugins（Paper 专用）。
+def install_plugins(server_dir, mc_version, loader="paper", only=None,
+                    on_log=None):
+    """并发下载插件到 server_dir/plugins。
 
     ★ V1.2.0：与 install_mods 逻辑一致（4 线程并发 + CDN 加速 +
       断点续传 + Fractureiser 木马扫描），但：
       · 下载目标目录是 plugins/（不是 mods/）
       · 没有内置清单，只装用户从插件视图（Modrinth
-        project_type=plugin + categories=paper）勾选的 slug。
+        project_type=plugin）勾选的 slug。
+    ★ V1.7.0-3：加载器不再固定 paper —— Fabric / Forge /
+      NeoForge 服也会按各自加载器过滤插件版本。
     """
     def log(m):
         if on_log:
@@ -1826,10 +1829,12 @@ def install_plugins(server_dir, mc_version, only=None, on_log=None):
             def _note(attempt, e, wait):
                 log("    [%s] 网络不稳（%s），%.1fs 后重试..."
                     % (desc, _brief(e), wait))
-            # ★ 插件统一走 paper 加载器过滤（Paper 服）
-            v = modrinth_pick(slug, mc_version, "paper", on_retry=_note)
+            # ★ V1.7.0-3：插件按服务器实际加载器过滤（不再写死 paper）
+            v = modrinth_pick(slug, mc_version, loader or "paper",
+                              on_retry=_note)
             if not v:
-                return False, slug, desc, "无 %s+paper 版本" % mc_version
+                return False, slug, desc, "无 %s+%s 版本" % (
+                    mc_version, loader or "paper")
 
             dest = os.path.join(plugins_dir, v["name"])
             download_url = _mirror_download_url(v["url"])

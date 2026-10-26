@@ -1092,19 +1092,21 @@ class CreateDialog(QDialog):
         else:
             self.lbl_loader_hint.setText(
                 "模组服。玩家客户端若装模组，只能装纯客户端模组"
-                "（优化/光影/小地图），不能装添加内容的模组。")
+                "（优化/光影/小地图），不能装添加内容的模组。\n"
+                "也可同时勾选『下载插件』安装插件类组件"
+                "（权限/语音/经济等，需该加载器支持）。")
             self.chk_mods.setEnabled(True)
             self.chk_mods.setChecked(True)
             self.btn_pick_mods.setEnabled(True)
-            # ★ V1.2.0：非 Paper -> 隐藏插件区
-            self.chk_plugins.setVisible(False)
-            self.btn_pick_plugins.setVisible(False)
-            self.lbl_plugins.setVisible(False)
-            self._picked_plugin_slugs = None
-            self._plugins_confirmed = False
+            # ★ V1.7.0-3：插件支持放开给所有加载器
+            self.chk_plugins.setVisible(True)
+            self.btn_pick_plugins.setVisible(True)
+            self.lbl_plugins.setVisible(True)
             if self._last_loader != l and not self._rebuilding:
                 self._picked_slugs = None
                 self._mods_confirmed = False
+                self._picked_plugin_slugs = None
+                self._plugins_confirmed = False
             self._last_loader = l
             self._refresh_mods_label()
 
@@ -1558,13 +1560,14 @@ class CreateDialog(QDialog):
 
             # （服务端的 ServerCore 配置已移至「服务器配置」中手动生成）
 
-        # 3.5) 插件（★ V1.2.0：Paper 专用，用初始化前选好的清单）
+        # 3.5) 插件（★ V1.7.0-3：放开所有加载器，按实际加载器过滤版本）
         if info.get("want_plugins"):
             pl_slugs = info.get("plugin_slugs")
             log("下载插件 (%s) ..."
                 % ("%d 个" % len(pl_slugs) if pl_slugs else "全部"))
             pr = install.install_plugins(
-                sd, info["version"], on_log=log, only=pl_slugs)
+                sd, info["version"], loader=info.get("loader") or "paper",
+                on_log=log, only=pl_slugs)
             log("插件: %d 个成功, %d 个失败"
                 % (len(pr["ok"]), len(pr["fail"])))
             for f in pr["fail"]:
@@ -1902,8 +1905,10 @@ class ServerConfigDialog(QDialog):
         # ===== 页签 3：模组 =====
         self.tabs.addTab(self._mod_tab(), "模组")
 
-        # ===== 页签 3.5：插件（★ V1.2.0：仅 Paper 显示）=====
-        if (entry.get("loader") or "").lower() == "paper":
+        # ===== 页签 3.5：插件（★ V1.7.0-3：放开所有加载器，
+        #   Fabric / Forge / NeoForge 也支持装插件类组件）=====
+        ldr_cfg = (entry.get("loader") or "").lower()
+        if ldr_cfg not in ("", "vanilla", "unknown"):
             self.tabs.addTab(self._plugin_tab(), "插件")
 
         # ===== 页签 3.5：模组配置（装了还要配的那些）=====
@@ -2776,7 +2781,11 @@ class ServerConfigDialog(QDialog):
             f.addRow("预设:", cb)
             self._mc_widgets["preset"] = cb
 
-            cur, rel = modconf.find_servercore_config(sd)
+            # ★ V1.7.0-4：按模组找配置文件（ServerCore / SVC 路径不同）
+            if spec["key"] == "simple-voice-chat":
+                cur, rel = modconf.find_svc_config(sd)
+            else:
+                cur, rel = modconf.find_servercore_config(sd)
             self._mc_widgets["_spec"] = spec
             f.addRow("配置文件:",
                      QLabel(cur or ("%s（还没生成）" % rel)))
@@ -2795,80 +2804,124 @@ class ServerConfigDialog(QDialog):
                 rd = spec["read"](sd)
             except Exception:
                 rd = None
-            d = dict(spec["presets"]["balanced"])
+            # ★ V1.7.0-4：不同模组预设 key 不同（ServerCore 用 balanced，
+            #   SVC 用 default），按 spec 取第一个可用预设
+            d = dict(spec["presets"].get("balanced")
+                     or spec["presets"].get("default") or {})
             if rd:
                 d.update(rd)
 
-            self._mc_widgets["dynamic"] = self._mk_check(
-                "卡了自动降视距/模拟距离/刷怪上限",
-                bool(d.get("dynamic", True)))
-            f.addRow("", self._mc_widgets["dynamic"])
-            f.addRow("目标 MSPT（越小越激进）:",
-                     _spin("target_mspt", 20, 80,
-                           d.get("target_mspt", 40), " ms"))
-            f.addRow("模拟距离（正常/最低）:",
-                     self._two(_spin("sim_default", 2, 32,
-                                     d.get("sim_default", 8)),
-                               _spin("sim_min", 2, 32,
-                                     d.get("sim_min", 6))))
-            f.addRow("区块刻距离（正常/最低）:",
-                     self._two(_spin("chunk_tick_default", 2, 32,
-                                     d.get("chunk_tick_default", 8)),
-                               _spin("chunk_tick_min", 1, 32,
-                                     d.get("chunk_tick_min", 5))))
-            f.addRow("刷怪上限%（正常/最低）:",
-                     self._two(_spin("mobcap_max", 10, 100,
-                                     d.get("mobcap_max", 100)),
-                               _spin("mobcap_min", 10, 100,
-                                     d.get("mobcap_min", 70))))
-            def _dspin(key, lo, hi, val, step=0.1, suffix=""):
-                sp = QDoubleSpinBox()
-                sp.setRange(lo, hi)
-                sp.setSingleStep(step)
-                sp.setDecimals(1)
-                sp.setValue(float(val))
-                if suffix:
-                    sp.setSuffix(suffix)
-                self._mc_widgets[key] = sp
-                return sp
+            if spec["key"] == "simple-voice-chat":
+                # ---- Simple Voice Chat 专用字段（★ V1.7.0-4）----
+                def _svc_spin(key, lo, hi, val, suffix=""):
+                    sp = QSpinBox()
+                    sp.setRange(lo, hi)
+                    sp.setValue(int(val))
+                    if suffix:
+                        sp.setSuffix(suffix)
+                    self._mc_widgets[key] = sp
+                    return sp
 
-            f.addRow("自动保存间隔:",
-                     _spin("autosave", 60, 3600,
-                           d.get("autosave", 600), " 秒"))
-            f.addRow("经验球合并概率:",
-                     _spin("xp_merge", 1, 100, d.get("xp_merge", 20)))
-            f.addRow("经验球合并半径:",
-                     _dspin("xp_radius", 0.0, 5.0, d.get("xp_radius", 1.0)))
-            f.addRow("掉落物合并半径:",
-                     _dspin("item_radius", 0.0, 5.0, d.get("item_radius", 1.0)))
-            
-            self._mc_widgets["lobotomize"] = self._mk_check(
-                "村民发呆优化（交易大厅很有效）",
-                bool(d.get("lobotomize", True)))
-            f.addRow("", self._mc_widgets["lobotomize"])
-            f.addRow("村民优化间隔:",
-                     _spin("lobotomize_interval", 1, 200,
-                           d.get("lobotomize_interval", 20), " tick"))
-                           
-            self._mc_widgets["prevent_unloaded"] = self._mk_check(
-                "防止玩家走进未加载区块",
-                bool(d.get("prevent_unloaded", True)))
-            f.addRow("", self._mc_widgets["prevent_unloaded"])
-            
-            # ★ 动态视距控制
-            self._mc_widgets["allow_dynamic_view"] = self._mk_check(
-                "允许动态降视距（会接管 view-distance）",
-                bool(d.get("allow_dynamic_view", False)))
-            f.addRow("", self._mc_widgets["allow_dynamic_view"])
-            f.addRow("视距（正常/最低）:",
-                     self._two(_spin("view_default", 2, 32, d.get("view_default", 10)),
-                               _spin("view_min", 2, 32, d.get("view_min", 6))))
+                f.addRow("语音端口（默认 24454）:",
+                         _svc_spin("svc_port", 1024, 65535,
+                                   d.get("port", 24454)))
+                f.addRow("语音距离（格，默认 8）:",
+                         _svc_spin("svc_distance", 1, 64,
+                                   d.get("voice_distance", 8)))
+                f.addRow("广播范围（格，默认 64）:",
+                         _svc_spin("svc_broadcast", 8, 512,
+                                   d.get("broadcast_range", 64)))
+                self._mc_widgets["svc_enable"] = self._mk_check(
+                    "启用语音聊天（关掉后进服不加载语音）",
+                    bool(d.get("enable", True)))
+                f.addRow("", self._mc_widgets["svc_enable"])
+            else:
+                self._mc_widgets["dynamic"] = self._mk_check(
+                    "卡了自动降视距/模拟距离/刷怪上限",
+                    bool(d.get("dynamic", True)))
+                f.addRow("", self._mc_widgets["dynamic"])
+                f.addRow("目标 MSPT（越小越激进）:",
+                         _spin("target_mspt", 20, 80,
+                               d.get("target_mspt", 40), " ms"))
+                f.addRow("模拟距离（正常/最低）:",
+                         self._two(_spin("sim_default", 2, 32,
+                                         d.get("sim_default", 8)),
+                                   _spin("sim_min", 2, 32,
+                                         d.get("sim_min", 6))))
+                f.addRow("区块刻距离（正常/最低）:",
+                         self._two(_spin("chunk_tick_default", 2, 32,
+                                         d.get("chunk_tick_default", 8)),
+                                   _spin("chunk_tick_min", 1, 32,
+                                         d.get("chunk_tick_min", 5))))
+                f.addRow("刷怪上限%（正常/最低）:",
+                         self._two(_spin("mobcap_max", 10, 100,
+                                         d.get("mobcap_max", 100)),
+                                   _spin("mobcap_min", 10, 100,
+                                         d.get("mobcap_min", 70))))
+                def _dspin(key, lo, hi, val, step=0.1, suffix=""):
+                    sp = QDoubleSpinBox()
+                    sp.setRange(lo, hi)
+                    sp.setSingleStep(step)
+                    sp.setDecimals(1)
+                    sp.setValue(float(val))
+                    if suffix:
+                        sp.setSuffix(suffix)
+                    self._mc_widgets[key] = sp
+                    return sp
+
+                f.addRow("自动保存间隔:",
+                         _spin("autosave", 60, 3600,
+                               d.get("autosave", 600), " 秒"))
+                f.addRow("经验球合并概率:",
+                         _spin("xp_merge", 1, 100, d.get("xp_merge", 20)))
+                f.addRow("经验球合并半径:",
+                         _dspin("xp_radius", 0.0, 5.0,
+                                d.get("xp_radius", 1.0)))
+                f.addRow("掉落物合并半径:",
+                         _dspin("item_radius", 0.0, 5.0,
+                                d.get("item_radius", 1.0)))
+
+                self._mc_widgets["lobotomize"] = self._mk_check(
+                    "村民发呆优化（交易大厅很有效）",
+                    bool(d.get("lobotomize", True)))
+                f.addRow("", self._mc_widgets["lobotomize"])
+                f.addRow("村民优化间隔:",
+                         _spin("lobotomize_interval", 1, 200,
+                               d.get("lobotomize_interval", 20), " tick"))
+
+                self._mc_widgets["prevent_unloaded"] = self._mk_check(
+                    "防止玩家走进未加载区块",
+                    bool(d.get("prevent_unloaded", True)))
+                f.addRow("", self._mc_widgets["prevent_unloaded"])
+
+                # ★ 动态视距控制
+                self._mc_widgets["allow_dynamic_view"] = self._mk_check(
+                    "允许动态降视距（会接管 view-distance）",
+                    bool(d.get("allow_dynamic_view", False)))
+                f.addRow("", self._mc_widgets["allow_dynamic_view"])
+                f.addRow("视距（正常/最低）:",
+                         self._two(_spin("view_default", 2, 32,
+                                         d.get("view_default", 10)),
+                                   _spin("view_min", 2, 32,
+                                         d.get("view_min", 6))))
 
             def _apply_preset(_i=None, _cb=cb):
                 k = _cb.currentData()
                 p = spec["presets"].get(k) or {}
                 g = self._mc_widgets.get
                 try:
+                    # ★ V1.7.0-4：SVC 预设
+                    if g("svc_port"):
+                        g("svc_port").setValue(int(p.get("port", 24454)))
+                    if g("svc_distance"):
+                        g("svc_distance").setValue(
+                            int(p.get("voice_distance", 8)))
+                    if g("svc_broadcast"):
+                        g("svc_broadcast").setValue(
+                            int(p.get("broadcast_range", 64)))
+                    if g("svc_enable"):
+                        g("svc_enable").setChecked(
+                            bool(p.get("enable", True)))
                     if g("dynamic"):
                         g("dynamic").setChecked(bool(p.get("dynamic", True)))
                     if g("target_mspt"):
@@ -2927,7 +2980,8 @@ class ServerConfigDialog(QDialog):
         if not found_any:
             v.addWidget(QLabel(
                 "当前没有检测到需要配置的模组。\n"
-                "在『模组』页签装上 ServerCore 之后，这里就能直接配它。"))
+                "在『模组』页签装上 ServerCore 或 Simple Voice Chat "
+                "之后，这里就能直接配它们。"))
         v.addStretch(1)
 
         sw = QScrollArea()
@@ -2957,38 +3011,51 @@ class ServerConfigDialog(QDialog):
         if not spec:
             return
         g = self._mc_widgets.get
-        opts = {
-            "dynamic": bool(g("dynamic").isChecked()) if g("dynamic") else True,
-            "target_mspt": int(g("target_mspt").value()) if g("target_mspt") else 40,
-            "sim_default": int(g("sim_default").value()) if g("sim_default") else 8,
-            "sim_min": int(g("sim_min").value()) if g("sim_min") else 6,
-            "chunk_tick_default": int(g("chunk_tick_default").value())
-            if g("chunk_tick_default") else 8,
-            "chunk_tick_min": int(g("chunk_tick_min").value())
-            if g("chunk_tick_min") else 5,
-            "mobcap_max": int(g("mobcap_max").value()) if g("mobcap_max") else 100,
-            "mobcap_min": int(g("mobcap_min").value()) if g("mobcap_min") else 70,
-            "autosave": int(g("autosave").value()) if g("autosave") else 600,
-            "xp_merge": int(g("xp_merge").value()) if g("xp_merge") else 20,
-            "item_merge": 1.0, # 兼容旧字段
-            "xp_radius": float(g("xp_radius").value()) if g("xp_radius") else 1.0,
-            "item_radius": float(g("item_radius").value()) if g("item_radius") else 1.0,
-            "lobotomize": bool(g("lobotomize").isChecked())
-            if g("lobotomize") else True,
-            "lobotomize_interval": int(g("lobotomize_interval").value())
-            if g("lobotomize_interval") else 20,
-            "prevent_unloaded": bool(g("prevent_unloaded").isChecked())
-            if g("prevent_unloaded") else True,
-            "allow_dynamic_view": bool(g("allow_dynamic_view").isChecked())
-            if g("allow_dynamic_view") else False,
-            "view_default": int(g("view_default").value()) if g("view_default") else 10,
-            "view_min": int(g("view_min").value()) if g("view_min") else 6,
-        }
+        # ★ V1.7.0-4：按模组构造保存参数（ServerCore / SVC 字段不同）
+        if spec["key"] == "simple-voice-chat":
+            opts = {
+                "port": int(g("svc_port").value()) if g("svc_port") else 24454,
+                "voice_distance": int(g("svc_distance").value())
+                if g("svc_distance") else 8,
+                "broadcast_range": int(g("svc_broadcast").value())
+                if g("svc_broadcast") else 64,
+                "enable": bool(g("svc_enable").isChecked())
+                if g("svc_enable") else True,
+            }
+        else:
+            opts = {
+                "dynamic": bool(g("dynamic").isChecked()) if g("dynamic") else True,
+                "target_mspt": int(g("target_mspt").value()) if g("target_mspt") else 40,
+                "sim_default": int(g("sim_default").value()) if g("sim_default") else 8,
+                "sim_min": int(g("sim_min").value()) if g("sim_min") else 6,
+                "chunk_tick_default": int(g("chunk_tick_default").value())
+                if g("chunk_tick_default") else 8,
+                "chunk_tick_min": int(g("chunk_tick_min").value())
+                if g("chunk_tick_min") else 5,
+                "mobcap_max": int(g("mobcap_max").value()) if g("mobcap_max") else 100,
+                "mobcap_min": int(g("mobcap_min").value()) if g("mobcap_min") else 70,
+                "autosave": int(g("autosave").value()) if g("autosave") else 600,
+                "xp_merge": int(g("xp_merge").value()) if g("xp_merge") else 20,
+                "item_merge": 1.0, # 兼容旧字段
+                "xp_radius": float(g("xp_radius").value()) if g("xp_radius") else 1.0,
+                "item_radius": float(g("item_radius").value()) if g("item_radius") else 1.0,
+                "lobotomize": bool(g("lobotomize").isChecked())
+                if g("lobotomize") else True,
+                "lobotomize_interval": int(g("lobotomize_interval").value())
+                if g("lobotomize_interval") else 20,
+                "prevent_unloaded": bool(g("prevent_unloaded").isChecked())
+                if g("prevent_unloaded") else True,
+                "allow_dynamic_view": bool(g("allow_dynamic_view").isChecked())
+                if g("allow_dynamic_view") else False,
+                "view_default": int(g("view_default").value()) if g("view_default") else 10,
+                "view_min": int(g("view_min").value()) if g("view_min") else 6,
+            }
         # 最低值不能比正常值还大，否则模组会在两头来回跳
-        opts["sim_min"] = min(opts["sim_min"], opts["sim_default"])
-        opts["chunk_tick_min"] = min(opts["chunk_tick_min"],
-                                     opts["chunk_tick_default"])
-        opts["mobcap_min"] = min(opts["mobcap_min"], opts["mobcap_max"])
+        opts["sim_min"] = min(opts.get("sim_min", 6), opts.get("sim_default", 8))
+        opts["chunk_tick_min"] = min(opts.get("chunk_tick_min", 5),
+                                     opts.get("chunk_tick_default", 8))
+        opts["mobcap_min"] = min(opts.get("mobcap_min", 70),
+                                 opts.get("mobcap_max", 100))
         r = spec["apply"](self._modconf_dir, opts)
         lbl = getattr(self, "_mc_lbl", None)
         if not r.get("ok"):
@@ -3001,7 +3068,10 @@ class ServerConfigDialog(QDialog):
         msg = "已写入 %s" % r.get("rel")
         if r.get("backup"):
             msg += "\n（旧配置已备份为 .bak）"
-        msg += "\n服务器里执行 /servercore reload 即可生效，不用重启。"
+        if spec["key"] == "simple-voice-chat":
+            msg += "\n重启服务器后生效（语音端口改变时，客户端语音设置里也要填同一端口）。"
+        else:
+            msg += "\n服务器里执行 /servercore reload 即可生效，不用重启。"
         if lbl:
             lbl.setText(msg)
         QMessageBox.information(self, "已保存", msg)
@@ -3025,23 +3095,31 @@ class ServerConfigDialog(QDialog):
         f.addRow("验证模式:", self.cb_auth_mode)
         v.addWidget(g1)
 
-        g2 = QGroupBox("第三方源配置（仅『多源共存』生效）")
+        g2 = QGroupBox("第三方源配置（仅『多源共存』生效，可多选）")
         self._w_auth_g2 = g2
         f2 = QFormLayout(g2)
-        self.cb_auth_source = QComboBox()
-        self.cb_auth_source.addItem(
-            "LittleSkin", "https://littleskin.cn/api/yggdrasil")
-        self.cb_auth_source.addItem(
-            "MUA Union",
+        # ★ V1.7.0-2：单选下拉 -> 多选复选框（可同时勾 LittleSkin / MUA /
+        #   自定义），勾选预设源时自动记录其 Yggdrasil API 地址。
+        self.chk_auth_ls = QCheckBox("LittleSkin")
+        self.chk_auth_ls.setToolTip("https://littleskin.cn/api/yggdrasil")
+        f2.addRow("", self.chk_auth_ls)
+        self.chk_auth_mua = QCheckBox("MUA Union")
+        self.chk_auth_mua.setToolTip(
             "https://skin.mualliance.ltd/api/union/yggdrasil")
-        self.cb_auth_source.addItem("自定义", "")
-        self.cb_auth_source.currentIndexChanged.connect(
-            self._auth_source_changed)
-        f2.addRow("皮肤站源:", self.cb_auth_source)
+        f2.addRow("", self.chk_auth_mua)
+        h_cus = QHBoxLayout()
+        self.chk_auth_custom = QCheckBox("自定义")
         self.ed_auth_url = QLineEdit()
         self.ed_auth_url.setPlaceholderText(
             "https://你的皮肤站/api/yggdrasil")
-        f2.addRow("Yggdrasil API 地址:", self.ed_auth_url)
+        self.ed_auth_url.setEnabled(False)
+        h_cus.addWidget(self.chk_auth_custom)
+        h_cus.addWidget(self.ed_auth_url, 1)
+        f2.addRow("", h_cus)
+        # 勾选自定义 -> 输入框可用；取消 -> 置灰并清空
+        self.chk_auth_custom.toggled.connect(
+            lambda on: (self.ed_auth_url.setEnabled(on),
+                        (self.ed_auth_url.setText("") if not on else None)))
         v.addWidget(g2)
 
         tip = QLabel(
@@ -3058,34 +3136,116 @@ class ServerConfigDialog(QDialog):
 
         v.addStretch(1)
 
-        # 从已保存的配置初始化 API 地址
-        url = (self.saved.get("auth_url") or "").strip()
-        if url:
-            i = self.cb_auth_source.findData(url)
-            if i >= 0:
-                self.cb_auth_source.setCurrentIndex(i)
-                self.ed_auth_url.setText(url)
-            else:
-                self.cb_auth_source.setCurrentIndex(2)  # 自定义
-                self.ed_auth_url.setText(url)
-        else:
-            self._auth_source_changed()
+        # 从已保存的配置初始化第三方源（★ V1.7.0-2：多选回显；
+        #   兼容旧的单值 auth_url 字段）
+        urls = self.saved.get("auth_urls") or []
+        if not urls:
+            old = (self.saved.get("auth_url") or "").strip()
+            if old:
+                urls = [old]
+        ls = "https://littleskin.cn/api/yggdrasil"
+        mua = "https://skin.mualliance.ltd/api/union/yggdrasil"
+        self.chk_auth_ls.setChecked(ls in urls)
+        self.chk_auth_mua.setChecked(mua in urls)
+        custom_urls = [u for u in urls
+                       if u.strip() and u not in (ls, mua)]
+        if custom_urls:
+            self.chk_auth_custom.setChecked(True)
+            self.ed_auth_url.setText(custom_urls[0])
 
         self.cb_auth_mode.currentIndexChanged.connect(
             self._auth_mode_changed)
         self._auth_mode_changed()
         return w
 
-    def _auth_source_changed(self):
-        d = self.cb_auth_source.currentData() or ""
-        if d:
-            self.ed_auth_url.setText(d)
+    def _auth_urls(self):
+        """当前勾选的第三方源地址列表。"""
+        out = []
+        if self.chk_auth_ls.isChecked():
+            out.append("https://littleskin.cn/api/yggdrasil")
+        if self.chk_auth_mua.isChecked():
+            out.append("https://skin.mualliance.ltd/api/union/yggdrasil")
+        if self.chk_auth_custom.isChecked():
+            u = self.ed_auth_url.text().strip()
+            if u:
+                out.append(u)
+        return out
 
     def _auth_mode_changed(self):
         multi = (self.cb_auth_mode.currentData() == "multi")
         g2 = getattr(self, "_w_auth_g2", None)
         if g2 is not None:
             g2.setVisible(multi)
+
+    # ★ V1.7.0-2：多源登录防呆
+    @staticmethod
+    def _missing_auth_component(server_dir, loader):
+        """检查多源登录组件是否已装。没装返回提示文案，装了返回 None。
+
+        Paper -> plugins/MultiLogin；其它加载器 -> mods/ 里
+        MultiYggdrasil（AkiYggdrasil 兼容）。
+        """
+        try:
+            from .core import modman as _mm
+            if loader == "paper":
+                target = os.path.join(server_dir, "plugins")
+                keys = ("multilogin", "multilogin-bungee")
+            else:
+                target = os.path.join(server_dir, "mods")
+                keys = ("multiyggdrasil", "akiyggdrasil", "multi-yggdrasil")
+            if not os.path.isdir(target):
+                return ("未检测到 %s，且 %s 文件夹还不存在。"
+                        % ("MultiLogin" if loader == "paper"
+                           else "MultiYggdrasil", target))
+            for m in _mm.scan_mods_dir(target):
+                name = ((m.get("name") or "") + " "
+                        + (m.get("filename") or "")).lower()
+                if any(k in name for k in keys):
+                    return None
+            return ("未检测到 %s 模组/插件。"
+                    % ("MultiLogin" if loader == "paper"
+                       else "MultiYggdrasil"))
+        except Exception:
+            return None
+
+    def _download_auth_component(self, server_dir, loader):
+        """后台下载多源登录组件（Modrinth 引擎）。返回是否发起成功。"""
+        from .core import install as _inst
+        try:
+            mc_v = self.entry.get("version") or ""
+            kind = "plugin" if loader == "paper" else "mod"
+            comp = _inst.AUTH_COMPONENTS.get(
+                "paper" if kind == "plugin" else "mod") or {}
+            slug = comp.get("slug", "multiyggdrasil")
+
+            def job(on_log=None):
+                return _inst.install_auth_component(
+                    server_dir, mc_v, loader, kind, slug, on_log=on_log)
+
+            w = Worker(job, {}, self)
+            w.log.connect(lambda m: None)  # 静默，失败信息走返回值
+            w.done.connect(
+                lambda ok, res: self._on_auth_dl(ok, res))
+            _track(self, w)
+            w.start()
+            return True
+        except Exception:
+            return False
+
+    def _on_auth_dl(self, ok, res):
+        try:
+            if ok and res and res.get("ok"):
+                QMessageBox.information(
+                    self, "下载完成",
+                    "%s 已装好，现在保存配置即可生效。"
+                    % (res.get("name") or "登录组件"))
+            else:
+                reason = (res or {}).get("reason") or "未知错误"
+                QMessageBox.warning(
+                    self, "下载失败",
+                    "自动下载失败：%s" % reason)
+        except Exception:
+            pass
 
     # ---------------- 备份页签 ----------------
     def _backup_tab(self):
@@ -3448,6 +3608,35 @@ class ServerConfigDialog(QDialog):
             if r != QMessageBox.Yes:
                 return
 
+        # ★ V1.7.0-2：多源登录防呆校验（保存前）
+        if (self.cb_auth_mode.currentData() == "multi"):
+            urls = self._auth_urls()
+            if not urls:
+                QMessageBox.warning(
+                    self, "未选择第三方源",
+                    "『多源共存』至少要勾选一个第三方源 "
+                    "（LittleSkin / MUA Union / 自定义）。")
+                return
+            # 检查登录组件是否真的装上了
+            sd0 = self.entry.get("server_dir") or self.entry["folder"]
+            ldr0 = (self.entry.get("loader") or "").lower()
+            miss = self._missing_auth_component(sd0, ldr0)
+            if miss:
+                r = QMessageBox.question(
+                    self, "未检测到登录组件",
+                    "%s\n\n配置可能无法生效。是否自动为您下载？"
+                    % miss)
+                if r == QMessageBox.Yes:
+                    if not self._download_auth_component(sd0, ldr0):
+                        QMessageBox.warning(
+                            self, "下载失败",
+                            "登录组件下载失败，请稍后重试，"
+                            "或手动放入 %s 文件夹。"
+                            % ("plugins" if ldr0 == "paper" else "mods"))
+                        return
+                else:
+                    return
+
         for k in self.widgets:
             val = self._read_widget(k)
             if val is not None:
@@ -3501,9 +3690,10 @@ class ServerConfigDialog(QDialog):
             "backup_interval": self.sp_bk_interval.value(),
             "backup_format": (self.cb_backup_format.currentData()
                               or "folder"),  # ★ V1.1.0 备份格式
-            # ★ V1.3.0：登录验证
+            # ★ V1.3.0 / V1.7.0-2：登录验证（多源共存可多选第三方源）
             "auth_type": (self.cb_auth_mode.currentData() or "offline"),
-            "auth_url": self.ed_auth_url.text().strip(),
+            "auth_urls": self._auth_urls(),
+            "auth_url": (self._auth_urls() or [""])[0],
         }
         tail = ("\n并已生成 run.bat" if bp else "")
         QMessageBox.information(self, "已保存",
@@ -5527,11 +5717,10 @@ class ModBrowseDialog(QDialog):
 
         self.server_dir = entry.get("server_dir") or entry["folder"]
         self.mc_version = entry.get("version") or ""
-        if self.is_plugins:
-            # ★ 插件视图只服务于 Paper 服，加载器强制 paper
-            self.loader = "paper"
-        else:
-            self.loader = (entry.get("loader") or "").lower()
+        # ★ V1.7.0-3：插件视图不再强制 paper —— Fabric / Forge /
+        #   NeoForge 服也能查 project_type=plugin 的组件，加载器用
+        #   服务器实际加载器（browse_projects 会按它过滤）。
+        self.loader = (entry.get("loader") or "").lower()
         if self.loader == "unknown":
             self.loader = ""
         self.target_dir = os.path.join(
@@ -5545,6 +5734,8 @@ class ModBrowseDialog(QDialog):
         self.selected = []
         self.builtin_mode = True  # ★ 打开默认内置推荐
         self._slug_title = {}
+        # ★ V1.7.0：显式双分组视图（内置推荐 / 全库搜索）
+        self._view_mode = "builtin"
 
         v = QVBoxLayout(self)
 
@@ -5570,6 +5761,33 @@ class ModBrowseDialog(QDialog):
             self.btn_mirror.hide()
             self.btn_probe.hide()
         v.addLayout(h)
+
+        # ★ V1.7.0-1：双分组切换（内置推荐 / 全库搜索）
+        hm = QHBoxLayout()
+        self.rb_builtin = QRadioButton("内置推荐")
+        self.rb_builtin.setChecked(True)
+        self.rb_lib = QRadioButton("全库搜索")
+        hm.addWidget(self.rb_builtin)
+        hm.addWidget(self.rb_lib)
+        hm.addStretch(1)
+        self.lbl_view_hint = QLabel("")
+        self.lbl_view_hint.setStyleSheet(_muted())
+        hm.addWidget(self.lbl_view_hint)
+        v.addLayout(hm)
+        self.rb_builtin.toggled.connect(
+            lambda on: self._on_view_switch(True if on else False))
+        if self.is_plugins:
+            # 插件模式没有本地内置清单，直接全库搜索
+            self.rb_builtin.hide()
+            self.rb_lib.setChecked(True)
+            self._view_mode = "lib"
+            for w in (self.ed_q, self.cb_cat, self.cb_sort, self.btn_go):
+                try:
+                    w.setEnabled(True)
+                except Exception:
+                    pass
+            self.lbl_view_hint.setText(
+                "Modrinth 全库：强制过滤纯客户端插件")
 
         # ---- 第二行：搜索 + 分类 + 排序 ----
         h = QHBoxLayout()
@@ -5718,13 +5936,12 @@ class ModBrowseDialog(QDialog):
           或改了排序，立即走 Modrinth API（版本/加载器强制当前服的）。
         """
         q = (query or "").strip()
-        # ★ 内置推荐只对模组模式有效；插件模式没有内置清单，
-        #   直接走 Modrinth 全库（project_type=plugin + categories=paper）。
-        # ★ V1.6.3 修复翻页重置：只有初始状态（offset==0 且无关键词、
-        #   未切分类、排序默认）才显示内置推荐；一翻页 offset!=0
-        #   就必须强制走网络，否则点"下一页"永远回到那十几个内置模组。
-        if not self.is_plugins and not q and not category \
-                and sort in ("relevance", "downloads") and offset == 0:
+        # ★ V1.7.0：由顶部『内置推荐 / 全库搜索』显式决定走哪条路。
+        #   内置推荐只对模组模式有效（插件模式没有内置清单，走全库）；
+        #   一翻页 offset!=0 也必须强制走网络，防止"下一页"又回到
+        #   那十几个内置模组。
+        if not self.is_plugins and self._view_mode == "builtin" \
+                and offset == 0:
             return self._load_builtin(on_log=on_log)
         # 全库搜索：facets 修复后传 mc_version/loader，
         # browse_projects 内部用 json.dumps 生成标准 JSON facets。
@@ -5743,10 +5960,24 @@ class ModBrowseDialog(QDialog):
                 "error": r.get("error"), "builtin": False}
 
     def _load_builtin(self, on_log=None):
-        """内置优化清单（MOD_TARGETS）：图标按 slug 从 Modrinth 并发拉。"""
+        """内置优化清单（MOD_TARGETS）：图标按 slug 从 Modrinth 并发拉。
+
+        ★ V1.7.0：读取时强制剔除纯客户端模组（CLIENT_ONLY_MODS 名单
+           + Cloth Config 这类客户端为主的库），并且 MOD_TARGETS 里
+           版本不兼容的（如 LazyDFU 限 1.18.2）已由
+           install.mod_list_for 提前过滤掉。
+        """
         lst = install.mod_list_for(self.loader, self.mc_version)
+        try:
+            from .core import install as _inst
+            _skip = set(_inst.CLIENT_ONLY_MODS)
+        except Exception:
+            _skip = set()
+        _skip.add("cloth-config")
         hits = []
         for m in lst:
+            if m["slug"] in _skip:
+                continue
             hits.append({
                 "slug": m["slug"], "title": m["name"],
                 "description": m["desc"],
@@ -5760,6 +5991,28 @@ class ModBrowseDialog(QDialog):
             [(h["slug"], None) for h in hits])
         return {"hits": hits, "total": len(hits), "icons": icons,
                 "offset": 0, "error": None, "builtin": True}
+
+    def _on_view_switch(self, builtin):
+        """★ V1.7.0-1：切『内置推荐 / 全库搜索』。
+        内置模式下搜索/分类/排序置灰（内置清单是本地秒出的，
+        不受关键词影响）；全库模式恢复可用并立即按当前条件搜索。
+        """
+        self._view_mode = "builtin" if builtin else "lib"
+        self.offset = 0
+        want = not builtin
+        for w in (self.ed_q, self.cb_cat, self.cb_sort, self.btn_go):
+            try:
+                w.setEnabled(want)
+            except Exception:
+                pass
+        if builtin:
+            self.lbl_view_hint.setText(
+                "本地推荐：已按 %s + %s 过滤版本，剔除纯客户端模组"
+                % (self.mc_version or "?", self.loader or "?"))
+        else:
+            self.lbl_view_hint.setText(
+                "Modrinth 全库：强制过滤纯客户端模组")
+        self._run()
 
     @staticmethod
     def _fetch_icons(items):
@@ -6107,6 +6360,7 @@ class ModBrowseDialog(QDialog):
         if self.is_plugins:
             return install.install_plugins(
                 self.server_dir, self.mc_version,
+                loader=self.loader or "paper",
                 on_log=on_log, only=slugs or [])
         r = install.install_mods(
             self.server_dir, self.mc_version, self.loader,

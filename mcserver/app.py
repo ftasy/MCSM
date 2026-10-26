@@ -407,13 +407,22 @@ class NavButton(QWidget):
         # 按下时整体轻微下沉，松开时 OutBack 回弹
         dy = int(round(press))
         r = self.rect().adjusted(1, 1 + dy, -1, -1 + dy)
-        alpha = int(hover * 26 + press * 42)
+        # ★ V1.7.0-5：悬停/按下高亮加强（原来 alpha 26/42 太淡，
+        #   深色主题下几乎看不出反馈），hover 60 + press 110
+        alpha = int(hover * 60 + press * 110)
         if alpha > 0:
             c = QColor(ac)
             c.setAlpha(min(255, alpha))
             p.setPen(Qt.NoPen)
             p.setBrush(c)
             p.drawRoundedRect(r, 4, 4)
+            # 悬停时文字也稍微提亮（用 accent 色，跟随 hover 强度）
+            if hover > 0.3:
+                txt = QColor(fg).lighter(112)
+                p.setPen(txt)
+                p.setFont(self.font())
+                p.drawText(r, Qt.AlignCenter, self._text)
+                return
         p.setPen(fg)
         p.setFont(self.font())
         p.drawText(r, Qt.AlignCenter, self._text)
@@ -2279,7 +2288,9 @@ class MainWindow(QMainWindow):
             sv = self.data.setdefault("servers", {}).setdefault(k, {})
             sv.update(dlg.result_info)
             self._save_data()
-            self.do_scan()
+            # ★ V1.7.0-2：保存后刷新并按 server_dir 精准回显选中，
+            #   绝不再按行号 setCurrentRow（排序变化会导致选中串台）
+            self.do_scan(then=lambda: self._select_entry_by_dir(e))
             self.statusBar().showMessage("已保存 %s" % e.get("name"))
             try:
                 self._dlg_refs.remove(dlg)
@@ -2288,6 +2299,25 @@ class MainWindow(QMainWindow):
 
         dlg.finished.connect(lambda _r: _on_config_done())
         dlg.show()
+
+    def _select_entry_by_dir(self, e):
+        """★ V1.7.0-2：按服务器绝对路径在刷新后的列表里精准定位并选中。
+
+        兼容图标视图和表格视图；找不到就保持现状（不强制跳到第一行）。
+        """
+        try:
+            target = os.path.abspath(
+                e.get("server_dir") or e.get("folder") or "")
+            for i, en in enumerate(self._sorted_entries()):
+                if os.path.abspath(en.get("folder") or "") == target:
+                    self.table.selectRow(i)
+                    if self.view_mode == "icon" \
+                            and self.icon_view.count() > i:
+                        self.icon_view.setCurrentRow(i)
+                    self.on_sel()
+                    return
+        except Exception:
+            pass
 
 
     # ---------------- 备份 ----------------
@@ -3456,7 +3486,14 @@ class MainWindow(QMainWindow):
         sd = e.get("server_dir") or e["folder"]
         sv = self._saved(e)
         auth_type = sv.get("auth_type") or "offline"
-        auth_url = (sv.get("auth_url") or "").strip()
+        # ★ V1.7.0-2：多源共存支持多选第三方源（auth_urls 列表优先，
+        #   兼容旧版单值 auth_url）
+        auth_urls = sv.get("auth_urls") or []
+        if not auth_urls:
+            old = (sv.get("auth_url") or "").strip()
+            if old:
+                auth_urls = [old]
+        auth_url = (auth_urls[0] if auth_urls else "").strip()
         loader = (e.get("loader") or "").lower()
         v = e.get("version") or ""
         online = auth_type in ("mojang", "multi")
@@ -3478,7 +3515,7 @@ class MainWindow(QMainWindow):
             need = not self._has_auth_jar(
                 sd, "mods", ["multiyggdrasil", "akiyggdrasil"])
         if not need:
-            self._write_auth_cfg(e, auth_url)
+            self._write_auth_cfg(e, auth_url, auth_urls[1:])
             self._auth_multi_hint(e)
             then()
             return
@@ -3506,17 +3543,18 @@ class MainWindow(QMainWindow):
             "sd": sd, "v": v, "loader": loader, "comp": comp}, self))
         w.log.connect(lambda m: self._log_console(m))
         w.done.connect(
-            lambda ok, res: self._on_auth_dl(ok, res, e, auth_url, then))
+            lambda ok, res: self._on_auth_dl(ok, res, e, auth_url,
+                                             auth_urls[1:], then))
         w.start()
 
     def _dl_auth_worker(self, sd="", v="", loader="", comp=None, on_log=None):
         return install.install_auth_component(
             sd, v, loader, comp["kind"], comp["slug"], on_log=on_log)
 
-    def _on_auth_dl(self, ok, res, e, auth_url, then):
+    def _on_auth_dl(self, ok, res, e, auth_url, extra_urls, then):
         if ok and (res or {}).get("ok"):
             self._log_console("[登录组件] 安装完成: %s" % (res or {}).get("name"))
-            self._write_auth_cfg(e, auth_url)
+            self._write_auth_cfg(e, auth_url, extra_urls)
         else:
             self._log_console("[登录组件] 安装失败: %s"
                               % ((res or {}).get("reason") or "?"))
@@ -3606,8 +3644,13 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    def _write_auth_cfg(self, e, auth_url):
-        """写多源登录配置：mods 类 -> config/multi-yggdrasil.ini。"""
+    def _write_auth_cfg(self, e, auth_url, extra_urls=None):
+        """写多源登录配置：mods 类 -> config/multi-yggdrasil.ini。
+
+        ★ V1.7.0-2：多选第三方源时，第一个源作为 yggdrasilApiRoot
+          （MultiYggdrasil 单 root 格式），其余源以注释写入提示，
+          方便服主手动扩展（Paper 的 MultiLogin 由插件自身管理多服务）。
+        """
         loader = (e.get("loader") or "").lower()
         if loader == "paper":
             return  # MultiLogin 配置由插件首次启动自动生成
@@ -3620,12 +3663,18 @@ class MainWindow(QMainWindow):
         except Exception:
             return
         path = os.path.join(cfg_dir, "multi-yggdrasil.ini")
+        extra = [u.strip().replace('"', "") for u in (extra_urls or [])
+                 if u and u.strip() != auth_url]
         body = (
             "allowOfficial = true\n"
             "allowYggdrasil = true\n"
-            'yggdrasilApiRoot = "%s"\n'
-            % auth_url.replace('"', "")
+            'yggdrasilApiRoot = "%s"\n' % auth_url.replace('"', "")
         )
+        if extra:
+            body += ("\n; 其余第三方源（MultiYggdrasil 单 root，"
+                     "如需多源请手动扩展）：\n"
+                     + "".join("; yggdrasilApiRoot = \"%s\"\n" % u
+                               for u in extra))
         try:
             if os.path.isfile(path):
                 with open(path, "r", encoding="utf-8") as f:

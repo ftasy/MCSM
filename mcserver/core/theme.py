@@ -861,8 +861,8 @@ QPushButton {
     padding: 5px 12px;
     %(FONT)s
 }
-QPushButton:hover { background-color: %(A30)s; border-color: %(AC)s; }
-QPushButton:pressed { background-color: %(A55)s; }
+QPushButton:hover { background-color: %(A45)s; border-color: %(AC)s; }
+QPushButton:pressed { background-color: %(A75)s; }
 QPushButton:disabled { color: #9a9a9a; background-color: %(B80)s; }
 
 /* ---- 标签页 ---- */
@@ -904,7 +904,8 @@ QProgressBar::chunk { background-color: %(AC)s; }
         "ITEM_SEL": (item_sel_color() if pcl_enabled() else "#ffffff"),
         "B75": B(75), "B80": B(80), "B85": B(85), "B88": B(88),
         "B90": B(90), "B92": B(92), "B95": B(95), "B98": B(98),
-        "A15": A(15), "A20": A(20), "A30": A(30), "A55": A(55),
+        "A15": A(15), "A20": A(20), "A30": A(30), "A45": A(45),
+        "A55": A(55), "A75": A(75),
     }
     for k, v in d.items():
         css = css.replace("%%(%s)s" % k, v)

@@ -21,6 +21,7 @@
 
 import os
 import re
+import shutil
 
 # ServerCore 配置文件可能的位置，按顺序找
 SERVERCORE_PATHS = [
@@ -330,6 +331,171 @@ def read_servercore(server_dir):
     return out
 
 
+# ★ V1.7.0-4：Simple Voice Chat（语音聊天）可配置
+# 配置文件：config/simple-voice-chat/server.properties
+SVC_PATHS = [
+    os.path.join("config", "simple-voice-chat", "server.properties"),
+]
+
+SVC_DEFAULT_PORT = 24454
+SVC_DEFAULT_DISTANCE = 8
+SVC_DEFAULT_BROADCAST = 64
+
+SVC_PRESETS = {
+    "default": {
+        "label": "默认（官方推荐）",
+        "port": SVC_DEFAULT_PORT,
+        "voice_distance": SVC_DEFAULT_DISTANCE,
+        "broadcast_range": SVC_DEFAULT_BROADCAST,
+        "enable": True,
+    },
+    "small": {
+        "label": "近距离（8 格内才听到）",
+        "port": SVC_DEFAULT_PORT,
+        "voice_distance": 8,
+        "broadcast_range": 16,
+        "enable": True,
+    },
+    "large": {
+        "label": "远距离（适合大地图）",
+        "port": SVC_DEFAULT_PORT,
+        "voice_distance": 16,
+        "broadcast_range": 128,
+        "enable": True,
+    },
+}
+
+_SVC_TEMPLATE = """#Server properties for Simple Voice Chat
+port={port}
+voice_distance={voice_distance}
+broadcast_range={broadcast_range}
+keep_voice_connection=false
+udp_thread_count=2
+show_voice_chat_settings=true
+enable_voice_chat={enable}
+voice_chat_icon=true
+"""
+
+
+def find_svc_config(server_dir):
+    """找已存在的 SVC 配置。返回 (绝对路径, 相对路径)。"""
+    if not server_dir:
+        return None, SVC_PATHS[0]
+    p = os.path.join(server_dir, SVC_PATHS[0])
+    if os.path.isfile(p):
+        return p, SVC_PATHS[0]
+    return None, SVC_PATHS[0]
+
+
+def svc_installed(server_dir):
+    """这个服有没有装 Simple Voice Chat（看 mods 目录里的 jar）。"""
+    md = os.path.join(server_dir or "", "mods")
+    if not os.path.isdir(md):
+        return False
+    try:
+        for fn in os.listdir(md):
+            low = fn.lower()
+            if low.endswith(".jar") and not low.endswith(".disabled"):
+                if "voicechat" in low or "simple-voice-chat" in low:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def read_svc(server_dir):
+    """读 SVC 配置，返回 {port, voice_distance, broadcast_range, enable}。"""
+    out = {
+        "port": SVC_DEFAULT_PORT,
+        "voice_distance": SVC_DEFAULT_DISTANCE,
+        "broadcast_range": SVC_DEFAULT_BROADCAST,
+        "enable": True,
+    }
+    try:
+        p, _ = find_svc_config(server_dir)
+        if not p or not os.path.isfile(p):
+            return out
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            t = f.read()
+        m = re.search(r"^\s*port\s*=\s*(\d+)", t, re.M)
+        if m:
+            out["port"] = int(m.group(1))
+        m = re.search(r"^\s*voice_distance\s*=\s*(\d+)", t, re.M)
+        if m:
+            out["voice_distance"] = int(m.group(1))
+        m = re.search(r"^\s*broadcast_range\s*=\s*(\d+)", t, re.M)
+        if m:
+            out["broadcast_range"] = int(m.group(1))
+        m = re.search(r"^\s*enable_voice_chat\s*=\s*(\w+)", t, re.M)
+        if m:
+            out["enable"] = m.group(1).lower() in ("true", "1", "yes")
+    except Exception:
+        pass
+    return out
+
+
+def apply_svc(server_dir, opts):
+    """把 SVC 配置写回 config/simple-voice-chat/server.properties。
+
+    文件不存在则生成完整模板；存在则按 key=value 逐项替换，
+    保留其它行与注释。返回 {"ok", "rel", "backup", "err"}。
+    """
+    p = None
+    rel = SVC_PATHS[0]
+    try:
+        d = dict(SVC_PRESETS["default"])
+        for k, v in (opts or {}).items():
+            if v is not None:
+                d[k] = v
+        p, rel = find_svc_config(server_dir)
+        backup = False
+        if p and os.path.isfile(p):
+            with open(p, "r", encoding="utf-8", errors="replace") as f:
+                old = f.read()
+            # 已存在：按行替换 key=value，保留未知行
+            def _sub(m):
+                key = m.group(1)
+                val = {
+                    "port": str(int(d.get("port", SVC_DEFAULT_PORT))),
+                    "voice_distance": str(int(d.get(
+                        "voice_distance", SVC_DEFAULT_DISTANCE))),
+                    "broadcast_range": str(int(d.get(
+                        "broadcast_range", SVC_DEFAULT_BROADCAST))),
+                    "enable_voice_chat": (
+                        "true" if d.get("enable", True) else "false"),
+                }.get(key)
+                return ("%s = %s" % (key, val)) if val is not None \
+                    else m.group(0)
+            body = re.sub(r"^\s*(port|voice_distance|broadcast_range|"
+                          r"enable_voice_chat)\s*=\s*\S+.*$",
+                          _sub, old, flags=re.M)
+            if body == old:
+                return {"ok": True, "rel": rel, "backup": False}
+            try:
+                shutil.copy2(p, p + ".bak")
+                backup = True
+            except Exception:
+                pass
+        else:
+            body = _SVC_TEMPLATE.format(
+                port=int(d.get("port", SVC_DEFAULT_PORT)),
+                voice_distance=int(d.get(
+                    "voice_distance", SVC_DEFAULT_DISTANCE)),
+                broadcast_range=int(d.get(
+                    "broadcast_range", SVC_DEFAULT_BROADCAST)),
+                enable="true" if d.get("enable", True) else "false")
+            cfg_dir = os.path.join(server_dir, "config",
+                                   "simple-voice-chat")
+            os.makedirs(cfg_dir, exist_ok=True)
+            p = os.path.join(cfg_dir, "server.properties")
+        with open(p, "w", encoding="utf-8", newline="") as f:
+            f.write(body)
+        return {"ok": True, "rel": rel, "backup": backup}
+    except Exception as e:
+        return {"ok": False, "rel": rel,
+                "backup": False, "err": repr(e)}
+
+
 # 以后要加别的模组配置，往这里登记就行。
 # 每项：{key, name, check(有没有装), apply(写配置), read(读回来), presets}
 CONFIGURABLE_MODS = [
@@ -341,4 +507,14 @@ CONFIGURABLE_MODS = [
      "paths": SERVERCORE_PATHS,
      "help": ("ServerCore 装上只是『能用』，动态视距/模拟距离/刷怪上限"
               "都在配置文件里。不配就用默认值，等于白装一半。")},
+    # ★ V1.7.0-4：Simple Voice Chat（语音聊天，可配置端口/距离）
+    {"key": "simple-voice-chat", "name": "Simple Voice Chat",
+     "check": svc_installed,
+     "apply": apply_svc,
+     "read": read_svc,
+     "presets": SVC_PRESETS,
+     "paths": SVC_PATHS,
+     "help": ("Simple Voice Chat 近距离语音。默认端口 24454，"
+              "自定义端口时客户端也要在语音设置里填同一个端口。"
+              "改配置后需重启服务器生效。")},
 ]
