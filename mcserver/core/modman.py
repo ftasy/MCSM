@@ -82,6 +82,15 @@ def _toml_get(block, key):
     return m.group(1) if m else None
 
 
+_LOADER_SUFFIX_RE = re.compile(
+    r"-(fabric|forge|neoforge|quilt|bukkit|spigot|paper|velocity|bungee)$")
+
+
+def _strip_loader_seg(base):
+    """去掉文件名尾部的加载器段（fabric/forge/...）。"""
+    return _LOADER_SUFFIX_RE.sub("", base)
+
+
 def _guess_from_filename(fn):
     """从文件名猜 id / 版本：lithium-mc1.21.10-0.20.1.jar"""
     base = os.path.basename(fn)
@@ -89,7 +98,9 @@ def _guess_from_filename(fn):
         if base.lower().endswith(suf):
             base = base[: -len(suf)]
             break
-    # 常见格式: name-mc1.21.10-0.20.1  /  name-1.21.10-0.20.1
+    # ★ V1.7.3-1：先剥尾部加载器段（name-loader-version 格式，
+    #   ferritecore-6.0.1-fabric 的版本段被 fabric 挡住剥不掉）
+    base = _strip_loader_seg(base)
     m = re.search(r"-(\d+\.\d+(?:\.\d+)?)$", base)
     ver = None
     if m:
@@ -98,6 +109,9 @@ def _guess_from_filename(fn):
     # 去掉 mc1.21.10 这类游戏版本段
     base = re.sub(r"-mc\d+\.\d+(\.\d+)?$", "", base)
     base = re.sub(r"-\d+\.\d+(\.\d+)?$", "", base)
+    # 再剥一次 loader 段（name-loader-mc-version 格式，
+    #   lithium-fabric-mc1.20.1-0.11.2 -> lithium）
+    base = _strip_loader_seg(base)
     return base, ver
 
 

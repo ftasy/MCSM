@@ -994,6 +994,22 @@ class CreateDialog(QDialog):
         except Exception:
             pass
 
+    def showEvent(self, e):
+        """★ V1.7.3-3：窗口真正显示时再套一次主题样式。
+
+        有的环境里 __init__ 里 setStyleSheet 会被后续初始化/布局
+        覆盖，导致按钮回到 Windows 默认样式（悬停/点击效果丢失）。
+        showEvent 兜底再套一遍，保证按钮动效真正落到渲染。
+        """
+        try:
+            super().showEvent(e)
+        except Exception:
+            pass
+        try:
+            _themed(self)
+        except Exception:
+            pass
+
     def _refresh_versions(self):
         """从网上拉最新正式版列表，缓存到本地并刷新补全。
 
@@ -4493,18 +4509,49 @@ class RemoveCoreDialog(QDialog):
 
 
 
+def _inst_hit(slug, title, installed_set):
+    """★ V1.7.3-1：已装判定（归一化 contains）。
+
+    以前用精确集合成员匹配：modman 扫不出规范名的模组
+    （ferritecore/spark 名字带版本尾巴）就永远判"未装"。
+    现在 slug/title 与已装文件名都做归一化（去 - _ . 空格小写），
+    用子串包含判断：ferritecore in ferritecore601fabric -> True。
+    """
+    if not installed_set:
+        return False
+    n = modman._norm(slug) or modman._norm(title)
+    if not n:
+        return False
+    return any(n in it for it in installed_set)
+
+
 def _themed(dlg):
     """给对话框套当前主题（对话框内部打开的子窗口也能用）。
 
     和 MainWindow._style_dlg 是同一件事，只是这里不需要主窗口实例。
+
+    ★ V1.7.3-3：以前 except 静默吞异常 —— 样式生成/应用一旦失败，
+    弹窗就保持 Windows 默认样式（按钮没有悬停/按下效果），
+    还完全不知道原因。现在异常打印到日志并弹窗提示。
     """
     try:
         from .core import theme as _th
         _th.load()
         dlg.setStyleSheet(_th.stylesheet(None))
         _th.apply_palette(dlg)
-    except Exception:
-        pass
+    except Exception as ex:
+        try:
+            import traceback as _tb
+            _tb.print_exc()
+        except Exception:
+            pass
+        try:
+            QMessageBox.warning(
+                dlg, "主题样式应用失败",
+                "套用界面主题时出错：%r\n\n"
+                "按钮可能显示为系统默认样式，可反馈给作者。" % (ex,))
+        except Exception:
+            pass
     return dlg
 
 
@@ -5309,17 +5356,21 @@ class ModrinthDialog(QDialog):
 
     # ---------- 数据 ----------
     def _installed_slugs(self):
-        """已装模组的名字集合（用来标记/隐藏）。"""
+        """已装模组的名字集合（用来标记/隐藏）。
+
+        ★ V1.7.3-1：全部归一化（去 - _ . 空格、小写），
+        判定端用 _inst_hit 做子串包含，不再要求精确相等。
+        """
         out = set()
         try:
             for m in modman.scan_mods(self.server_dir):
                 n = (m.get("name") or "").strip().lower()
                 if n:
-                    out.add(n)
+                    out.add(modman._norm(n))
                 fn = (m.get("file") or "").lower()
                 if fn:
-                    out.add(fn.replace(".jar", "")
-                            .replace(".disabled", ""))
+                    out.add(modman._norm(
+                        fn.replace(".jar", "").replace(".disabled", "")))
         except Exception:
             pass
         return out
@@ -5490,9 +5541,9 @@ class ModrinthDialog(QDialog):
         self.table.setItem(r, c, it)
 
     def _is_installed(self, title, slug):
-        t = (title or "").strip().lower()
-        sl = (slug or "").strip().lower()
-        return t in self.installed or sl in self.installed
+        # ★ V1.7.3-1：归一化 contains（以前是精确成员匹配，
+        #   ferritecore/spark 这类名字带尾巴的一直判"未装"）
+        return _inst_hit(slug, title, self.installed)
 
     def _cat_label(self, cats):
         m = dict(modman.CATEGORIES)
@@ -5887,20 +5938,18 @@ class ModBrowseDialog(QDialog):
         self.lbl_view_hint.setStyleSheet(_muted())
         hm.addWidget(self.lbl_view_hint)
         v.addLayout(hm)
-        self.rb_builtin.toggled.connect(
-            lambda on: self._on_view_switch(True if on else False))
+        # ★ V1.7.3-2：插件分支必须放在 connect 之前 ——
+        #   rb_lib.setChecked(True) 会同步触发 toggled -> _on_view_switch，
+        #   那时 ed_q / cb_cat 等搜索控件还没创建，必然 AttributeError。
         if self.is_plugins:
             # 插件模式没有本地内置清单，直接全库搜索
             self.rb_builtin.hide()
             self.rb_lib.setChecked(True)
             self._view_mode = "lib"
-            for w in (self.ed_q, self.cb_cat, self.cb_sort, self.btn_go):
-                try:
-                    w.setEnabled(True)
-                except Exception:
-                    pass
             self.lbl_view_hint.setText(
                 "Modrinth 全库：强制过滤纯客户端插件")
+        self.rb_builtin.toggled.connect(
+            lambda on: self._on_view_switch(True if on else False))
 
         # ---- 第二行：搜索 + 分类 + 排序 ----
         h = QHBoxLayout()
@@ -5994,17 +6043,20 @@ class ModBrowseDialog(QDialog):
 
     # ---------- 数据 ----------
     def _installed_slugs(self):
-        """已装模组/插件的名字集合（用来打『已装』标记）。"""
+        """已装模组/插件的名字集合（用来打『已装』标记）。
+
+        ★ V1.7.3-1：归一化存储，判定端 _inst_hit 子串包含。
+        """
         out = set()
         try:
             for m in modman.scan_mods_dir(self.target_dir):
                 n = (m.get("name") or "").strip().lower()
                 if n:
-                    out.add(n)
+                    out.add(modman._norm(n))
                 fn = (m.get("filename") or "").lower()
                 if fn:
-                    out.add(fn.replace(".jar", "")
-                            .replace(".disabled", ""))
+                    out.add(modman._norm(
+                        fn.replace(".jar", "").replace(".disabled", "")))
         except Exception:
             pass
         return out
@@ -6113,7 +6165,14 @@ class ModBrowseDialog(QDialog):
         self._view_mode = "builtin" if builtin else "lib"
         self.offset = 0
         want = not builtin
-        for w in (self.ed_q, self.cb_cat, self.cb_sort, self.btn_go):
+        # ★ V1.7.3-2：getattr 容错 —— 构造早期（ed_q 尚未创建）
+        #   触发的切换不再抛 AttributeError。
+        for w in (getattr(self, "ed_q", None),
+                  getattr(self, "cb_cat", None),
+                  getattr(self, "cb_sort", None),
+                  getattr(self, "btn_go", None)):
+            if w is None:
+                continue
             try:
                 w.setEnabled(want)
             except Exception:
@@ -6199,9 +6258,7 @@ class ModBrowseDialog(QDialog):
             dict(modman.CATEGORIES).get(c, c) for c in cats[:3])
         group = h.get("group") or ""
         req = h.get("req") or []
-        installed = (slug.lower() in self.installed
-                     or (title or "").strip().lower()
-                     in self.installed)
+        installed = _inst_hit(slug, title, self.installed)
 
         card = QWidget()
         # ★ V1.6.2：卡片底色跟随主题（深色主题=深卡片，浅色主题=浅卡片），
