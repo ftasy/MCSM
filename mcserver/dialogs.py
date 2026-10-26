@@ -6142,9 +6142,15 @@ class ModBrowseDialog(QDialog):
         # ★ V1.8.0：双视图物理分离（QTabWidget）
         #   推荐安装 Tab：纯本地渲染（零网络），内存分页每页 20
         #   全库搜索 Tab：仅在搜索/回车/切到该 Tab 时发网络请求
-        self.offset = 0            # 全库 offset（网络分页）
-        self.total = 0
-        self.hits = []
+        # ★ V1.8.4：按批加载（100 条/批）+ 批内 5 页本地切片翻页
+        self.batch_size = 100      # 每次向后端请求的条数
+        self.page_size = 20        # UI 每页显示的条数
+        self.offset = 0            # 当前批次起点（0,100,200...）
+        self.total_hits = 0        # 后端返回的总结果数
+        self.current_batch = []    # 当前缓存的 100 条数据
+        self.local_page = 1        # 当前在 100 条内的第几页（1..5）
+        self.total = 0             # 兼容旧引用（= total_hits）
+        self.hits = []             # 兼容旧引用（= current_batch）
         self.worker = None
         self.selected = []
         self.builtin_mode = True   # ★ 打开默认内置推荐
@@ -6153,10 +6159,6 @@ class ModBrowseDialog(QDialog):
         self.builtin_hits = []      # 推荐清单全量（内存）
         self.builtin_offset = 0     # 推荐分页偏移（内存）
         self.builtin_total = 0
-        # ★ V1.8.2：全库搜索一次拉取（limit=100）后的本地缓存，
-        #   翻页直接切片、零网络。
-        self._search_cache = []
-        self._icons_cache = {}
 
         v = QVBoxLayout(self)
 
@@ -6475,29 +6477,58 @@ class ModBrowseDialog(QDialog):
             bool(self.builtin_total)
             and self.builtin_offset + 20 < self.builtin_total)
 
-    # ---- 全库搜索 Tab：按需网络 ----
+    # ---- 全库搜索 Tab：按批加载（★ V1.8.4）----
     def search(self):
+        """首次搜索：offset=0，请求 batch_size=100 条。"""
         self.offset = 0
+        self._pending = "first"
         self._run()
 
     def _page(self, d):
-        """★ V1.8.2：全库翻页零网络 —— 直接读 _search_cache 切片。
+        """按批加载翻页（batch=100，批内 5 页本地切片）。
 
-        只有点『搜索』/回车/切分类排序才重新请求（search -> _run）。
+        向后（d>0）：
+          - 批内还有下一页（local_page<5 且有数据）→ local_page+1，
+            直接读 current_batch 渲染（零网络，秒切）。
+          - 否则若 offset+100 < total_hits → 异步请求下一批
+            （offset+=100，返回后定位本批第 1 页）。
+        向前（d<0）：
+          - local_page>1 → local_page-1，本地渲染。
+          - 否则若 offset>0 → 异步请求上一批（offset-=100，
+            返回后定位本批最后 1 页）。
         """
-        new = self.offset + d * 20
-        if new < 0 or (self._search_cache
-                       and new >= len(self._search_cache)):
+        if d > 0:
+            if (self.local_page < 5
+                    and self.local_page * 20 < len(self.current_batch)):
+                self.local_page += 1
+                self._fill_lib()
+                self._sync_page()
+                return
+            if self.offset + 100 < self.total_hits:
+                self.offset += 100
+                self._pending = "next"
+                self._run()
             return
-        self.offset = new
-        self._fill_lib(self._icons_cache)
-        self._sync_page()
+        if d < 0:
+            if self.local_page > 1:
+                self.local_page -= 1
+                self._fill_lib()
+                self._sync_page()
+                return
+            if self.offset > 0:
+                self.offset -= 100
+                self._pending = "prev"
+                self._run()
 
     def _run(self):
         self._lib_searched = True
         self.btn_go.setEnabled(False)
         self.btn_inst.setEnabled(False)
-        self.lbl_stat.setText("搜索中 ...")
+        _hint = {"first": "正在搜索...",
+                 "next": "正在搜索下一批...",
+                 "prev": "正在搜索上一批..."}.get(
+            getattr(self, "_pending", "first"), "正在搜索...")
+        self.lbl_stat.setText(_hint)
         self._lib_wait(True)
         self.worker = _track(self, Worker(
             self._do_search, self._params(), self))
@@ -6514,50 +6545,18 @@ class ModBrowseDialog(QDialog):
 
     def _do_search(self, query="", category=None, sort="downloads",
                    offset=0, on_log=None):
-        """后台搜索 Modrinth 全库（推荐 Tab 不走这里）。
-
-        ★ V1.8.2：一次性拉取 limit=100，结果存 self._search_cache；
-          翻页不再发网络。icons 也一次拉齐缓存。
-        """
+        """后台按批搜索（limit=batch_size=100，offset 为批次起点）。"""
         r = modman.browse_projects(
             query=query, mc_version=self.mc_version,
             loader=self.loader, category=category, sort=sort,
-            limit=100, offset=0, source="modrinth",
+            limit=self.batch_size, offset=offset, source="modrinth",
             project_type="plugin" if self.is_plugins else "mod")
         if r.get("err"):
             raise RuntimeError(r["err"])
-        hits = r.get("hits") or []
-        icons = self._fetch_icons([(h.get("slug"), h.get("icon_url"))
-                                   for h in hits])
-        return {"hits": hits, "icons": icons,
-                "error": r.get("error"), "builtin": False}
-
-    @staticmethod
-    def _fetch_icons(items):
-        """并发下载图标字节：items = [(slug, icon_url), ...]。
-
-        ★ V1.8.0：只拉带 icon_url 的（全库结果），内置推荐不经过这里
-          —— 推荐 Tab 保持零网络。
-        """
-        import concurrent.futures
-        icons = {}
-
-        def _dl(item):
-            slug, url = item
-            if not slug or not url:
-                return None
-            b = _fetch_icon_bytes(url)
-            return (slug, b) if b else None
-
-        try:
-            with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=4) as ex:
-                for res in ex.map(_dl, items):
-                    if res:
-                        icons[res[0]] = res[1]
-        except Exception:
-            pass
-        return icons
+        return {"hits": r.get("hits") or [],
+                "total": r.get("total") or 0,
+                "offset": offset, "error": r.get("error"),
+                "builtin": False}
 
     def _on_search(self, ok, res):
         self.btn_go.setEnabled(True)
@@ -6567,33 +6566,37 @@ class ModBrowseDialog(QDialog):
             self.lbl_stat.setText("搜索失败")
             self._log("[错误] %r" % (res,))
             return
-        # ★ V1.8.2：结果整批进缓存，之后翻页纯本地。
-        self._search_cache = res.get("hits") or []
-        self._icons_cache = res.get("icons") or {}
-        self.hits = self._search_cache
-        self.total = len(self._search_cache)
-        self.offset = 0
+        pend = getattr(self, "_pending", "first")
+        self.current_batch = res.get("hits") or []
+        self.total_hits = res.get("total") or 0
+        self.total = self.total_hits
+        self.hits = self.current_batch
+        # 批次起点以实际请求为准
+        self.offset = res.get("offset") or 0
+        # 定位：首次/下一批 → 本批第 1 页；上一批 → 本批最后 1 页
+        self.local_page = 5 if pend == "prev" else 1
         self._lib_wait(False)
-        self._fill_lib(self._icons_cache)
+        self._fill_lib()
         self._sync_page()
         err = res.get("error")
         if err:
             self.lbl_stat.setText("搜索失败：%s" % err)
             self._log("[失败] %s" % err)
             return
-        if not self.hits:
+        if not self.current_batch:
             self.lbl_stat.setText(
                 "没找到匹配 %s + %s 的%s"
                 % (self.mc_version, self.loader,
                    "插件" if self.is_plugins else "模组"))
             self._log("[空] 试试放宽分类或换个关键词")
 
-    def _fill_lib(self, icons):
-        """渲染全库搜索结果当前页（缓存切片 20 个，带图标）。"""
+    def _fill_lib(self):
+        """渲染当前批次内的当前页（20 条，纯文字无图标）。"""
         self.list_lib.blockSignals(True)
         self.list_lib.clear()
         self._slug_title = {}
-        page = self._search_cache[self.offset:self.offset + 20]
+        start = (self.local_page - 1) * self.page_size
+        page = self.current_batch[start:start + self.page_size]
         for h in page:
             slug = h.get("slug") or ""
             title = h.get("title") or slug
@@ -6601,22 +6604,23 @@ class ModBrowseDialog(QDialog):
             it = QListWidgetItem()
             it.setData(Qt.UserRole, slug)
             it.setFlags(Qt.ItemIsEnabled)
-            it.setSizeHint(QSize(0, 104))
-            card, chk = self._make_card(h, icons, False)
+            it.setSizeHint(QSize(0, 96))
+            card, chk = self._make_card(h, {}, False)
             it._chk = chk
             self.list_lib.addItem(it)
             self.list_lib.setItemWidget(it, card)
         self.list_lib.blockSignals(False)
         shown = self.list_lib.count()
         self.lbl_stat.setText("共 %d 个结果，显示 %d 个"
-                              % (self.total, shown))
+                              % (self.total_hits, shown))
         self._sync_count()
 
     # ---------- PCL2 风格卡片 ----------
     # ★ V1.8.2：desc 末尾 [标签] → 彩色小标签（第三行渲染）。
     _TAG_COLORS = {
         "第三方登录": "#5b8def", "前置库": "#f59e0b",
-        "Cupboard附属": "#f59e0b", "优化": "#4ade80",
+        "Cupboard生态": "#f59e0b", "Cupboard附属": "#f59e0b",
+        "优化": "#4ade80", "语音": "#4ade80",
         "监控": "#a78bfa", "崩溃分析": "#f87171", "工具": "#22d3ee",
         "权限": "#facc15", "聊天": "#f472b6", "聊天扩展": "#f472b6",
         "基础指令": "#60a5fa", "防熊": "#f87171", "建筑": "#22d3ee",
@@ -6665,25 +6669,7 @@ class ModBrowseDialog(QDialog):
         chk.stateChanged.connect(lambda _st: self._sync_count())
         lay.addWidget(chk)
 
-        # 图标 64x64
-        ic = QLabel()
-        ic.setFixedSize(64, 64)
-        ic.setAlignment(Qt.AlignCenter)
-        ic.setStyleSheet("background: transparent;")
-        b = icons.get(slug)
-        pm = None
-        if b:
-            img = QImage.fromData(b)
-            if not img.isNull():
-                pm = QPixmap.fromImage(img).scaled(
-                    64, 64, Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation)
-        if pm is not None and not pm.isNull():
-            ic.setPixmap(pm)
-        else:
-            ic.setText("?")  # 图标拉不到就显示占位
-        lay.addWidget(ic)
-
+        # ★ V1.8.4：彻底移除图标列与 ? 占位，复选框+文字顶格左对齐
         # 右侧：三行文字 + 链接
         rt = QVBoxLayout()
         rt.setSpacing(2)
@@ -6809,12 +6795,21 @@ class ModBrowseDialog(QDialog):
         self._sync_count()
 
     def _sync_page(self):
-        """全库 Tab 页码（推荐 Tab 走 _sync_bpage）。"""
-        page = self.offset // 20 + 1
-        self.lbl_page.setText("第 %d 页" % page)
-        self.btn_prev.setEnabled(self.offset > 0)
-        self.btn_next.setEnabled(bool(self.total)
-                                 and self.offset + 20 < self.total)
+        """全库 Tab 页码与按钮（★ V1.8.4 按批加载公式）。
+
+        下一页可用：(local_page<5 且批内还有下一页)
+                   或 (offset+100 < total_hits)
+        上一页可用：local_page>1 或 offset>0
+        """
+        abs_page = self.offset // self.page_size + self.local_page
+        self.lbl_page.setText("第 %d 页" % abs_page)
+        self.btn_prev.setEnabled(
+            self.local_page > 1 or self.offset > 0)
+        self.btn_next.setEnabled(
+            (self.local_page < 5
+             and self.local_page * self.page_size
+                 < len(self.current_batch))
+            or (self.offset + self.batch_size < self.total_hits))
 
     # ---------- 操作 ----------
     def open_advanced(self):

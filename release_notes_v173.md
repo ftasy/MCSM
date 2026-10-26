@@ -109,3 +109,34 @@
 - **ZIP 版（推荐）**：解压后运行 `MCSM.exe`，无需安装，绿色免安装。
 - **EXE 版**：直接运行 `MCSM.exe`（含运行库，首次启动略慢）。
 - 软件支持在线检查更新：顶栏「检查更新」会自动跳转到本仓库 Release 页面。
+
+---
+
+## v1.8.4
+
+**终极重构：按批加载异步翻页（100 条/批）、彻底铲除图标、强行补全 Cupboard 生态**
+
+## 重构内容
+
+1. **全库搜索改为『按批加载』异步翻页（不再死页面）**
+   - `batch_size=100`（每次请求条数）、`page_size=20`（UI 每页显示条数）。
+   - `current_batch` 缓存当前 100 条，批内第 1~5 页切换**零网络秒切**。
+   - 批内第 5 页再点「下一页」：显示 **"正在搜索下一批..."**，自动请求 `offset += 100`，返回后替换批次并定位到新批次第 1 页。
+   - 批内第 1 页点「上一页」且 `offset > 0`：显示 **"正在搜索上一批..."**，请求 `offset -= 100`，返回后定位到上一批次最后 1 页（第 5 页）。
+   - 按钮可用性按公式实时计算，无论翻多少页都正常加载、不会死页面。
+
+2. **彻底移除所有图标与 `?` 占位**
+   - 删除全部 `setIcon` 相关绘制；左侧 `?` 问号占位已铲除。
+   - 复选框与文字直接顶格靠左对齐，纯文字紧凑排版，翻页更快更干净。
+
+3. **强行补全 Cupboard 生态（Fabric / Forge / NeoForge 三组）**
+   - 三个模组组均加入：`cupboard`、`fastasyncworldsave`、`structureessentials`、`recipeessentials`、`connectivity`、`chunksending`，标签统一 `[Cupboard生态]`（橙色）。
+   - **冲突项绝对剔除**：代码里没有任何 `packetfixer`（与 connectivity 冲突，Connectivity 防卡包更强）；没有任何 `morechathistory`（chatpatches 已包含聊天记录上限功能，只保留 chatpatches）。
+   - 补全：`crash-assistant`（`[崩溃分析]`）、`simple-voice-chat`（`[语音]`）在 Fabric / Forge 组就位。
+   - 注：Cupboard 生态插件及 `crash-assistant` 在 Modrinth 暂无发布，下载失败会在日志提示，请按指引手动安装 jar。
+
+## 下载说明
+
+- **ZIP 版（推荐）**：解压后运行 `MCSM.exe`，无需安装，绿色免安装。
+- **EXE 版**：直接运行 `MCSM.exe`（含运行库，首次启动略慢）。
+- 软件支持在线检查更新：顶栏「检查更新」会自动跳转到本仓库 Release 页面。
