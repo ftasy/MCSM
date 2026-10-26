@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QTabWidget, QScrollArea, QDoubleSpinBox, QFrame,  # ★ 加上 QFrame
     QWidget, QApplication, QTableWidget, QTableWidgetItem,
     QHeaderView, QInputDialog, QCompleter, QListView,
+    QTimeEdit,  # ★ V1.6.3：定时重启时间框之前漏导，配置窗一点就 NameError
 )
 
 from .core import (versions, java as javacore, install, builder,
@@ -5680,8 +5681,11 @@ class ModBrowseDialog(QDialog):
         q = (query or "").strip()
         # ★ 内置推荐只对模组模式有效；插件模式没有内置清单，
         #   直接走 Modrinth 全库（project_type=plugin + categories=paper）。
+        # ★ V1.6.3 修复翻页重置：只有初始状态（offset==0 且无关键词、
+        #   未切分类、排序默认）才显示内置推荐；一翻页 offset!=0
+        #   就必须强制走网络，否则点"下一页"永远回到那十几个内置模组。
         if not self.is_plugins and not q and not category \
-                and sort in ("relevance", "downloads"):
+                and sort in ("relevance", "downloads") and offset == 0:
             return self._load_builtin(on_log=on_log)
         # 全库搜索：facets 修复后传 mc_version/loader，
         # browse_projects 内部用 json.dumps 生成标准 JSON facets。

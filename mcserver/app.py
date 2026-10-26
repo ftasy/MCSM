@@ -534,7 +534,7 @@ class MainWindow(QMainWindow):
             tb.addWidget(b)
             return b
 
-        act("扫描", self.pick_and_scan, "选择总目录并扫描")
+        act("选择目录", self.pick_and_scan, "选择总目录并扫描")
         act("重新扫描", self.do_scan)
         act("统一搬迁", self.do_migrate)
         tb.addSeparator()
@@ -1992,7 +1992,10 @@ class MainWindow(QMainWindow):
         btns.accepted.connect(dlg2.accept)
         btns.rejected.connect(dlg2.reject)
 
-        if dlg2.exec():
+        # ★ V1.6.3：非模态打开 —— 主界面不再被"显示设置"死锁
+        dlg2.setWindowModality(Qt.NonModal)
+
+        def _apply_display_ok():
             self.disp["font"] = sp_font.value()
             self.disp["row"] = sp_row.value()
             self.disp["icon"] = sz.value()
@@ -2060,6 +2063,20 @@ class MainWindow(QMainWindow):
                   % (_t2.get("font_family"), _t2.get("font_size"),
                      _t2.get("fg"), _t2.get("bg"), _t2.get("accent")))
             print("[主题] 配置文件: %s" % _t2.path())
+
+        dlg2.accepted.connect(_apply_display_ok)
+        # ★ V1.6.3：持有引用防 GC 回收（非模态窗口没人持有会被回收）
+        self._dlg_refs = getattr(self, "_dlg_refs", [])
+        self._dlg_refs.append(dlg2)
+
+        def _drop_display(_r=0):
+            try:
+                self._dlg_refs.remove(dlg2)
+            except ValueError:
+                pass
+
+        dlg2.finished.connect(_drop_display)
+        dlg2.show()
 
     # ---------------- 每服配置 ----------------
     def _saved(self, e):
@@ -2811,7 +2828,19 @@ class MainWindow(QMainWindow):
         txt = self._console_text(e)
         dlg = self._style_dlg(AnalyzeDialog(
             e, all_entries=self.entries, console_text=txt, parent=self))
-        dlg.exec()
+        # ★ V1.6.3：非模态 —— 分析日志时主界面不再死锁
+        dlg.setWindowModality(Qt.NonModal)
+        self._dlg_refs = getattr(self, "_dlg_refs", [])
+        self._dlg_refs.append(dlg)
+
+        def _drop_analyze(_r=0):
+            try:
+                self._dlg_refs.remove(dlg)
+            except ValueError:
+                pass
+
+        dlg.finished.connect(_drop_analyze)
+        dlg.show()
 
     # ---------------- V1.6.0：检查更新 ----------------
     def do_check_update(self):

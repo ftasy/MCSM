@@ -493,8 +493,15 @@ def browse_projects(query="", mc_version=None, loader=None,
     if not isinstance(d, dict):
         return {"hits": [], "total": 0, "offset": offset,
                 "error": "返回内容不是 JSON", "query_url": path}
-    return {"hits": d.get("hits") or [],
-            "total": d.get("total_hits", len(d.get("hits") or [])),
+    hits = d.get("hits") or []
+    # ★ V1.6.3：过滤纯客户端模组（Sodium、Iris 之类）。
+    #   服务端装 client_side=required + server_side=unsupported
+    #   的模组毫无意义，直接不显示。
+    hits = [h for h in hits
+            if not (h.get("client_side") == "required"
+                    and h.get("server_side") == "unsupported")]
+    return {"hits": hits,
+            "total": d.get("total_hits", len(hits)),
             "offset": d.get("offset", offset),
             "error": None, "query_url": path}
 
