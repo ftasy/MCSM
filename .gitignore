@@ -5,6 +5,8 @@ __pycache__/
 
 # 发布包（zip 由 Release 托管，不进 git）
 *.zip
+# 解压安装包测试留下的目录（不进 git）
+MCSM_v*/
 
 # 用户数据与本地日志
 servers.json

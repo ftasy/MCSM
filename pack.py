@@ -14,6 +14,9 @@ OUT_ZIP = f"{APP_NAME}_{VERSION}_安装包.zip"
 # 绝对不要打进包里的目录和文件
 EXCLUDE_DIRS = {"__pycache__", ".git", ".idea", ".vscode",
                 "build", "dist"}  # ★ PyInstaller 产物不进源码包
+# ★ V1.6.3：用户解压安装包测试留下的 MCSM_vX.Y_安装包/ 目录
+#   绝不能递归打进新包（否则包里有包、体积膨胀）。
+EXCLUDE_PREFIX_DIRS = ("MCSM_v",)
 EXCLUDE_EXTS = {".pyc", ".pyo", ".zip", ".rar", ".7z", ".log"}
 EXCLUDE_FILES = {
     "servers.json",          # 用户服务器列表
@@ -36,7 +39,9 @@ def pack():
     with zipfile.ZipFile(OUT_ZIP, "w", zipfile.ZIP_DEFLATED) as zf:
         for root, dirs, files in os.walk("."):
             # 过滤掉不需要的目录（原地修改 dirs，影响 os.walk 遍历）
-            dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS]
+            dirs[:] = [d for d in dirs
+                       if d not in EXCLUDE_DIRS
+                       and not d.startswith(EXCLUDE_PREFIX_DIRS)]
 
             for f in files:
                 # 过滤掉不需要的后缀和文件名
