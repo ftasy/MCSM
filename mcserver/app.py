@@ -4239,11 +4239,59 @@ class MainWindow(QMainWindow):
         if not jpath:
             j = javacore.pick_for(need)
             if not j:
-                QMessageBox.warning(self, "缺 Java",
-                                    "没找到 Java %s" % need)
-                self._restore_start_btn(e)
+                # ★ V1.9.8：自动扫描没找到时，给"手动选择 java.exe"入口
+                #   （很多用户把 JDK 装在 D:\JDK 这类自定义位置，扫描可能漏）
+                if not self._ask_pick_java(e, need):
+                    self._restore_start_btn(e)
                 return
             jpath = j["path"]
+
+    def _ask_pick_java(self, e, need):
+        """自动扫描没找到 Java 时，让用户手动指定 java.exe。
+        返回 True=已选好（路径已存进配置），False=取消。★ V1.9.8
+        """
+        box = QMessageBox(self)
+        box.setWindowTitle("没找到 Java")
+        box.setIcon(QMessageBox.Warning)
+        box.setText(
+            "自动扫描没找到 Java %s，无法启动。\n\n"
+            "可以手动指定 java.exe 的位置，\n"
+            "例如：D:\\JDK\\JDK25\\bin\\java.exe\n\n"
+            "选择后会自动记住，下次直接使用。" % (need or "（任意版本）"))
+        pick = box.addButton("手动选择 java.exe ...", QMessageBox.AcceptRole)
+        box.addButton("取消", QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is not pick:
+            return False
+        from PySide6.QtWidgets import QFileDialog
+        jp, _ = QFileDialog.getOpenFileName(
+            self, "选择 java.exe",
+            os.environ.get("ProgramFiles", "C:\\"),
+            "Java 可执行文件 (java.exe);;所有文件 (*)")
+        if not jp:
+            return False
+        info = javacore.probe(jp)
+        if info is None:
+            QMessageBox.warning(self, "无效的 Java",
+                                "所选文件无法作为 java 运行，请重新选择。")
+            return False
+        major = info[0]
+        if need and major < need:
+            r = QMessageBox.question(
+                self, "Java 版本偏低",
+                "所选 Java 主版本为 %d，这个服需要 Java %d。\n"
+                "继续用吗？" % (major, need),
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if r != QMessageBox.Yes:
+                return False
+        sv = self._saved(e)
+        sv["java"] = jp
+        try:
+            self._save_data()
+        except Exception:
+            pass
+        self._log_console("[Java] 已指定 %s (Java %d)" % (jp, major))
+        return True
         # ★ 读取 Aikar 优化开关
         use_aikar = sv.get("aikar", False)
         raw_xms = sv.get("xms", 1024)

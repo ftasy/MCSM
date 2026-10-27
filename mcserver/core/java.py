@@ -17,10 +17,17 @@ def _candidate_dirs():
             v = os.environ.get(env)
             if v:
                 roots.append(v)
-        roots.append("C:\\")
+        # ★ V1.9.8：扫描所有盘符根目录 —— 很多用户把 JDK 装在
+        #   D:\JDK、E:\jdk 这类自定义位置，原来只扫 C 盘 + ProgramFiles
+        #   会漏掉，导致"没找到 Java"（点启动后控制台无输出、启动中止）。
+        for _c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+            d = _c + ":\\"
+            if os.path.isdir(d):
+                roots.append(d)
         vendors = ["Java", "Eclipse Adoptium", "Microsoft", "BellSoft",
                    "Zulu", "azul", "GraalVM", "OpenJDK", "jdk",
-                   "AdoptOpenJDK", "Temurin", "Semeru", "Liberica"]
+                   "AdoptOpenJDK", "Temurin", "Semeru", "Liberica",
+                   "JDK", "JDKs", "JAVA", "JavaSoft", "java", "jdk-*"]
         for r in roots:
             for v in vendors:
                 base = os.path.join(r, v)
@@ -29,6 +36,11 @@ def _candidate_dirs():
                     for sub in sorted(glob.glob(os.path.join(base, "*"))):
                         if os.path.isdir(sub):
                             dirs.append(sub)
+            # ★ V1.9.8：盘根下形如 jdk-21 / jdk25 的目录（不在固定 vendor 名）
+            for sub in sorted(glob.glob(os.path.join(r, "*"))):
+                low = os.path.basename(sub).lower()
+                if os.path.isdir(sub) and ("jdk" in low or "java" in low):
+                    dirs.append(sub)
     else:
         dirs += ["/usr/lib/jvm", "/opt/java", "/Library/Java/JavaVirtualMachines"]
     return dirs
