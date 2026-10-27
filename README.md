@@ -79,6 +79,7 @@ python -c "import pack; pack.pack()"
 
 | 版本 | 亮点 |
 |---|---|
+| **v1.9.5** | 推荐列表真实适配探测：Modrinth/CF/GitHub 三来源逐项校验，不适配项直接禁勾+红字原因（MultiYggdrasil 最高 26.2、MultiLogin 仅 Velocity），结果落盘缓存 24h |
 | **v1.9.4** | 下载卡顿根治：版本查询双源回退（MCIM 404 假阳性立即换官方）+ CDN 双路回退；MultiLogin 改走 GitHub Releases（无 Paper 版时明确提示，不再 404）；总结论区分网络类原因 |
 | **v1.9.3** | Cupboard 生态硬编码 CF 项目 id 根治安装失败；auto 模式按实际生效源判断免 key；连写 slug 拆词重搜；无适配版本报友好提示 |
 | **v1.8.6** | Cupboard 生态强制 CurseForge 下载源；全库搜索双源下拉（Modrinth / CurseForge）；CF 搜索 loader 映射补全（Forge=1 / Fabric=4 / NeoForge=6）；CF 来源模组放宽版本过滤 |
