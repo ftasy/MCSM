@@ -3250,7 +3250,24 @@ class ServerConfigDialog(QDialog):
             found_any = found_any or installed
 
             if not installed:
-                # ★ 没装直接跳过，把整个框隐藏，不废话
+                # ★ V1.9.2：未检测到的模组也显示卡片（与插件配置页
+                #   的 LuckPerms / EssentialsX 卡片风格一致）：
+                #   提示文字 + 「打开模组配置文件夹」按钮。
+                gb = QGroupBox("%s（未安装）" % (spec["name"]))
+                g = QVBoxLayout(gb)
+                g.addWidget(QLabel(
+                    "未检测到 %s。\n在『模组』页签装上后，"
+                    "这里就能直接配它。" % (spec["name"])))
+                row = QHBoxLayout()
+                b = QPushButton("打开模组配置文件夹")
+                b.setToolTip("打开服务器 config/ 目录"
+                             "（所有模组配置都在这里）")
+                b.clicked.connect(lambda: _open_in_explorer(
+                    os.path.join(sd, "config")))
+                row.addWidget(b)
+                row.addStretch(1)
+                g.addLayout(row)
+                v.addWidget(gb)
                 continue
 
             gb = QGroupBox("%s" % (spec["name"]))
@@ -3471,9 +3488,8 @@ class ServerConfigDialog(QDialog):
 
         if not found_any:
             v.addWidget(QLabel(
-                "当前没有检测到需要配置的模组。\n"
-                "在『模组』页签装上 ServerCore 或 Simple Voice Chat "
-                "之后，这里就能直接配它们。"))
+                "尚未安装 ServerCore / Simple Voice Chat —— "
+                "在『模组』页签装上后，上方卡片即可直接配置。"))
         v.addStretch(1)
 
         sw = QScrollArea()
@@ -6296,6 +6312,10 @@ class ModBrowseDialog(QDialog):
         self._icon_cache = {}       # icon_url -> QPixmap
         self._icon_loading = set()  # 正在下载的 icon_url（防重复）
         self._ph_pixmap = None      # 灰底占位图（懒生成）
+        # ★ V1.9.2：站点存在性缓存（slug -> {kind: True/False/None}）
+        #   只有确认该模组在某个站上有信息，才显示那个站点的索引按钮。
+        self._site_cache = {}
+        self._site_loading = set()  # 正在探测的 slug（防重复）
         self._icons_dir = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "icons")
@@ -6578,6 +6598,9 @@ class ModBrowseDialog(QDialog):
                     "categories": [], "downloads": None,
                     "group": m.get("group", ""),
                     "req": m.get("req") or [], "icon_url": None,
+                    # ★ V1.9.2：来源站（Cupboard 生态 = curseforge，
+                    #   其余默认 modrinth）→ 索引按钮按来源先显示
+                    "source": m.get("source") or "modrinth",
                 })
         else:
             lst = install.mod_list_for(self.loader, self.mc_version)
@@ -6596,6 +6619,9 @@ class ModBrowseDialog(QDialog):
                     "categories": [], "downloads": None,
                     "group": m.get("group", ""),
                     "req": m.get("req") or [], "icon_url": None,
+                    # ★ V1.9.2：来源站（Cupboard 生态 = curseforge，
+                    #   其余默认 modrinth）→ 索引按钮按来源先显示
+                    "source": m.get("source") or "modrinth",
                 })
         self.builtin_hits = hits
         self.builtin_total = len(hits)
@@ -6631,6 +6657,7 @@ class ModBrowseDialog(QDialog):
         self.lbl_stat.setText("本地推荐 %d 个，显示 %d 个"
                               % (self.builtin_total, len(page)))
         self._sync_count()
+        self._probe_sites()
 
     def _bpage(self, d):
         """推荐 Tab 内存分页（不发网络）。"""
@@ -7042,6 +7069,7 @@ class ModBrowseDialog(QDialog):
         self.lbl_stat.setText("共 %d 个结果，显示 %d 个"
                               % (self.total_hits, shown))
         self._sync_count()
+        self._probe_sites()
 
     # ---------- PCL2 风格卡片 ----------
     # ★ V1.8.2：desc 末尾 [标签] → 彩色小标签（第三行渲染）。
@@ -7130,6 +7158,18 @@ class ModBrowseDialog(QDialog):
         h1.addWidget(lb_title)
         h1.addStretch(1)
         # 一键查百科
+        # ★ V1.9.2：先按数据来源确认"必有的站"，其它站探测到有信息
+        #   才显示按钮 —— 该模组在某个站上没有信息时，不显示该站索引。
+        if builtin:
+            _src = h.get("source") or "modrinth"
+        else:
+            try:
+                _src = self.cb_src.currentData() or "modrinth"
+            except Exception:
+                _src = "modrinth"
+        _known = {"modrinth": _src == "modrinth",
+                  "curseforge": _src == "curseforge",
+                  "mcmod": False}
         b_mod = QPushButton("[Modrinth]")
         b_mod.setCursor(Qt.PointingHandCursor)
         b_mod.setStyleSheet("QPushButton{border:none;color:#5b8def;"
@@ -7151,9 +7191,18 @@ class ModBrowseDialog(QDialog):
                            "QPushButton:hover{color:#8ab4ff;}")
         b_cf.clicked.connect(
             lambda _c, s=slug: self._open_modlink("curseforge", s, title))
+        for _b, _k in ((b_mod, "modrinth"), (b_mc, "mcmod"),
+                       (b_cf, "curseforge")):
+            if not _known.get(_k):
+                _b.hide()  # 未确认存在 → 先隐藏，探测到信息后再显示
         h1.addWidget(b_mod)
         h1.addWidget(b_mc)
         h1.addWidget(b_cf)
+        # 记录站点按钮，供后台探测完成后按结果显隐
+        card._site_btns = {"modrinth": b_mod, "mcmod": b_mc,
+                           "curseforge": b_cf}
+        card._site_slug = slug
+        card._site_name = title
         rt.addLayout(h1)
 
         # 简介（灰色小字，两行截断）
@@ -7210,6 +7259,85 @@ class ModBrowseDialog(QDialog):
             QDesktopServices.openUrl(QUrl(url))
         except Exception:
             pass
+
+    # ---------- ★ V1.9.2：站点索引存在性探测 ----------
+    #   卡片上的 [Modrinth] / [MC百科] / [CurseForge] 按钮只显示
+    #   该模组确实有信息的站点：来源站直接显示，其余站后台探测
+    #   （有 → 显示按钮，没有 / 无法确认 → 保持隐藏）。
+    def _probe_sites(self):
+        """收集当前两列表（全库/推荐）里还没结论的 (slug, kind) 并后台探测。
+
+        缓存命中（_site_cache）零请求；同一 slug 在探测中不重复发起。
+        """
+        todo = []
+        for lw in (self.list_lib, self.list_builtin):
+            for i in range(lw.count()):
+                it = lw.item(i)
+                card = lw.itemWidget(it)
+                if card is None or not getattr(card, "_site_btns", None):
+                    continue
+                slug = getattr(card, "_site_slug", "") or ""
+                if not slug or slug in self._site_loading:
+                    continue
+                name = getattr(card, "_site_name", "") or slug
+                st = self._site_cache.get(slug) or {}
+                for kind, b in card._site_btns.items():
+                    if b.isVisible() or kind in st:
+                        continue  # 已显示，或已有结论（保持隐藏）
+                    todo.append((slug, name, kind))
+                if todo and slug not in self._site_loading:
+                    self._site_loading.add(slug)
+        if not todo:
+            return
+        self._probe_worker_ = _track(self, Worker(
+            self._probe_worker, {"todo": todo}, self))
+        self._probe_worker_.done.connect(self._apply_site_probe)
+        self._probe_worker_.start()
+
+    @staticmethod
+    def _probe_worker(todo, on_log=None):
+        """后台并发探测各站，返回 {slug: {kind: True/False/None}}。"""
+        from .core import sources as _s
+        import concurrent.futures
+        out = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+            futs = [(slug, kind,
+                     ex.submit(_s.probe_site_exists, slug, name, kind))
+                    for slug, name, kind in todo]
+            for slug, kind, fut in futs:
+                try:
+                    out.setdefault(slug, {})[kind] = fut.result(timeout=15)
+                except Exception:
+                    out.setdefault(slug, {})[kind] = None
+        return out
+
+    def _apply_site_probe(self, ok, res):
+        if not isinstance(res, dict):
+            return
+        for slug, m in res.items():
+            self._site_loading.discard(slug)
+            st = self._site_cache.setdefault(slug, {})
+            st.update(m)
+        for lw in (self.list_lib, self.list_builtin):
+            for i in range(lw.count()):
+                card = lw.itemWidget(lw.item(i))
+                self._update_card_sites(card)
+
+    def _update_card_sites(self, card):
+        """按探测结论更新一张卡片的站点按钮显隐。"""
+        btns = getattr(card, "_site_btns", None)
+        if not btns:
+            return
+        slug = getattr(card, "_site_slug", "") or ""
+        st = self._site_cache.get(slug) or {}
+        for kind, b in btns.items():
+            v = st.get(kind)
+            if v is None:
+                continue
+            if v and not b.isVisible():
+                b.show()
+            elif not v and b.isVisible():
+                b.hide()
 
     def _sync_count(self):
         n = len(self._checked_slugs())

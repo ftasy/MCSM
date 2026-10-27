@@ -566,3 +566,62 @@ def github_latest_jar(repo, mc_version=None, loader=None):
             return {"ok": True, "url": best["url"],
                     "filename": best["name"], "tag": rel["tag"]}
     return {"ok": False, "err": "没找到 jar（可能只在 CurseForge 发布）"}
+
+
+# =========================================================
+#  ★ V1.9.2：站点存在性探测（模组信息索引按需显示）
+# =========================================================
+_SITE_PROBE_CACHE = {}
+
+
+def probe_site_exists(slug, name, kind, timeout=6):
+    """探测某模组在指定站点上是否真的有信息。
+
+    kind: "modrinth" / "curseforge" / "mcmod"
+    返回 True（有）/ False（没有）/ None（无法判断，如网络失败、
+    CF 未配 key）——UI 把 None 当"没有"处理，不显示该站索引。
+    进程级缓存：同一 slug 每个站只探测一次，翻页/重搜不重复请求。
+    """
+    key = (slug or name or "").strip().lower()
+    if not key:
+        return None
+    c = _SITE_PROBE_CACHE.setdefault(key, {})
+    if kind in c:
+        return c[kind]
+    v = None
+    try:
+        import urllib.error
+        if kind == "modrinth":
+            u = ("https://api.modrinth.com/v2/project/%s"
+                 % urllib.parse.quote(slug or ""))
+            req = urllib.request.Request(
+                u, headers={"User-Agent": "MCSM/1.9.2"})
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    v = r.status < 400
+            except urllib.error.HTTPError as e:
+                v = e.code < 400  # 404 → False，其它错误 → False
+        elif kind == "curseforge":
+            k = get_cf_key()
+            if not k:
+                v = None  # 官方 CF 需 key 才能确认；无 key 按"没有"处理
+            else:
+                u = ("%s/v1/mods/search?gameId=432&pageSize=10"
+                     "&searchFilter=%s"
+                     % (curseforge_base(),
+                        urllib.parse.quote(name or slug or "")))
+                req = urllib.request.Request(u, headers=_cf_headers())
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    d = json.loads(r.read().decode("utf-8", "replace"))
+                v = bool((d or {}).get("data"))
+        else:  # mcmod（中文百科，无 API，解析搜索页）
+            u = mcmod_search_url(name or slug)
+            req = urllib.request.Request(
+                u, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                html = r.read().decode("utf-8", "replace")
+            v = "没有找到" not in html
+    except Exception:
+        v = None
+    c[kind] = v
+    return v

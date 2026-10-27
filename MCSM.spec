@@ -10,7 +10,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['PySide6.QtWebEngineCore', 'PySide6.QtWebEngineWidgets', 'PySide6.QtMultimedia', 'PySide6.QtQuick', 'PySide6.QtQml', 'tkinter', 'numpy'],
+    excludes=['PyQt5.QtWebEngine', 'PyQt5.QtMultimedia', 'PyQt5.QtQuick', 'PyQt5.QtQml', 'tkinter', 'numpy'],
     noarchive=False,
     optimize=0,
 )

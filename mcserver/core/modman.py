@@ -488,6 +488,13 @@ def browse_projects(query="", mc_version=None, loader=None,
         facets.append(["versions:%s" % mc_version])
     if category:
         facets.append(["categories:%s" % category])
+    if project_type == "mod":
+        # ★ V1.9.2：纯客户端模组的过滤移到 API 端。
+        #   只在服务端可装（server_side = required / optional）才返回，
+        #   纯客户端（server_side=unsupported，如 Sodium/Iris）直接不进
+        #   结果 —— 每批 limit=100 返回的 100 条全是服务端可装，
+        #   模组搜索也做到"五页一搜"；且 offset 与 total 对齐，不再错位。
+        facets.append(["server_side:required", "server_side:optional"])
 
     params = {
         "limit": limit,
