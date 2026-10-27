@@ -1992,12 +1992,12 @@ class MainWindow(QMainWindow):
         vv.addLayout(f)          # ★ v 是 QWidget，不是布局 —— 以前写成
                                  #   v.addLayout 一点『显示设置』就崩
 
-        # ★ V1.8.10：全库搜索图标显隐开关（默认开）
-        cb_icons = QCheckBox("全库搜索显示图标（开启后会略微增加加载时间）")
-        cb_icons.setChecked(bool(self.disp.get("show_icons", True)))
+        # ★ V1.9.0：全库搜索图标显隐开关（默认关闭 —— 纯文字极速渲染）
+        cb_icons = QCheckBox("显示模组图标（开启后异步加载，不阻塞列表）")
+        cb_icons.setChecked(bool(self.disp.get("show_icons", False)))
         cb_icons.setToolTip(
-            "关闭后全库搜索列表只显示文字，翻页最快；\n"
-            "开启后图标异步加载，不阻塞列表渲染。")
+            "默认关闭：全库搜索列表只显示文字，翻页最快；\n"
+            "开启：图标异步加载，不阻塞列表渲染。")
         vv.addWidget(cb_icons)
 
         vv.addWidget(QLabel(

@@ -515,7 +515,7 @@ def _make_placeholder_pixmap(size=64):
 
 
 def _global_show_icons():
-    """读 servers.json 的 display.show_icons（默认 True）。"""
+    """读 servers.json 的 display.show_icons（★ V1.9.0：默认 False=纯文字极速）。"""
     try:
         import json as _json
         cand = [os.path.join(os.getcwd(), "servers.json")]
@@ -531,10 +531,10 @@ def _global_show_icons():
             with open(p, "r", encoding="utf-8") as f:
                 d = _json.load(f)
             v = ((d.get("display") or {}).get("show_icons"))
-            return True if v is None else bool(v)
+            return False if v is None else bool(v)
     except Exception:
         pass
-    return True
+    return False
 
 
 class LoaderVerWorker(QThread, _StopMixin):
@@ -6279,9 +6279,9 @@ class ModBrowseDialog(QDialog):
         self.builtin_total = 0
         # ★ V1.8.9：并发竞态锁 —— 每次请求递增，过期回调直接丢弃
         self._req_id = 0
-        self._pending = "first"     # 本次请求类型 first/next/prev
+        self._pending = "first"     # 本次请求类型 first/next
+        # ★ V1.9.0：无感预加载标记（local_page==4 时后台 append 下一批）
         self._preloading = False    # 是否正在后台预取下一批
-        self._prefetched = None     # 已预取好的下一批 {"batch","total","offset"}
         # ★ V1.8.10：图标显隐开关 + 缓存
         self.show_icons = entry.get("show_icons")
         if self.show_icons is None:
@@ -6377,6 +6377,21 @@ class ModBrowseDialog(QDialog):
         for slug, lab in modman.CATEGORIES:
             self.cb_cat.addItem(lab, slug)
         h.addWidget(self.cb_cat)
+        if self.is_plugins:
+            # ★ V1.9.0：插件筛选下拉 —— 默认全部（不按 loader 过滤，
+            #   避免 facets 的 categories:paper 等误伤 bukkit/paper 插件）；
+            #   显式选择 Fabric/Forge 时才加 categories 过滤。
+            h.addWidget(QLabel("筛选:"))
+            self.cb_pfilter = QComboBox()
+            self.cb_pfilter.addItem("(全部)", "")
+            self.cb_pfilter.addItem("Fabric", "fabric")
+            self.cb_pfilter.addItem("Forge", "forge")
+            self.cb_pfilter.addItem("NeoForge", "neoforge")
+            self.cb_pfilter.addItem("Paper/Spigot", "paper")
+            self.cb_pfilter.setToolTip(
+                "默认『全部』= 不按加载器过滤（能看到所有服插件）；\n"
+                "选某个加载器后才只看对应的插件。")
+            h.addWidget(self.cb_pfilter)
         h.addWidget(QLabel("排序:"))
         self.cb_sort = QComboBox()
         for k, lab in modman.SORTS:
@@ -6394,6 +6409,9 @@ class ModBrowseDialog(QDialog):
         self.cb_sort.currentIndexChanged.connect(self.search)
         # ★ V1.8.6：切下载源（Modrinth/CurseForge）同样触发重搜
         self.cb_src.currentIndexChanged.connect(self.search)
+        # ★ V1.9.0：插件筛选下拉（全部/Fabric/Forge...）触发重搜
+        if self.is_plugins:
+            self.cb_pfilter.currentIndexChanged.connect(self.search)
 
         # 列表 + 中央"正在搜索..."占位（QStackedLayout 切换）
         self._lib_stack = QStackedLayout()
@@ -6501,13 +6519,19 @@ class ModBrowseDialog(QDialog):
         return out
 
     def _params(self):
-        return {
+        p = {
             "query": self.ed_q.text().strip(),
             "category": self.cb_cat.currentData() or None,
             "sort": self.cb_sort.currentData() or "downloads",
             "offset": self.offset,
             "source": self.cb_src.currentData() or "modrinth",
         }
+        # ★ V1.9.0：插件筛选下拉（默认全部=None，不 categories 过滤）
+        if self.is_plugins:
+            p["loader_filter"] = (getattr(self, "cb_pfilter", None)
+                                  and self.cb_pfilter.currentData()
+                                  or None)
+        return p
 
     # ---------- ★ V1.8.0：双视图（推荐安装 / 全库搜索） ----------
     def _on_tab_switch(self, idx):
@@ -6624,81 +6648,77 @@ class ModBrowseDialog(QDialog):
 
     # ---- 全库搜索 Tab：按批加载（★ V1.8.4）----
     def search(self):
-        """显式搜索（首次/换关键词/切源/切分类）：offset=0 请求新一批。
+        """显式搜索（首次/换关键词/切源/切分类）：重置状态，offset=0 请求首批。
 
-        ★ V1.8.9：显式搜索才清空列表 + 等待态；跨界翻页走无感预加载。
+        ★ V1.9.0：current_batch 只增不减（append 式），local_page 无限增长，
+          预加载的数据追加进 current_batch，翻页永远内存切片。
         """
         self.offset = 0
+        self.current_batch = []
+        self.total_hits = 0
+        self.local_page = 1
         self._pending = "first"
         self._run()
 
-    # ---- 精准切片（★ V1.8.9：绝对边界，杜绝"第三页 13 个"）----
+    # ---- 安全切片（★ V1.9.0：start 越界兜底，绝不越界/串数据）----
     def _slice_page(self):
-        """按 local_page 从 current_batch 精确切出当前 20 条。"""
+        """按 local_page 切出当前 20 条。
+
+        start 已超出已加载数据 → 返回 None（调用方显示"正在加载..."
+        并触发 _load_next_batch()）；否则 start/end 用 min 截断，
+        末批不足 20 条也不会越界。
+        """
         start = (self.local_page - 1) * self.page_size
+        if start >= len(self.current_batch):
+            return None
         end = min(start + self.page_size, len(self.current_batch))
         return self.current_batch[start:end]
 
     def _max_local_page(self):
-        """当前批次最多能本地切出几页（末批不足 100 时 <5）。"""
+        """已加载数据最多能切出几页（随 append 不断增长）。"""
         return max(1, (len(self.current_batch) + self.page_size - 1)
                    // self.page_size)
 
     def _page(self, d):
-        """按批加载翻页（batch=100，批内本地切片零网络秒切）。
+        """翻页（★ V1.9.0：无限下翻 + append 无感预加载，向前纯本地）。
 
-        ★ V1.8.9 彻底重写：
-          - 本地切片优先（绝对边界 min 截断）；
-          - 跨界向后：先用预取好的下一批（无感零网络），
-            没有预取才发网络请求（保留当前列表 + 轻提示，不清空防白屏）；
-          - 请求期间按钮全禁（防连点）+ req_id 竞态锁（防乱跳）。
+        - 向后：数据已在 current_batch → 零网络秒切；
+          数据未到（start 越界）→ 显示"正在加载..."并发起 _load_next_batch()。
+        - 向前：local_page>1 一律本地切片（前面数据早已 append 在内存）。
         """
         if d > 0:
-            if self.local_page < self._max_local_page():
-                nxt = self.local_page + 1
-                s = (nxt - 1) * self.page_size
-                if s < len(self.current_batch):
-                    self.local_page = nxt
-                    self._fill_lib()
-                    self._sync_page()
-                    self._maybe_preload()
-                    return
-            # 跨界向后：优先无感使用预取好的下一批
-            if self._prefetched is not None:
-                self.current_batch = self._prefetched["batch"]
-                self.total_hits = self._prefetched["total"]
-                self.total = self.total_hits
-                self.offset = self._prefetched["offset"]
-                self._prefetched = None
-                self.local_page = 1
+            nxt = self.local_page + 1
+            if (nxt - 1) * self.page_size < len(self.current_batch):
+                self.local_page = nxt
                 self._fill_lib()
                 self._sync_page()
                 self._maybe_preload()
                 return
-            if self.offset + self.batch_size < self.total_hits:
-                self.offset += self.batch_size
-                self._pending = "next"
-                self._run()
+            # 数据未加载到：兜底触发网络请求（防越界空页/死页）
+            if len(self.current_batch) < self.total_hits:
+                self.local_page = nxt
+                self._load_next_batch()
             return
         if d < 0:
             if self.local_page > 1:
                 self.local_page -= 1
                 self._fill_lib()
                 self._sync_page()
-                return
-            if self.offset > 0:
-                self.offset -= self.batch_size
-                self._pending = "prev"
-                self._run()
+
+    def _load_next_batch(self):
+        """★ V1.9.0：数据不足时拉下一批（返回后 append，不覆盖）。"""
+        if len(self.current_batch) >= self.total_hits:
+            self.lbl_stat.setText("已到底")
+            return
+        self.offset = len(self.current_batch)
+        self._pending = "next"
+        self._run()
 
     def _run(self):
         """发起全库搜索请求。
 
-        ★ V1.8.9：
-          1. 请求 ID 递增（_req_id），过期回调直接丢弃 → 治"疯狂点翻页乱跳"；
-          2. 按钮防连点：请求瞬间禁用上一页/下一页/搜索，渲染完恢复；
-          3. 显式搜索先清空列表 + 等待态；跨界翻页保留当前列表（无感），
-             失败/超时显示"加载失败，请重试"，绝不白屏。
+        ★ V1.8.9：请求 ID 竞态锁（过期回调丢弃）+ 按钮防连点 + 防白屏。
+        ★ V1.9.0：等待态统一列表中央显示；跨界加载提示"正在加载..."。
         """
         self._lib_searched = True
         self._req_id += 1
@@ -6707,12 +6727,9 @@ class ModBrowseDialog(QDialog):
         pend = getattr(self, "_pending", "first")
         if pend == "first":
             self.lbl_stat.setText("正在搜索...")
-            self._lib_wait(True)
         else:
-            # 跨界：无感 —— 保留当前列表，仅改状态行提示
-            self.lbl_stat.setText(
-                "正在加载下一页..." if pend == "next"
-                else "正在加载上一页...")
+            self.lbl_stat.setText("正在加载...")
+        self._lib_wait(True)
         self.worker = _track(self, Worker(
             self._do_search, {**self._params(), "_req_id": req_id}, self))
         self.worker.log.connect(self._log)
@@ -6750,7 +6767,8 @@ class ModBrowseDialog(QDialog):
             pass
 
     def _do_search(self, query="", category=None, sort="downloads",
-                   offset=0, source="modrinth", _req_id=0, on_log=None):
+                   offset=0, source="modrinth", loader_filter=None,
+                   _req_id=0, on_log=None):
         """后台按批搜索（limit=batch_size=100，offset 为批次起点）。
 
         ★ V1.8.6：支持 source="curseforge"（Modrinth/CurseForge 双源）。
@@ -6758,13 +6776,21 @@ class ModBrowseDialog(QDialog):
         不通用，切到 CF 时忽略分类过滤。
         ★ V1.8.9：永不抛异常 —— 成功/失败都返回 dict（带 _req_id），
         由 _on_search 按竞态锁统一裁决。
+        ★ V1.9.0：插件模式默认不过滤 loader（loader_filter=None →
+        不传 loader → facets 只保留 project_type + versions），
+        避免 categories:paper 等 facet 误伤 bukkit/paper 标签插件；
+        用户从"筛选"下拉显式选择后才加 categories 过滤。
+        模组模式保持原逻辑：默认按服务器加载器过滤。
         """
         try:
             if source == "curseforge":
                 category = None
+            eff_loader = loader_filter
+            if not self.is_plugins and eff_loader is None:
+                eff_loader = self.loader
             r = modman.browse_projects(
                 query=query, mc_version=self.mc_version,
-                loader=self.loader, category=category, sort=sort,
+                loader=eff_loader, category=category, sort=sort,
                 limit=self.batch_size, offset=offset, source=source,
                 project_type="plugin" if self.is_plugins else "mod")
             if r.get("err"):
@@ -6781,6 +6807,7 @@ class ModBrowseDialog(QDialog):
         """搜索结果回调。
 
         ★ V1.8.9 竞态锁：req_id 不是最新 → 过期数据直接丢弃。
+        ★ V1.9.0：非首次请求的结果 append 追加（绝不覆盖 current_batch）。
         """
         if not isinstance(res, dict) \
                 or res.get("_req_id") != self._req_id:
@@ -6790,46 +6817,47 @@ class ModBrowseDialog(QDialog):
         if res.get("error"):
             self._log("[失败] %s" % res["error"])
             self._lib_wait(False)
-            self._fill_fail()
+            # ★ V1.9.0：列表显示具体错误（如"官方 CF 需要 API Key..."）
+            self._fill_fail(res["error"])
             return
-        self.current_batch = res.get("hits") or []
-        self.total_hits = res.get("total") or 0
+        hits = res.get("hits") or []
+        if pend == "first":
+            self.current_batch = list(hits)
+            self.total_hits = res.get("total") or 0
+            self.local_page = 1
+        else:
+            # ★ V1.9.0：追加（append），下一批数据并入 current_batch
+            self.current_batch.extend(hits)
+            self.total_hits = res.get("total") or 0
         self.total = self.total_hits
         self.hits = self.current_batch
-        # 批次起点以实际请求为准
-        self.offset = res.get("offset") or 0
-        # 定位：首次/下一批 → 本批第 1 页；上一批 → 本批最后 1 页
-        self.local_page = (self._max_local_page()
-                           if pend == "prev" else 1)
+        self.offset = len(self.current_batch)
         self._lib_wait(False)
         self._fill_lib()
         self._sync_page()
         if not self.current_batch:
-            self.lbl_stat.setText(
-                "没找到匹配 %s + %s 的%s"
-                % (self.mc_version, self.loader,
-                   "插件" if self.is_plugins else "模组"))
-            self._log("[空] 试试放宽分类或换个关键词")
+            self.lbl_stat.setText("暂无数据")
+            self._log("[空] 没找到匹配，试试放宽筛选或换个关键词")
             return
         self._maybe_preload()
 
-    # ---- ★ V1.8.9：无感预加载（翻到边界零等待） ----
+    # ---- ★ V1.9.0：真正的无感预加载（append 式，翻页永远零等待） ----
     def _maybe_preload(self):
-        """浏览到当前批最后 1 页且还有下一批时，后台静默预取。
+        """local_page==4 且还有下一批时，后台静默拉取并 append 进 current_batch。
 
-        预取完成存到 _prefetched，用户点「下一页」时直接本地切换，
-        完全不感知网络延迟；预取失败静默，翻页时再走正常请求。
+        用户看第 4 页时后台偷偷拉回下一批 100 条 → 点第 5 页的「下一页」
+        时数据已在内存，直接切片渲染，永远看不到"正在加载..."转圈。
+        请求携带 _req_id 竞态锁：预加载进行中若用户点了搜索，
+        预加载回调会因 req_id 不匹配被丢弃，不会污染新搜索结果。
         """
-        if self._preloading or self._prefetched is not None:
+        if self._preloading:
             return
-        if not self.current_batch:
-            return
-        if self.local_page >= self._max_local_page() - 1 \
-                and self.offset + self.batch_size < self.total_hits:
+        if self.local_page == 4 \
+                and len(self.current_batch) < self.total_hits:
             self._preloading = True
             self._req_id += 1
             req_id = self._req_id
-            nxt = self.offset + self.batch_size
+            nxt = len(self.current_batch)
             w = _track(self, Worker(
                 self._do_search,
                 {**self._params(), "offset": nxt, "_req_id": req_id},
@@ -6839,20 +6867,22 @@ class ModBrowseDialog(QDialog):
             w.start()
 
     def _on_preload(self, ok, res):
+        """预加载回调：req_id 匹配才 append；失败静默，翻页时再正常请求。"""
         self._preloading = False
         if not isinstance(res, dict) \
                 or res.get("_req_id") != self._req_id:
             return
         if res.get("error"):
-            self._prefetched = None  # 失败静默，翻到时再请求
             return
-        self._prefetched = {
-            "batch": res.get("hits") or [],
-            "total": res.get("total") or 0,
-            "offset": res.get("offset") or 0,
-        }
-        # 预取完成：更新按钮可用性（下一页现在可本地切）
+        self.current_batch.extend(res.get("hits") or [])
+        self.total_hits = res.get("total") or 0
+        self.total = self.total_hits
+        self.offset = len(self.current_batch)
         self._sync_page()
+        # 若用户已翻到"正在加载..."等待页，数据到位后立即补渲染
+        if (self.local_page - 1) * self.page_size \
+                < len(self.current_batch):
+            self._fill_lib()
 
     # ---- ★ V1.8.10：图标（异步下载 + 缓存 + 显隐开关） ----
     def _placeholder(self):
@@ -6936,16 +6966,25 @@ class ModBrowseDialog(QDialog):
                     pass
 
     def _fill_lib(self):
-        """渲染当前批次内的当前页。
+        """渲染当前页。
 
         ★ V1.8.9：精准切片 —— start/end 用 min 截断，末批不足 20 条
         也不会越界或串数据。
         ★ V1.8.10：按 show_icons 开关渲染图标（占位 → 异步替换）。
+        ★ V1.9.0：start 越界 → "正在加载..."并触发拉下一批；
+          空数据 → "暂无数据"，绝不空白页。
         """
         self.list_lib.blockSignals(True)
         self.list_lib.clear()
         self._slug_title = {}
         page = self._slice_page()
+        if page is None:
+            # 数据未加载到：兜底（显示正在加载，随后自动拉下一批）
+            self.list_lib.blockSignals(False)
+            self.lbl_stat.setText("正在加载...")
+            if len(self.current_batch) < self.total_hits:
+                self._load_next_batch()
+            return
         for h in page:
             slug = h.get("slug") or ""
             title = h.get("title") or slug
@@ -6961,6 +7000,10 @@ class ModBrowseDialog(QDialog):
             self.list_lib.setItemWidget(it, card)
         self.list_lib.blockSignals(False)
         shown = self.list_lib.count()
+        if not shown and not self.current_batch:
+            self.lbl_stat.setText("暂无数据")
+            self._sync_count()
+            return
         self.lbl_stat.setText("共 %d 个结果，显示 %d 个"
                               % (self.total_hits, shown))
         self._sync_count()
@@ -7164,21 +7207,17 @@ class ModBrowseDialog(QDialog):
     def _sync_page(self):
         """全库 Tab 页码与按钮。
 
-        ★ V1.8.9：精准公式 —— 批内下一页（local_page < 实际页数且有数据）、
-        已预取的下一批、或还有下一批可请求 → 下一页可用；
-        上一页：批内非第 1 页 或 offset>0。
+        ★ V1.9.0：local_page 无上限；下一页可用 =
+          当前页之后还有已加载数据 或 还有下一批可请求；
+          上一页可用 = local_page>1（前面数据都在内存，纯本地）。
         """
         abs_page = (self.offset // self.page_size + self.local_page
                     if self.total_hits else 1)
         self.lbl_page.setText("第 %d 页" % abs_page)
-        self.btn_prev.setEnabled(
-            self.local_page > 1 or self.offset > 0)
+        self.btn_prev.setEnabled(self.local_page > 1)
         self.btn_next.setEnabled(
-            (self.local_page < self._max_local_page()
-             and self.local_page * self.page_size
-                 < len(self.current_batch))
-            or self._prefetched is not None
-            or (self.offset + self.batch_size < self.total_hits))
+            self.local_page * self.page_size < len(self.current_batch)
+            or len(self.current_batch) < self.total_hits)
 
     # ---------- 操作 ----------
     def open_advanced(self):
@@ -7189,19 +7228,95 @@ class ModBrowseDialog(QDialog):
         self.search()
 
     def ask_mirror(self):
+        """镜像源设置：非模态（show() 而非 exec()），实例由 self._src_dialog
+        持有，点确定（accepted）后立即保存并刷新全库列表。"""
         try:
-            dlg = _themed(SourceDialog(self, self))
-            dlg.exec()
+            d = getattr(self, "_src_dialog", None)
+            if d is None:
+                # ★ V1.9.0：修复旧代码 SourceDialog(self, self) 双参
+                #   TypeError（__init__ 只接受一个 parent）被静默吞掉
+                d = _themed(SourceDialog(self))
+                self._src_dialog = d
+                d.accepted.connect(self._on_src_saved)
+            d.show()
+            d.raise_()
+            d.activateWindow()
+        except Exception as e:
+            self._log("[错误] 镜像源设置：%r" % e)
+
+    def _on_src_saved(self):
+        """★ V1.9.0：源设置保存后立即生效（写入 sources.json + 刷新 + 重搜）。"""
+        try:
+            from .core import sources as _src
+            d = getattr(self, "_src_dialog", None)
+            if d is None:
+                return
+            mirror, key = d.values()
+            _src.set_mirror(mirror)
+            _src.set_cf_key(key)
+            ok_s, err_s = _src.save()
             self._sync_src_ui()
+            if not ok_s:
+                self._log("[警告] 源设置没保存上：%s" % err_s)
+                QMessageBox.warning(
+                    self, "没保存上",
+                    "下载源设置没能写入文件，重启后会回到之前的源。\n\n%s"
+                    % err_s)
+            self._log("[源] 已切换到：%s" % _src.describe())
+            if key:
+                self._log("[源] CurseForge API Key 已保存（本地 sources.json）")
+            # 保存后立即用新源重新搜索全库列表
+            self.search()
         except Exception:
             pass
 
     def do_probe(self):
+        """探测所有下载源（后台 Worker，避免卡 UI）。
+
+        ★ V1.9.0：修复旧代码 _src.probe() 缺 name 参数导致的 TypeError；
+          镜像 503 时在 UI 提示"镜像不可用，已自动切换官方源"。
+        """
         try:
             from .core import sources as _src
-            self._log("测源中 ...")
-            ok, msg = _src.probe()
-            self._log(("  [OK] %s" % msg) if ok else ("  [失败] %s" % msg))
+            self.btn_probe.setEnabled(False)
+            self._log("正在探测各下载源 ...")
+            self.worker = _track(self, Worker(self._probe_task, {}, self))
+            self.worker.log.connect(self._log)
+            self.worker.done.connect(self._on_probe_done)
+            self.worker.start()
+        except Exception as e:
+            self._log("[错误] %r" % e)
+
+    def _probe_task(self, on_log=None):
+        from .core import sources as _src
+        return _src.probe_all(timeout=8, on_log=on_log)
+
+    def _on_probe_done(self, ok, res):
+        self.btn_probe.setEnabled(True)
+        try:
+            from .core import sources as _src
+            if not ok:
+                self._log("[探测] 出错：%r" % (res,))
+                return
+            self._sync_src_ui()
+            if not isinstance(res, list) or not res:
+                return
+            good = [n for n, o, _ in res if o]
+            if not good:
+                QMessageBox.warning(
+                    self, "都不通",
+                    "镜像和官方源都请求失败了。\n\n已自动保持在官方源。")
+                self._log("[探测] 全部不可用")
+                return
+            # ★ V1.9.0：镜像 503/不可用 → UI 提示已自动切换官方源
+            mci = next((o for n, o, _ in res if n == "mcim"), True)
+            if not mci and _src.get_mirror() != "mcim":
+                QMessageBox.information(
+                    self, "镜像不可用",
+                    "MCIM 镜像不可用，已自动切换官方源。\n"
+                    "可在『镜像源设置』里手动改回，或检查网络。")
+                self._log("[探测] MCIM 镜像不可用，已自动切换官方源")
+            self._log("[探测] 完成，当前源：%s" % _src.describe())
         except Exception as e:
             self._log("[错误] %r" % e)
 

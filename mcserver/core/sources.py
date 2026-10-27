@@ -280,8 +280,7 @@ def cf_search(query="", mc_version=None, loader=None,
     """
     if get_mirror() != "mcim" and not get_cf_key():
         return {"hits": [], "total": 0,
-                "err": "用官方 CurseForge 需要 API key，"
-                       "改成 MCIM 镜像就不用"}
+                "err": "官方 CF 需要 API Key，建议切换 MCIM 镜像"}
     params = {
         "gameId": 432,          # Minecraft
         "classId": CF_MOD_CLASS,
