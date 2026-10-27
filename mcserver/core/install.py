@@ -1745,6 +1745,11 @@ def modrinth_pick(slug, mc_version, loader, on_retry=None):
             except Exception as e:
                 last_err = e
                 time.sleep(1.5)
+        # ★ V1.9.3：带版本过滤的请求 404 = “这个版本还没适配”，不是网络故障。
+        #   返回 [] 走下面的“找全版本确认无适配”逻辑，给友好提示；
+        #   不带过滤的请求 404（项目不存在）才按真实错误抛出。
+        if game_versions and getattr(last_err, "code", None) == 404:
+            return []
         # ★ 不能 return []，否则网络断开会被误判为“无版本”。抛出真实错误！
         if last_err:
             raise last_err
@@ -1759,6 +1764,25 @@ def modrinth_pick(slug, mc_version, loader, on_retry=None):
     all_vs = _fetch(None)
     if not all_vs:
         return None
+
+    # ★ V1.9.3：确认到底是不是“真没有适配”，而不是版本标签填错。
+    #   该加载器的全部版本里都找不到这个 MC 版本 → 明确报“无适配”，
+    #   绝不跨版本乱装（比如 26.3 服务端塞 26.2 的 MultiYggdrasil 必崩）。
+    try:
+        from . import modman as _mm
+        _close = _mm._ver_eq
+    except Exception:
+        def _close(a, b):
+            return a == b
+    if not any(_close(mc_version, g)
+               for v in all_vs
+               for g in (v.get("game_versions") or [])):
+        tops = sorted({g for v in all_vs
+                       for g in (v.get("game_versions") or [])})
+        hint = "（该项目当前支持到 %s）" % tops[-1] if tops else ""
+        raise RuntimeError(
+            "没有 %s + %s 的适配版本%s，请更换服务器版本或换模组"
+            % (mc_version, loader, hint))
 
     # 3. 动态回退已移除（严禁跨小版本乱装，1.20.4 的 Forge 模组塞给 1.20.1 必崩）
         

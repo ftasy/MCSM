@@ -393,3 +393,47 @@
 - v1.8.4：全库搜索 100 条/批异步翻页、铲除全部图标与 `?` 占位
 - v1.8.2：推荐清单纯平铺标签化、缓存翻页、loader 稳定版优先
 - v1.8.0：分离双视图 + 推荐清单重构 + 配置页补全 + 更新检测修复
+
+---
+
+# MCSM v1.9.3
+
+**CurseForge 安装根治：auto 模式真正走 MCIM 免 key、Cupboard 生态硬编码项目 id、连写 slug 自动拆词搜索、无适配版本报友好提示**
+
+## 一、 为什么前三个模组之前装不上（ChunkSending / Recipe Essentials / Structure Essentials）
+
+1. **auto 模式根本没走 MCIM 镜像**：判断"是否需要 API key"用错了判据 —— `get_mirror()` 在 auto 模式下永远是 "auto"，
+   于是即使 MCIM 镜像实际可用，也一律报"官方 CF 需要 API Key"。现在改为按**实际生效的源**（`_resolve()`）判断，
+   auto + MCIM 可用时直接免 key 走镜像。
+2. **Cupboard 生态项目 id 靠"搜索解析"，而 MCIM 的 CF 搜索索引不全**：chunksending / recipeessentials /
+   structureessentials 等连写 slug 在 MCIM 搜索里返回空 → 解析不到项目 id → 报"CurseForge 上找不到"。
+   现在把这 6 个项目（cupboard / chunksending / recipeessentials / structureessentials /
+   fastasyncworldsave / connectivity）的 CurseForge 项目 id **硬编码进代码**，安装时直接拿 id 取文件，
+   彻底跳过"搜索解析"这条脆弱链路。
+3. **顺带修复**：全库搜索连写 slug（如 chunksending）也搜不到了 —— 增加别名拆词自动重试
+   （chunksending → "chunk sending"），搜完原词没结果会自动再搜一次拆词形式。
+
+## 二、 MultiYggdrasil 一直 404 的原因与修复
+
+- 不是网络问题：MultiYggdrasil 最新适配只到 **26.2**，你的服务器是 **26.3**。
+  Modrinth 对"没有适配版本"的请求返回 HTTP 404，旧代码把它当网络错误显示成 "HTTP 404"。
+- 现在：带版本过滤的请求返回 404 会被识别为"这个版本没适配"，接着检查该项目实际支持的版本，
+  明确提示 **"没有 26.3 + fabric 的适配版本（该项目当前支持到 26.2），请更换服务器版本或换模组"**，
+  并且**绝不跨版本乱装**（不会把 26.2 的模组塞进 26.3 服务端）。
+
+## 下载说明
+
+- **ZIP 版（推荐）**：`MCSM_v1.9.3_安装包.zip` 解压后运行 `MCSM.exe`。
+- **EXE 版**：`MCSM.exe`（含运行库，首次启动略慢）。
+- 软件顶栏「检查更新」会自动提示本版本。
+
+## 历史版本
+
+- v1.9.2：模组信息索引按"站点是否有信息"显示（探测+缓存）；模组全库"五页一搜"（API 端 server_side 过滤）；配置页模组卡片化
+- v1.9.1：全库翻页全局页码模型根治乱跳；CF 插件源页码换算 + classId=5 硬过滤；插件推荐纯净；初始化向导同步镜像/测速
+- v1.9.0：真正的无感预加载（append 式）+ 分页防越界 + 插件过滤 + 镜像源修复 + 图标开关默认关闭
+- v1.8.10：翻页根治（竞态锁/防连点/防白屏/精准切片）+ 全库图标异步加载与显隐开关
+- v1.8.6：Cupboard 生态强制 CurseForge 下载源；全库搜索双源下拉；CF loader 映射补全
+- v1.8.4：全库搜索 100 条/批异步翻页、铲除全部图标与 `?` 占位
+- v1.8.2：推荐清单纯平铺标签化、缓存翻页、loader 稳定版优先
+- v1.8.0：分离双视图 + 推荐清单重构 + 配置页补全 + 更新检测修复

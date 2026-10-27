@@ -34,6 +34,30 @@ CURSEFORGE_OFFICIAL = "https://api.curseforge.com"
 # CurseForge 的 mod classId = 6
 CF_MOD_CLASS = 6
 
+# ★ V1.9.3：Cupboard 生态 6 件套硬编码 CurseForge 项目 id。
+#   MCIM 的 CF 搜索索引不全（chunksending 等搜不到）、且对部分项目
+#   名称变体匹配不稳（Connectivity 会误匹配 "No Quasi Connectivity"），
+#   内置推荐直接走 id，绕过"slug -> 搜索解析 -> id"这条脆弱链路。
+#   id 来源：MCIM CF 搜索 API 实测返回 + 项目页核对。
+CF_PROJECT_IDS = {
+    "cupboard": 326652,
+    "chunksending": 831663,
+    "recipeessentials": 907856,
+    "structureessentials": 832882,
+    "fastasyncworldsave": 951499,
+    "connectivity": 470193,
+}
+
+# ★ V1.9.3：MCIM 的 CF 搜索对"连写 slug"匹配差（chunksending -> 空，
+#   "chunk sending" -> Chunk Sending）。内置/搜索命中这些 slug 时
+#   先用别名词重搜一次。
+CF_SEARCH_ALIAS = {
+    "chunksending": "chunk sending",
+    "fastasyncworldsave": "fast async world save",
+    "recipeessentials": "recipe essentials",
+    "structureessentials": "structure essentials",
+}
+
 # ---- 当前配置（运行时可改） ----
 _cfg = {
     # auto = 自动挑（先试 MCIM，挂了退回官方）
@@ -317,7 +341,11 @@ def cf_search(query="", mc_version=None, loader=None,
       title / slug / description / categories /
       downloads / versions / source / icon
     """
-    if get_mirror() != "mcim" and not get_cf_key():
+    # ★ V1.9.3：判据从 get_mirror() 改为 _resolve() —— auto 模式下
+    #   只要实际生效的是 MCIM（health/探测已确认可用），就免 key；
+    #   旧写法 get_mirror()=="auto" 永远不等于 "mcim"，auto 用户
+    #   即使 MCIM 通也一律报"需要 API key"，CF 安装直接全挂。
+    if _resolve() != "mcim" and not get_cf_key():
         return {"hits": [], "total": 0,
                 "err": "官方 CF 需要 API Key，建议切换 MCIM 镜像"}
     # CurseForge classId：6=模组，5=Bukkit/Spigot 插件
@@ -366,6 +394,32 @@ def cf_search(query="", mc_version=None, loader=None,
             "icon": (m.get("logo") or {}).get("thumbnailUrl") or "",
             "cf_id": m.get("id"),
         })
+    # ★ V1.9.3：MCIM 的 CF 搜索对连写 slug 匹配差（如 chunksending ->
+    #   空结果）。原词没搜到时，用别名（拆词）再搜一次，只影响
+    #   已知项目，不会引入额外请求风暴。
+    if not hits and (query or "").strip().lower() in CF_SEARCH_ALIAS:
+        params["searchFilter"] = CF_SEARCH_ALIAS[
+            (query or "").strip().lower()]
+        path = "/v1/mods/search?" + urllib.parse.urlencode(params)
+        try:
+            d = _get_json(curseforge_base(), path, headers=_cf_headers())
+        except Exception:
+            d = None
+        for m in ((d or {}).get("data") or []):
+            hits.append({
+                "title": m.get("name") or "",
+                "slug": str(m.get("id") or ""),
+                "description": m.get("summary") or "",
+                "categories": _cf_cats(m),
+                "downloads": m.get("downloadCount") or 0,
+                "versions": list(dict.fromkeys(
+                    [gv.get("gameVersion") for gv in
+                     (m.get("gameVersionLatestFiles") or [])
+                     if gv.get("gameVersion")])) or [],
+                "source": "curseforge",
+                "icon": (m.get("logo") or {}).get("thumbnailUrl") or "",
+                "cf_id": m.get("id"),
+            })
     total = ((d or {}).get("pagination") or {}).get("totalCount")
     return {"hits": hits, "total": total if total is not None
             else len(hits)}
@@ -387,17 +441,27 @@ def cf_resolve_id(slug, mc_version=None, loader=None):
     CurseForge API 只认数字 id，不认 slug 路径；内置推荐清单里
     Cupboard 生态用的是 slug 形式，下载前先按名称搜索定位。
     返回 int id 或 None。
+
+    ★ V1.9.3：
+      1. 先查硬编码表 CF_PROJECT_IDS —— Cupboard 生态 6 件套
+         直接拿 id，跳过搜索（MCIM 索引不全 / 名称变体误匹配）。
+      2. 搜索时**不再传 mc_version/loader**：CF 搜索带 gameVersion
+         过滤会把"该版本还没文件"的项目整个过滤掉，导致明明存在
+         的项目 resolve 成 None。版本适配留给 cf_download_url 去挑
+         文件（挑不到会退最新），resolve 只管"这个项目存在吗"。
     """
+    key = (slug or "").strip().lower()
+    if key in CF_PROJECT_IDS:
+        return CF_PROJECT_IDS[key]
     try:
-        r = cf_search(query=slug, mc_version=mc_version, loader=loader,
-                      page_size=10)
+        r = cf_search(query=slug, page_size=10)
     except Exception:
         return None
     hits = r.get("hits") or []
-    s = (slug or "").lower().replace(" ", "")
+    s = key.replace(" ", "")
     for h in hits:
         t = (h.get("title") or "").lower().replace(" ", "")
-        if s and (s in t or t == s):
+        if s and (t == s or s in t):
             return h.get("cf_id")
     if hits:
         return hits[0].get("cf_id")  # 兜底取第一个搜索结果
