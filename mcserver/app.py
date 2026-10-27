@@ -4216,9 +4216,24 @@ class MainWindow(QMainWindow):
         try:
             self._go_start_now(e, auto_restart)
         except Exception:
-            # 异常路径：恢复按钮/状态栏，绝不把启动按钮永久禁用
+            # 异常路径：恢复按钮/状态栏，绝不把启动按钮永久禁用。
+            # ★ V1.9.9：异常必须留痕 —— 之前静默吞掉，启动失败完全
+            #   看不到原因（如 v1.9.6 的 NameError 让"点启动没反应"）。
+            #   现在写 manager.log 完整堆栈，并在控制台给一行红色提示。
+            try:
+                import traceback as _tb
+                _tb.print_exc()
+                logging.exception("[启动异常] %s 启动流程出错：",
+                                  e.get("name") or e.get("folder"))
+            except Exception:
+                pass
             try:
                 self._restore_start_btn(e)
+            except Exception:
+                pass
+            try:
+                self._log_console(
+                    "[启动异常] 启动流程出错，详见 manager.log 或上方堆栈")
             except Exception:
                 pass
         finally:
@@ -4318,7 +4333,11 @@ class MainWindow(QMainWindow):
         #   按一下键才能结束。这就是"关闭很久"的原因。
         #   直接调 java 还能拿到准确退出码。
         launch_mode = "jar"
-        jar_name = jar
+        # ★ V1.9.9：jar_name = jar 引用的是 do_start 的局部变量，
+        #   这里作用域不存在 → 每次点启动必抛 NameError，被 _finish_start
+        #   的 except 静默吞掉 → 现象就是"点启动没反应、java 没起"。
+        #   改成 None，由下面 find_launch 正常覆盖。
+        jar_name = None
         args_rel = None
         try:
             L = install.find_launch(sd)
