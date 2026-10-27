@@ -4203,18 +4203,27 @@ class MainWindow(QMainWindow):
             e, lambda: self._finish_start(e, auto_restart, k))
 
     def _finish_start(self, e, auto_restart, k):
-        """登录环境就绪后的启动延续。★ V1.9.6：统一在此清理 _starting。
+        """登录环境就绪后的启动延续。★ V1.9.7：无条件解锁防重入锁。
 
-        只在进程真正启动（procs 已有该服）后才解锁防重入锁；
-        失败路径由 _restore_start_btn 解锁。若在 then 里立即解锁，
-        离线/正版的同步启动路径会让第二次连点穿透锁。
+        之前"只在 procs 里有该服才解锁"——如果 _go_start_now 抛异常
+        （缺 Java 之外的意外、保存数据出错等），finally 里条件不满足，
+        锁永远不解锁：该服从此点启动没反应，按钮也可能被禁用。
+        现在 finally 无条件 discard；同步路径下第二次连点已被
+        do_start / _go_start_now 入口的 procs 检查拦截（同一 UI 线程
+        同步执行，进程已登记），异步下载期间 _finish_start 尚未被调用，
+        锁自然保持 —— 两种场景都安全。
         """
         try:
             self._go_start_now(e, auto_restart)
+        except Exception:
+            # 异常路径：恢复按钮/状态栏，绝不把启动按钮永久禁用
+            try:
+                self._restore_start_btn(e)
+            except Exception:
+                pass
         finally:
             try:
-                if k in self.procs:
-                    self._starting.discard(k)
+                self._starting.discard(k)
             except Exception:
                 pass
 
