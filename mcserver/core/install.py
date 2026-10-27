@@ -1329,7 +1329,8 @@ def collect_diag(server_dir, out_dir=None, extra_log=None):
 #   查得到版本的；查不到会在安装时明确提示，不会误导。
 
 
-def _m(slug, name, desc, group, req=(), max_ver=None, source="modrinth"):
+def _m(slug, name, desc, group, req=(), max_ver=None, source="modrinth",
+       repo=None):
     """极简清单条目。
 
     max_ver：该模组最高支持的 MC 版本（如 LazyDFU 只到 1.18.2）。
@@ -1337,10 +1338,12 @@ def _m(slug, name, desc, group, req=(), max_ver=None, source="modrinth"):
     source：下载源，"modrinth"（默认）或 "curseforge"。
       ★ V1.8.6：仅 CurseForge 发布的模组（如 Cupboard 生态）强制
       指定 curseforge，install_mods / install_plugins 下载时按此分流。
+    repo：★ V1.9.4：GitHub Releases 发布的插件（如 MultiLogin），
+      指定 owner/name 后下载时走 GitHub 分支（sources.github_latest_jar）。
     """
     return {"slug": slug, "name": name, "desc": desc,
             "group": group, "req": list(req), "max_ver": max_ver,
-            "source": source}
+            "source": source, "repo": repo}
 
 
 MOD_TARGETS = {
@@ -1513,9 +1516,13 @@ MOD_TARGETS = {
 #   multilogin 最前（第三方登录第一）；essentialsx 绑定
 #   vault + luckperms；essentialsxchat 绑定 essentialsx。
 PLUGIN_TARGETS = [
+    # ★ V1.9.4：MultiLogin 不在 Modrinth/CurseForge 发布（实测均无项目），
+    #   官方 GitHub 为 CaaMoe/MultiLogin，但当前 release 只有 Velocity 版；
+    #   Paper 服插件版需作者渠道手动装 —— 下载时自动尝试 GitHub 并明确提示。
     _m("multilogin", "MultiLogin",
-       "多源登录：正版+第三方外置登录共存（Modrinth 暂无官方发布，"
-       "失败请到 GitHub Ink33/MultiLogin 手动装） [第三方登录]", ""),
+       "多源登录：正版+第三方外置登录共存（Modrinth/CurseForge 均无发布，"
+       "GitHub 仅有 Velocity 版，Paper 插件版请手动装） [第三方登录]", "",
+       repo="CaaMoe/MultiLogin"),
     _m("luckperms", "LuckPerms", "权限管理，几乎所有插件服的地基 [权限]", ""),
     _m("vault", "Vault", "经济/权限接口，经济插件的地基 [基础前置]", ""),
     _m("essentialsx", "EssentialsX",
@@ -1728,23 +1735,38 @@ def modrinth_pick(slug, mc_version, loader, on_retry=None):
     """智能挑选版本：先精确匹配，失败后动态回退到最兼容的版本。"""
     import re as _re
 
+    def _fetch_sources_order():
+        """请求源顺序：auto 先 MCIM 后官方；手动锁死则只走所选源。"""
+        from . import sources as _s
+        m = _s.get_mirror()
+        if m == "mcim":
+            return ["mcim"]
+        if m == "official":
+            return ["official"]
+        return ["mcim", "official"]
+
     def _fetch(game_versions=None):
         params = {"loaders": json.dumps([loader])}
         if game_versions:
             params["game_versions"] = json.dumps(game_versions)
         from . import sources  # ★ 修复：不能从 .core 导入，当前已经在 core 包里
-        base = sources.modrinth_base()
-        url = "%s/project/%s/version?%s" % (
-            base, slug, urllib.parse.urlencode(params))
-        
-        # ★ 增加内部重试：防止瞬时网络波动（如 429 限制）导致明明有的模组被误判为“无版本”
+        # ★ V1.9.4：auto 模式双源回退 —— MCIM 镜像对部分项目的过滤查询
+        #   会返回"假 404"（如 spark?loaders=paper，官方其实 200 空数组）、
+        #   偶发挂起。每源只试一次，失败立即换下一个源，不再在坏源上
+        #   重试（单源最坏 15s，双源最坏 ~30s，取代原来的 ~90s 卡顿）。
         last_err = None
-        for _ in range(2):
+        for name in _fetch_sources_order():
+            base = (sources.MCIM_MODRINTH if name == "mcim"
+                    else sources.MODRINTH_OFFICIAL)
+            url = "%s/project/%s/version?%s" % (
+                base, slug, urllib.parse.urlencode(params))
             try:
+                # 每源一次调用：404 等确定性错误 _get 不重试、立即换源；
+                # 瞬时故障在源内重试，重试完仍失败再换下一个源。
                 return json.loads(_get(url, timeout=15, on_retry=on_retry))
             except Exception as e:
                 last_err = e
-                time.sleep(1.5)
+                continue
         # ★ V1.9.3：带版本过滤的请求 404 = “这个版本还没适配”，不是网络故障。
         #   返回 [] 走下面的“找全版本确认无适配”逻辑，给友好提示；
         #   不带过滤的请求 404（项目不存在）才按真实错误抛出。
@@ -1826,6 +1848,75 @@ def _mirror_download_url(url):
     if not url:
         return url
     return url.replace("cdn.modrinth.com", "mod.mcimirror.top")
+
+
+def _download_with_fallback(url, dest, timeout=180, on_retry=None, on_log=None):
+    """下载文件：镜像 CDN 优先，失败自动回退官方 CDN。
+
+    ★ V1.9.4：实测官方 cdn.modrinth.com 在本机读超时、MCIM CDN 正常；
+      反过来部分网络下 MCIM 也可能慢/挂。两个都试，谁先成用谁，
+      避免"卡在下载上转圈"。
+    """
+    def log(m):
+        if on_log:
+            on_log(m)
+    mirror = _mirror_download_url(url)
+    try:
+        _download(mirror, dest, timeout=timeout, on_retry=on_retry,
+                  on_log=on_log)
+        return
+    except Exception as e:
+        if mirror == url:
+            raise
+        log("    [回退] 镜像下载失败（%s），改用官方 CDN..." % _brief(e))
+        _download(url, dest, timeout=timeout, on_retry=on_retry, on_log=on_log)
+
+
+def _github_plugin_jar(repo, mc_version=None, loader=None, on_log=None):
+    """从 GitHub Releases 挑插件 jar（平台过滤，★ V1.9.4）。
+
+    MultiLogin 等插件只在 GitHub 发布，但当前 release 只有
+    Velocity/代理端 jar —— 装进 Paper 服 plugins/ 无效。这里按
+    目标加载器过滤文件名（paper/bukkit/spigot 优先，排除代理端）。
+    返回 {"ok":True,"url","filename"} 或 {"ok":False,"err"}。
+    """
+    def log(m):
+        if on_log:
+            on_log(m)
+    from . import sources as _s
+    log("    [GitHub] 从 %s 的 Releases 挑 jar ..." % repo)
+    r = _s.github_releases(repo)
+    if not r.get("ok"):
+        return r
+    rels = [x for x in r["releases"] if not x["prerelease"]] \
+        or r["releases"]
+    want_loader = (loader or "paper").lower()
+    skip_words = {"velocity", "proxy", "bungee", "waterfall",
+                  "sources", "api-", "installer", "javadoc", "dev", "slim"}
+    liked = {"paper", "spigot", "bukkit"} if want_loader == "paper" \
+        else {want_loader}
+    for rel in rels:
+        for a in (rel["assets"] or []):
+            n = a["name"].lower()
+            if not a.get("url"):
+                continue
+            if not n.endswith(".jar"):
+                continue
+            if any(k in n for k in skip_words):
+                continue
+            # 平台匹配：paper 服优先 paper/spigot/bukkit；
+            # 只有 Velocity 等代理 jar 时明确说"没有适用版本"
+            if any(k in n for k in liked):
+                return {"ok": True, "url": a["url"],
+                        "filename": a["name"], "tag": rel["tag"]}
+            if any(k in n for k in ("velocity", "proxy", "bungee")):
+                log("    [GitHub] 该 release 只有 %s 版（代理端），"
+                    "Paper 服不适用，继续找..." % a["name"])
+                continue
+    return {"ok": False,
+            "err": "GitHub Releases 里没有 Paper/Bukkit/Spigot 版 jar"
+                   "（当前只有 Velocity 等代理端版本，请到作者渠道"
+                   "手动下载插件版）"}
 
 
 def _scan_jar_virus(jar_path):
@@ -1930,9 +2021,9 @@ def install_mods(server_dir, mc_version, loader, on_log=None,
                 return False, slug, desc, "无 %s+%s 版本" % (mc_version, loader)
 
             dest = os.path.join(mods_dir, v["name"])
-            # ★ CDN 加速 + 断点续传下载
-            download_url = _mirror_download_url(v["url"])
-            _download(download_url, dest, on_retry=_note, on_log=log)
+            # ★ CDN 加速 + 断点续传下载（V1.9.4：镜像失败自动回退官方）
+            _download_with_fallback(v["url"], dest,
+                                    on_retry=_note, on_log=log)
 
             # ★ 下载后安全扫描（Fractureiser 木马）
             if _scan_jar_virus(dest):
@@ -1986,11 +2077,16 @@ def install_mods(server_dir, mc_version, loader, on_log=None,
         log("")
         log("★ 有 %d 个模组因前置没装上而跳过（不会留半个）"
             % len(skipped))
-    # 全军覆没多半是网络，不是模组本身有问题
+    # 全军覆没：区分"网络故障"与"明确原因"（V1.9.4 不再误导重试）
     if fail_list and not ok_list:
         log("")
-        log("★ 一个都没装上，通常是网络瞬时故障（不是模组的问题）。")
-        log("  等几秒再点一次『开始』通常就好了。")
+        if all(_is_net_reason(f.get("reason") or "")
+               for f in fail_list):
+            log("★ 一个都没装上，通常是网络瞬时故障（不是模组的问题）。")
+            log("  等几秒再点一次『开始』通常就好了。")
+        else:
+            log("★ 一个都没装上。上方『失败』行有具体原因"
+                "（未发布 / 无适配版本 / 需手动装），按提示处理。")
     return {"ok": ok_list, "fail": fail_list, "skipped": skipped,
             "notes": plan.get("notes") or [],
             "conflicts": plan.get("conflicts") or []}
@@ -2046,6 +2142,8 @@ def install_plugins(server_dir, mc_version, loader="paper", only=None,
     def _download_task(slug):
         meta = plugin_meta(slug)
         desc = (meta or {}).get("name") or slug
+        # ★ V1.9.4：GitHub 发布的插件（如 MultiLogin）优先走 repo 分支
+        repo = (meta or {}).get("repo")
         # ★ V1.8.6：插件清单 + paper 组（Cupboard 生态）都可指定
         #   source="curseforge"，下载时按源分流。
         _m2 = mod_meta(loader, slug) if loader == "paper" else None
@@ -2053,6 +2151,24 @@ def install_plugins(server_dir, mc_version, loader="paper", only=None,
             (meta or {}).get("source") == "curseforge"
             or (_m2 or {}).get("source") == "curseforge") else "modrinth"
         try:
+            if repo:
+                # ---- GitHub Releases 分支（平台过滤）----
+                r = _github_plugin_jar(repo, mc_version, loader or "paper",
+                                       on_log=log)
+                if not r.get("ok"):
+                    return False, slug, desc, \
+                        r.get("err") or "GitHub 没有可用的插件 jar"
+                dest = os.path.join(plugins_dir, r["filename"])
+                _download(r["url"], dest, on_retry=_note, on_log=log)
+                if _scan_jar_virus(dest):
+                    try:
+                        os.remove(dest)
+                    except Exception:
+                        pass
+                    return False, slug, desc, \
+                        "拦截到恶意文件（Fractureiser 特征），已删除"
+                log("  [OK] %s" % r["filename"])
+                return True, slug, desc, r["filename"]
             if src == "curseforge":
                 from . import modman as _mm
                 r = _mm.install_from_project(
@@ -2103,8 +2219,9 @@ def install_plugins(server_dir, mc_version, loader="paper", only=None,
                     mc_version, loader or "paper")
 
             dest = os.path.join(plugins_dir, v["name"])
-            download_url = _mirror_download_url(v["url"])
-            _download(download_url, dest, on_retry=_note, on_log=log)
+            # ★ V1.9.4：镜像 CDN 失败自动回退官方 CDN
+            _download_with_fallback(v["url"], dest,
+                                    on_retry=_note, on_log=log)
 
             # ★ 下载后安全扫描（Fractureiser 木马）
             if _scan_jar_virus(dest):
@@ -2161,22 +2278,29 @@ def install_plugins(server_dir, mc_version, loader="paper", only=None,
             % len(skipped))
     if fail_list and not ok_list:
         log("")
-        log("★ 一个都没装上，通常是网络瞬时故障（不是插件的问题）。")
-        log("  等几秒再点一次『开始』通常就好了。")
+        if all(_is_net_reason(f.get("reason") or "")
+               for f in fail_list):
+            log("★ 一个都没装上，通常是网络瞬时故障（不是插件的问题）。")
+            log("  等几秒再点一次『开始』通常就好了。")
+        else:
+            log("★ 一个都没装上。上方『失败』行有具体原因"
+                "（未发布 / 无适配版本 / 需手动装），按提示处理。")
     return {"ok": ok_list, "fail": fail_list, "skipped": skipped,
             "notes": plan.get("notes") or [],
             "conflicts": plan.get("conflicts") or []}
 
 
-# ★ V1.3.0：多源登录组件（全部走 Modrinth 下载引擎，不写死第三方网址）
+# ★ V1.3.0：多源登录组件（默认走 Modrinth 下载引擎；★ V1.9.4
+#   MultiLogin 无任何模组库发布，改走 GitHub 并给准确提示）
 AUTH_COMPONENTS = {
-    # Paper 服：MultiLogin 插件（注意：Modrinth 上暂没有官方发布，
-    # 若自动下载失败，日志里会给手动安装指引）
+    # Paper 服：MultiLogin 插件（Modrinth/CurseForge 均无官方发布，
+    # GitHub CaaMoe/MultiLogin 当前 release 只有 Velocity 版，
+    # Paper 插件版需作者渠道手动装）
     "paper": {
         "kind": "plugin", "slug": "multilogin", "name": "MultiLogin",
-        "hint": "Modrinth 暂无官方 MultiLogin 插件发布；若自动下载失败，"
-                "请到 MultiLogin 官方 GitHub（Ink33/MultiLogin）下载 jar "
-                "手动放入 plugins/",
+        "repo": "CaaMoe/MultiLogin",
+        "hint": "MultiLogin 未在 Modrinth/CurseForge 发布；GitHub 当前只有 "
+                "Velocity 版。Paper 服插件版请到作者渠道手动下载放入 plugins/",
     },
     # 模组服（Forge / Fabric / NeoForge，含 1.21.1）：
     # MultiYggdrasil 官方支持 fabric/forge/neoforge 与 1.14~1.21.11。
@@ -2203,17 +2327,36 @@ def install_auth_component(server_dir, mc_version, loader, kind, slug,
         server_dir, "plugins" if kind == "plugin" else "mods")
     os.makedirs(target, exist_ok=True)
     ldr = loader if kind == "mod" else "paper"
+    repo = (AUTH_COMPONENTS.get("paper") or {}).get("repo") \
+        if kind == "plugin" else None
     try:
         def _note(attempt, e, wait):
             log("    [%s] 网络不稳（%s），%.1fs 后重试..."
                 % (slug, _brief(e), wait))
+        # ★ V1.9.4：MultiLogin 等 GitHub 发布组件走 repo 分支（平台过滤）
+        if repo:
+            r = _github_plugin_jar(repo, mc_version, ldr, on_log=log)
+            if not r.get("ok"):
+                return {"ok": False, "name": slug,
+                        "reason": r.get("err") or "GitHub 没有可用的 jar"}
+            dest = os.path.join(target, r["filename"])
+            _download(r["url"], dest, on_retry=_note, on_log=log)
+            if _scan_jar_virus(dest):
+                try:
+                    os.remove(dest)
+                except Exception:
+                    pass
+                return {"ok": False, "name": slug,
+                        "reason": "拦截到恶意文件（Fractureiser 特征），已删除"}
+            log("  [OK] %s" % r["filename"])
+            return {"ok": True, "name": r["filename"], "path": dest}
         v = modrinth_pick(slug, mc_version, ldr, on_retry=_note)
         if not v:
             return {"ok": False, "name": slug,
                     "reason": "Modrinth 无 %s+%s 版本" % (mc_version, ldr)}
         dest = os.path.join(target, v["name"])
-        _download(_mirror_download_url(v["url"]), dest,
-                  on_retry=_note, on_log=log)
+        _download_with_fallback(v["url"], dest,
+                                on_retry=_note, on_log=log)
         if _scan_jar_virus(dest):
             try:
                 os.remove(dest)
@@ -2225,6 +2368,16 @@ def install_auth_component(server_dir, mc_version, loader, kind, slug,
         return {"ok": True, "name": v["name"], "path": dest}
     except Exception as e:
         return {"ok": False, "name": slug, "reason": _brief(e)}
+
+
+def _is_net_reason(reason):
+    """这个失败原因像"网络问题"吗？（★ V1.9.4：404/未发布等
+    明确原因不该被误报成"网络瞬时故障"让用户白等重试）"""
+    r = (reason or "").lower()
+    return any(k in r for k in (
+        "超时", "timed out", "timeout", "网络", "10061", "10060",
+        "10054", "connection", "getaddrinfo", "11001", "重置",
+        "refused", "unreachable", "reset"))
 
 
 def _brief(e):
