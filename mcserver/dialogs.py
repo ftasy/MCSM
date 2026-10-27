@@ -3279,6 +3279,18 @@ class ServerConfigDialog(QDialog):
             cb = QComboBox()
             for k, p in spec["presets"].items():
                 cb.addItem(p["label"], k)
+            # ★ V1.9.6：默认选中"均衡（推荐）"（若存在），
+            #   与下方初始渲染基准 balanced 保持一致；
+            #   不加这个，下拉显示"保守"但数值却是均衡档，看着像没切换。
+            cb.blockSignals(True)
+            try:
+                j = cb.findData("balanced")
+                if j < 0:
+                    j = cb.findData("default")
+                if j >= 0:
+                    cb.setCurrentIndex(j)
+            finally:
+                cb.blockSignals(False)
             f.addRow("预设:", cb)
             self._mc_widgets["preset"] = cb
 
@@ -3411,9 +3423,15 @@ class ServerConfigDialog(QDialog):
                                    _spin("view_min", 2, 32,
                                          d.get("view_min", 6))))
 
-            def _apply_preset(_i=None, _cb=cb):
+            def _apply_preset(_i=None, _cb=cb, _spec=spec):
+                # ★ V1.9.6：_spec=spec 用默认参数捕获当前循环的模组。
+                #   原来直接闭包引用循环变量 spec —— for 循环结束后
+                #   spec 已经变成最后一个模组（Simple Voice Chat），
+                #   在 ServerCore 卡片上切换预设时查的是 SVC 的 presets，
+                #   永远取不到 aggressive/light/balanced → 全部落回默认值，
+                #   表现就是"保守/均衡/激进三档数值完全相同"。
                 k = _cb.currentData()
-                p = spec["presets"].get(k) or {}
+                p = _spec["presets"].get(k) or {}
                 g = self._mc_widgets.get
                 try:
                     # ★ V1.7.0-4：SVC 预设

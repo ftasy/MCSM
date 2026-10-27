@@ -161,7 +161,9 @@ class Console(QWidget):
 
     # 日志级别 -> 颜色（★ V1.1.0：可用「显示设置 → 控制台配色」覆盖）
     DEFAULT_COLORS = {
-        "info":       "#d0d0d0",  # 普通信息（灰）
+        # ★ V1.9.6：info 由 #d0d0d0 调亮到 #e6e6e6。
+        #   深色控制台底（#101010）上灰白字偏暗，用户反馈"普通信息太浅"。
+        "info":       "#e6e6e6",  # 普通信息（近白）
         "warn":       "#ffd166",  # 警告（黄）
         "error":      "#ff6b6b",  # 普通错误（红）
         "error_bold": "#ff5252",  # 报错堆栈：亮红 + 加粗
@@ -2268,6 +2270,13 @@ class MainWindow(QMainWindow):
             pass
         if e is not None:
             self.statusBar().showMessage("就绪", 3000)
+        # ★ V1.9.6：启动失败/中止路径统一在这里解锁防重入锁
+        #   （do_start 里的提前 return 分支不再各自 discard）。
+        try:
+            if e is not None:
+                self._starting.discard(self._key(e))
+        except Exception:
+            pass
 
     # ★ V1.6.0：双击卡片/行 = 未运行就启动，运行中就停止
     #   （服务器配置改从右键菜单进）
@@ -2580,6 +2589,7 @@ class MainWindow(QMainWindow):
             import tempfile
             ok_n = 0
             msgs = []
+            existed = []  # ★ V1.9.6：记录"已在列表里"的服务器（用于引导）
             for p in paths:
                 base = os.path.basename(os.path.normpath(p)) or p
                 src_dir = p
@@ -2605,7 +2615,8 @@ class MainWindow(QMainWindow):
                         msgs.append("[跳过] %s（没找到 level.dat）" % base)
                         continue
                     if os.path.exists(plan["server_dir"]):
-                        msgs.append("[跳过] %s（目标已存在）" % plan["server_name"])
+                        msgs.append("[跳过] %s（已在列表）" % plan["server_name"])
+                        existed.append(dict(plan))
                         continue
                     
                     ok, msg = migrate.do_import(plan, copy=True, on_log=on_log)
@@ -2618,7 +2629,7 @@ class MainWindow(QMainWindow):
                     if is_tmp:
                         import shutil
                         shutil.rmtree(src_dir, ignore_errors=True)
-            return ok_n, msgs
+            return ok_n, msgs, existed
 
         w = _track(self, Worker(job, {}, self))
         self._import_worker = w
@@ -2636,19 +2647,54 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("导入失败")
             QMessageBox.warning(self, "拖放导入", "导入失败：%s" % res)
             return
-        ok_n, msgs = res
+        ok_n, msgs, existed = res
         txt = "\n".join(msgs)
         self._log_console("=== 拖放导入 ===\n" + txt)
-        
-        # 不管成不成功，只要有提示信息就刷新一下面板
+
         if ok_n:
             self.do_scan()
-        else:
-            QMessageBox.warning(self, "拖放导入失败", "没有成功导入任何地图，请检查：\n" + txt)
+            QMessageBox.information(
+                self, "拖放导入",
+                txt + "\n\n已导入 %d 个。" % ok_n)
+            return
+
+        # ★ V1.9.6：拖进来的东西已在列表里 → 不再只报"跳过"。
+        #   直接选中它，并问要不要现在就启动（用户拖进来多半是想运行）。
+        if existed:
+            plan = existed[0]
+            entry = None
+            try:
+                tdir = os.path.abspath(plan.get("server_dir") or "")
+                for en in self.entries:
+                    if os.path.abspath(
+                            en.get("server_dir") or en.get("folder")
+                            or "") == tdir:
+                        entry = en
+                        break
+            except Exception:
+                entry = None
+            target = entry or dict(plan)
+            self._select_entry_by_dir(target)
+            self.statusBar().showMessage(
+                "『%s』已在列表中，可直接启动" % plan["server_name"], 4000)
+            r = QMessageBox.question(
+                self, "已在列表中",
+                "『%s』已经在你的服务器列表里，"
+                "不用重新导入。\n\n"
+                "已经帮你选中它了 —— 要现在直接启动吗？\n\n"
+                "（选『否』就停留在列表，可以先用『服务器配置』"
+                "看看它）"
+                % plan["server_name"],
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if r == QMessageBox.Yes:
+                self.do_start(entry=target)
+            return
+
+        QMessageBox.warning(self, "拖放导入失败",
+                            "没有成功导入任何地图，请检查：\n" + txt)
         QMessageBox.information(
             self, "拖放导入",
-            txt + ("\n\n已导入 %d 个。" % ok_n if ok_n else
-                   "\n\n没导入成功。可以改用工具栏『导入地图』。"))
+            "没导入成功。可以改用工具栏『导入地图』。")
 
     def do_import(self):
         """导入地图：建「版本-地图名」文件夹，地图放进去。
@@ -3598,11 +3644,11 @@ class MainWindow(QMainWindow):
                 "若启动后第三方玩家无法登录，请改用正版或离线模式。")
 
         r = QMessageBox.question(
-            self, "安装多源登录组件",
-            "启用多源共存需要安装 %s。\n\n"
+            self, "安装多源登录组件（启动暂停中）",
+            "『%s』已开启多源共存，启动前需要 %s 登录组件。\n\n"
             "将自动从 Modrinth 下载并配置（后台进行，不卡界面）。\n"
             "继续吗？\n\n（选『否』则直接启动，第三方玩家将无法登录）"
-            % comp["name"],
+            % (e.get("name") or "", comp["name"]),
             QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
         if r != QMessageBox.Yes:
             then()
@@ -4008,6 +4054,8 @@ class MainWindow(QMainWindow):
 
         防止朋友联机时被防火墙拦截。没有管理员权限 / 不是 Windows
         就静默跳过，绝不让防火墙操作打断服务器启动。
+        ★ V1.9.6：会话级去重 —— 同一端口只放行一次（连点启动、
+        自动重启都会再次走到这里，之前会重复打印日志 + 重复建规则）。
         """
         if os.name != "nt":
             return
@@ -4018,8 +4066,21 @@ class MainWindow(QMainWindow):
         if not port:
             return
         try:
+            # 已放行过的端口：同一会话内直接跳过（防连点/自动重启重复）
+            done = getattr(self, "_fw_done", None)
+            if done is None:
+                done = self._fw_done = set()
+            if port in done:
+                return
+            done.add(port)
             import threading
             import subprocess as _sp
+            # 先查系统规则：已存在同名规则也不重复建（跨会话幂等）
+            check_cmd = (
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-NetFirewallRule -DisplayName 'MCSM_Server_%d'"
+                 " -ErrorAction SilentlyContinue | Measure-Object |"
+                 " Select-Object -ExpandProperty Count" % port])
             cmd = (
                 ["powershell", "-NoProfile", "-Command",
                  "New-NetFirewallRule -DisplayName 'MCSM_Server_%d'"
@@ -4030,6 +4091,19 @@ class MainWindow(QMainWindow):
             def _run():
                 # ★ V1.4.0：防火墙命令挪到后台线程，主线程绝不同步等待
                 # ★ V1.6.2：加 CREATE_NO_WINDOW，禁止弹出黑色 CMD 窗
+                try:
+                    r = _sp.run(check_cmd, capture_output=True, timeout=20,
+                                creationflags=getattr(
+                                    _sp, "CREATE_NO_WINDOW", 0))
+                    cnt = (r.stdout or b"").strip()
+                    try:
+                        exists = int(cnt) > 0
+                    except Exception:
+                        exists = False
+                    if exists:
+                        return  # 规则已在，不重复建
+                except Exception:
+                    pass  # 查不到就当作没有，继续放行
                 try:
                     _sp.run(cmd, capture_output=True, timeout=30,
                             creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0))
@@ -4084,6 +4158,15 @@ class MainWindow(QMainWindow):
         k = self._key(e)
         if k in self.procs:
             return
+        # ★ V1.9.6：防重入 —— 启动流程可能异步（下载登录组件），
+        #   期间再点一次"启动"会重复走 do_start（防火墙放行两次、
+        #   两个 Worker 抢着启动）。用 _starting 记下"正在启动"的服。
+        starting = getattr(self, "_starting", None)
+        if starting is None:
+            starting = self._starting = set()
+        if k in starting:
+            return
+        starting.add(k)
         # ★ V1.6.0：点击启动立即给反馈并禁用按钮，防止狂点。
         #   真正启动成功后 _refresh_actions() 会重设按钮；
         #   提前中止的路径各自调用 _restore_start_btn 恢复。
@@ -4103,10 +4186,12 @@ class MainWindow(QMainWindow):
                                 "没有 run.bat 也没有服务端 jar，"
                                 "请先『初始化服务端』")
             self._restore_start_btn(e)
+            self._starting.discard(k)
             return
 
         if not self._check_port_conflict(e):
             self._restore_start_btn(e)
+            self._starting.discard(k)
             return
 
         # ★ V0.4.0：防火墙自动放行 server-port（静默，失败不打断启动）
@@ -4114,7 +4199,24 @@ class MainWindow(QMainWindow):
 
         # ★ V1.3.0：登录环境准备（正版/离线 即时处理；
         #   多源共存 需下载登录组件时先走 Worker，完成后自动继续启动）
-        self._prepare_auth(e, lambda: self._go_start_now(e, auto_restart))
+        self._prepare_auth(
+            e, lambda: self._finish_start(e, auto_restart, k))
+
+    def _finish_start(self, e, auto_restart, k):
+        """登录环境就绪后的启动延续。★ V1.9.6：统一在此清理 _starting。
+
+        只在进程真正启动（procs 已有该服）后才解锁防重入锁；
+        失败路径由 _restore_start_btn 解锁。若在 then 里立即解锁，
+        离线/正版的同步启动路径会让第二次连点穿透锁。
+        """
+        try:
+            self._go_start_now(e, auto_restart)
+        finally:
+            try:
+                if k in self.procs:
+                    self._starting.discard(k)
+            except Exception:
+                pass
 
     def _go_start_now(self, e, auto_restart=False):
         k = self._key(e)
