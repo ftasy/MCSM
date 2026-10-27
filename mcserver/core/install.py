@@ -1919,6 +1919,147 @@ def _github_plugin_jar(repo, mc_version=None, loader=None, on_log=None):
                    "手动下载插件版）"}
 
 
+# =============================================================
+#  ★ V1.9.5：推荐列表"适配探测" —— 不再声称已过滤，改为逐项
+#  真实探测当前 MC 版本 + 加载器下到底能不能装。
+#  probe_compat 返回 {"ok": True/False/None, "why": str}：
+#    True  = 有适配版本（可勾选，卡片标"版本兼容已按当前服过滤"）
+#    False = 确定装不了（禁用勾选，卡片红字显示真实原因）
+#    None  = 网络/超时等不确定（不禁用，安装时由 v1.9.4 兜底提示）
+# =============================================================
+def _cf_compat(cf_id, mc_version, loader):
+    """CurseForge 项目在当前 MC 版本 + 加载器下有没有可下载文件。
+
+    与 cf_download_url 不同：它精确匹配，绝不"退到最新文件"。
+    返回 (ok: bool, why: str)。
+    """
+    from . import sources as _s
+    path = "/v1/mods/%s/files" % cf_id
+    try:
+        d = _s._get_json(_s.curseforge_base(), path,
+                         headers=_s._cf_headers())
+    except Exception:
+        raise  # 网络/无 key/镜像问题统一交上层判 None
+    files = (d or {}).get("data") or []
+    if not files:
+        return False, "CurseForge 上没有可下载的文件"
+    lk = (loader or "").lower()
+    ok = False
+    for f in files:
+        gvs = [str(g) for g in (f.get("gameVersions") or [])]
+        gvl = [g.lower() for g in gvs]
+        if mc_version and mc_version in gvs \
+                and (not lk or lk in gvl):
+            ok = True
+            break
+    if ok:
+        return True, ""
+    # 收集该项目支持的最高 MC 版本（剔除加载器/平台标签）
+    mc_sets = set()
+    for f in files:
+        for g in (f.get("gameVersions") or []):
+            s = str(g).strip()
+            if s.lower() in ("forge", "fabric", "neoforge", "paper",
+                             "spigot", "bukkit", "modloader", "latest"):
+                continue
+            mc_sets.add(s)
+    tops = sorted(mc_sets, key=lambda s: [int(x) if x.isdigit()
+                                           else x for x in
+                                           re.split(r"(\d+)", s)])
+    hint = "（最高支持 %s）" % tops[-1] if tops else ""
+    return False, "CurseForge 暂无 %s + %s 的适配文件%s" % (
+        mc_version or "?", loader or "?", hint)
+
+
+def probe_compat(meta, mc_version, loader):
+    """探测一个推荐项在当前服（版本+加载器）下能否安装。
+
+    meta：推荐清单条目（slug / source / repo / name）。
+    返回 {"ok": True/False/None, "why": str}，why 供 UI 直接展示。
+    """
+    slug = (meta or {}).get("slug") or ""
+    if not mc_version:
+        return {"ok": None, "why": "未设置服务器版本，安装时再确认"}
+    source = (meta.get("source") or "modrinth").lower()
+    repo = meta.get("repo") or ""
+    try:
+        if repo:
+            # GitHub Releases：平台过滤（Paper 服要 paper/bukkit/spigot jar）
+            r = _github_plugin_jar(repo, mc_version, loader)
+            if r.get("ok"):
+                return {"ok": True, "why": ""}
+            err = r.get("err") or ""
+            if _is_net_reason(err):
+                return {"ok": None, "why": "适配检测失败（%s）" % _brief(err),
+                        "net": True}
+            return {"ok": False, "why": err}
+        if source == "curseforge":
+            from . import sources as _s
+            cid = _s.cf_resolve_id(slug)
+            if not cid:
+                return {"ok": False,
+                        "why": "CurseForge 上找不到 %s 这个项目" % slug}
+            ok, why = _cf_compat(cid, mc_version, loader)
+            return {"ok": ok, "why": why}
+        # 默认 Modrinth
+        try:
+            v = modrinth_pick(slug, mc_version, loader)
+        except RuntimeError as e:
+            return {"ok": False, "why": str(e)}
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return {"ok": False,
+                        "why": "Modrinth 上没有 %s 这个项目" % slug}
+            return {"ok": None, "why": "适配检测失败（HTTP %s）" % e.code}
+        except Exception as e:
+            return {"ok": None, "why": "适配检测失败（%s）"
+                    % _brief(e)}
+        if v:
+            return {"ok": True, "why": ""}
+        return {"ok": False,
+                "why": "Modrinth 上 %s 没有 %s + %s 的适配版本"
+                       % (slug, mc_version, loader)}
+    except Exception as e:
+        return {"ok": None, "why": "适配检测失败（%s）" % _brief(e)}
+
+
+# ---- 推荐适配探测缓存（跨会话复用，TTL 24h，放项目根） ----
+def compat_cache_path():
+    try:
+        base = os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))))
+    except Exception:
+        base = os.getcwd()
+    return os.path.join(base, "compat_cache.json")
+
+
+def compat_cache_load(ttl=86400):
+    """读缓存，返回 {key: (ok, why)}（过期的丢弃）。失败返回 {}。"""
+    try:
+        with open(compat_cache_path(), "r", encoding="utf-8") as f:
+            d = json.load(f)
+        out = {}
+        now = time.time()
+        for k, v in (d.get("items") or {}).items():
+            if now - float(v.get("ts") or 0) > ttl:
+                continue
+            out[k] = (v.get("ok"), v.get("why") or "")
+        return out
+    except Exception:
+        return {}
+
+
+def compat_cache_save(items):
+    """把 {key: (ok, why)} 全量写盘（失败静默，纯缓存）。"""
+    try:
+        d = {"items": {k: {"ok": v[0], "why": v[1], "ts": time.time()}
+                       for k, v in items.items()}}
+        with open(compat_cache_path(), "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
 def _scan_jar_virus(jar_path):
     """极简木马扫描：检查 jar 里是否有 Fractureiser 特征路径。
 

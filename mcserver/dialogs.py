@@ -4891,6 +4891,12 @@ class RemoveCoreDialog(QDialog):
 
 
 
+def _esc_html(s):
+    """把纯文本转成 HTML 安全字符串（卡片红字原因、标签渲染用）。"""
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
 def _inst_hit(slug, title, installed_set):
     """★ V1.7.3-1：已装判定（归一化 contains）。
 
@@ -6316,6 +6322,11 @@ class ModBrowseDialog(QDialog):
         #   只有确认该模组在某个站上有信息，才显示那个站点的索引按钮。
         self._site_cache = {}
         self._site_loading = set()  # 正在探测的 slug（防重复）
+        # ★ V1.9.5：推荐列表"适配探测"缓存（key -> (ok, why)）
+        #   落盘缓存跨会话复用（TTL 24h），探测结果驱动勾选禁用与
+        #   卡片红字原因 —— 不再"声称已过滤版本"却装不上。
+        self._compat = install.compat_cache_load()
+        self._compat_loading = set()  # 正在探测的 slug（防重复）
         self._icons_dir = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "icons")
@@ -6601,6 +6612,9 @@ class ModBrowseDialog(QDialog):
                     # ★ V1.9.2：来源站（Cupboard 生态 = curseforge，
                     #   其余默认 modrinth）→ 索引按钮按来源先显示
                     "source": m.get("source") or "modrinth",
+                    # ★ V1.9.5：GitHub 来源插件（MultiLogin）→ 适配探测走
+                    #   GitHub Releases 平台过滤，不进 Modrinth/CF 查询
+                    "repo": m.get("repo") or "",
                 })
         else:
             lst = install.mod_list_for(self.loader, self.mc_version)
@@ -6622,6 +6636,9 @@ class ModBrowseDialog(QDialog):
                     # ★ V1.9.2：来源站（Cupboard 生态 = curseforge，
                     #   其余默认 modrinth）→ 索引按钮按来源先显示
                     "source": m.get("source") or "modrinth",
+                    # ★ V1.9.5：透传 repo（当前模组清单没有 GitHub 项，
+                    #   留字段备用，插件清单已用）
+                    "repo": m.get("repo") or "",
                 })
         self.builtin_hits = hits
         self.builtin_total = len(hits)
@@ -6631,6 +6648,9 @@ class ModBrowseDialog(QDialog):
             "本地推荐：已按 %s + %s 过滤版本，剔除纯客户端组件"
             % (self.mc_version or "?", self.loader or "?"))
         self._fill_builtin()
+        # ★ V1.9.5：渲染后异步逐项探测真实适配性（不进列表不阻塞，
+        #   结果回来驱动勾选禁用 / 红字原因，缓存命中则零请求）
+        self._probe_compat()
 
     def _fill_builtin(self):
         """渲染推荐清单当前页（内存分页每页 20）。"""
@@ -7215,6 +7235,9 @@ class ModBrowseDialog(QDialog):
 
         # 标签行（★ V1.8.2：纯平铺、无分组标题；desc 的 [标签] 彩色渲染）
         tags = []
+        # ★ V1.9.5：推荐项先查适配缓存，未命中显示"适配检测中…"，
+        #   探测结果回来由 _apply_compat 落卡片（禁用/红字/绿字）。
+        _ck = None
         if builtin:
             # 彩色小标签排最前（PCL2 风格，第三行灰字）
             for t in _tags_desc:
@@ -7223,7 +7246,15 @@ class ModBrowseDialog(QDialog):
                             % (self._TAG_COLORS.get(t, "#8ab4ff"), t))
             if req:
                 tags.append("前置: " + "、".join(req))
-            tags.append("版本兼容已按当前服过滤")
+            _ck = self._compat.get(self._compat_key(slug))
+            if _ck and _ck[0] is False:
+                tags.append('<span style="color:#ef4444;'
+                            'font-weight:bold;">⚠ %s</span>'
+                            % _esc_html(_ck[1]))
+            elif _ck and _ck[0] is True:
+                tags.append("版本兼容已按当前服过滤")
+            else:
+                tags.append("适配检测中…")
         else:
             if cat_txt:
                 tags.append("分类 " + cat_txt)
@@ -7238,6 +7269,10 @@ class ModBrowseDialog(QDialog):
         lb_tags.setStyleSheet(
             "color:#6b7280; font-size:10px; background:transparent;")
         rt.addWidget(lb_tags)
+        # ★ V1.9.5：卡片标签引用，供探测结果回来后原地替换红字
+        card._tags_lbl = lb_tags
+        if builtin and _ck and _ck[0] is False:
+            chk.setEnabled(False)  # 缓存已知不适配 → 直接禁勾
 
         lay.addLayout(rt, 1)
         return card, chk
@@ -7339,31 +7374,127 @@ class ModBrowseDialog(QDialog):
             elif not v and b.isVisible():
                 b.hide()
 
+    # ---------- ★ V1.9.5：推荐列表适配探测 ----------
+    #   顶部"已按版本过滤"只是静态文案；真正能不能装在这里逐项
+    #   探测（Modrinth / CurseForge / GitHub 三来源），结果驱动
+    #   勾选禁用与卡片红字原因，缓存命中则零网络请求。
+    def _compat_key(self, slug):
+        return "%s|%s|%s" % (self.mc_version or "?", self.loader or "?",
+                             slug)
+
+    def _probe_compat(self):
+        """收集推荐列表里还没结论的项，后台并发探测适配性。"""
+        todo = []
+        for h in self.builtin_hits:
+            slug = h.get("slug") or ""
+            if not slug or slug in self._compat_loading:
+                continue
+            if self._compat_key(slug) in self._compat:
+                continue  # 缓存命中（含跨会话落盘缓存）
+            todo.append((slug, {"slug": slug,
+                                "source": h.get("source") or "modrinth",
+                                "repo": h.get("repo") or ""}))
+        if not todo:
+            return
+        for slug, _m in todo:
+            self._compat_loading.add(slug)
+        self._compat_worker_ = _track(self, Worker(
+            self._compat_worker,
+            {"todo": todo, "mc_version": self.mc_version,
+             "loader": self.loader}, self))
+        self._compat_worker_.done.connect(self._apply_compat)
+        self._compat_worker_.start()
+
+    @staticmethod
+    def _compat_worker(kwargs, on_log=None):
+        """后台并发探测每个推荐项的适配性（8 线程，单项限时 20s）。"""
+        from .core import install as _inst
+        import concurrent.futures
+        todo = kwargs.get("todo") or []
+        mc_version = kwargs.get("mc_version") or ""
+        loader = kwargs.get("loader") or ""
+        out = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+            futs = [(slug, ex.submit(_inst.probe_compat, meta,
+                                     mc_version, loader))
+                    for slug, meta in todo]
+            for slug, fut in futs:
+                try:
+                    r = fut.result(timeout=20)
+                except Exception:
+                    r = {"ok": None,
+                         "why": "适配检测超时，安装时再确认"}
+                out[slug] = r if isinstance(r, dict) \
+                    else {"ok": None, "why": ""}
+        return out
+
+    def _apply_compat(self, ok, res):
+        """探测结果落地：不适配 → 禁用勾选 + 红字原因；并写缓存。"""
+        if not isinstance(res, dict):
+            return
+        changed = False
+        for slug, r in res.items():
+            self._compat_loading.discard(slug)
+            if not isinstance(r, dict):
+                continue
+            key = self._compat_key(slug)
+            cur = self._compat.get(key)
+            if cur and cur[0] is not None:
+                continue  # 已有结论的不覆盖（防止过期响应互踩）
+            self._compat[key] = (r.get("ok"), r.get("why") or "")
+            changed = True
+        for i in range(self.list_builtin.count()):
+            it = self.list_builtin.item(i)
+            slug = it.data(Qt.UserRole)
+            if not slug:
+                continue
+            r = self._compat.get(self._compat_key(slug))
+            if not r or r[0] is not False:
+                continue
+            chk = getattr(it, "_chk", None)
+            if chk is not None:
+                chk.blockSignals(True)
+                chk.setChecked(False)
+                chk.setEnabled(False)
+                chk.blockSignals(False)
+            card = self.list_builtin.itemWidget(it)
+            if card is not None and getattr(card, "_tags_lbl", None):
+                card._tags_lbl.setText(
+                    "<span style='color:#ef4444;font-weight:bold;'>"
+                    "⚠ %s</span>" % _esc_html(r[1]))
+        self._sync_count()
+        if changed:
+            install.compat_cache_save(self._compat)
+
     def _sync_count(self):
         n = len(self._checked_slugs())
         verb = "确定选择" if self.select_only else "安装选中"
         self.btn_inst.setText("%s (%d)" % (verb, n))
 
     def _checked_slugs(self):
-        """★ V1.8.0：合并两个 Tab 的勾选（推荐 + 全库）。"""
+        """★ V1.8.0：合并两个 Tab 的勾选（推荐 + 全库）。
+        ★ V1.9.5：跳过不适配已禁用的项（disabled 的 chk 即使被
+          程序化勾上也不算，绝不把装不了的项带进安装队列）。"""
         out = []
         for lst in (self.list_builtin, self.list_lib):
             for i in range(lst.count()):
                 it = lst.item(i)
                 chk = getattr(it, "_chk", None)
-                if chk is not None and chk.isChecked():
+                if chk is not None and chk.isEnabled() \
+                        and chk.isChecked():
                     s = it.data(Qt.UserRole)
                     if s:
                         out.append(s)
         return out
 
     def _set_all(self, on):
-        """★ V1.8.0：作用于当前活动 Tab 的列表。"""
+        """★ V1.8.0：作用于当前活动 Tab 的列表。
+        ★ V1.9.5：全选跳过已禁用（不适配）的项。"""
         lst = self._current_list()
         for i in range(lst.count()):
             it = lst.item(i)
             chk = getattr(it, "_chk", None)
-            if chk is not None:
+            if chk is not None and chk.isEnabled():
                 chk.setChecked(on)
         self._sync_count()
 

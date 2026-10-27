@@ -6,7 +6,7 @@ import zipfile
 import time
 
 # 版本号（用来给压缩包命名）
-VERSION = "v1.9.4"
+VERSION = "v1.9.5"
 # 产品名（MCSM = Minecraft Server Manager）
 APP_NAME = "MCSM"
 OUT_ZIP = f"{APP_NAME}_{VERSION}_安装包.zip"
@@ -25,6 +25,7 @@ EXCLUDE_FILES = {
     "theme.json",            # 用户主题
     "sources.json",          # 用户下载源配置
     "mc_versions_cache.json",# 版本缓存
+    "compat_cache.json",     # ★ V1.9.5：推荐适配探测缓存（本地生成，不进包）
     "安装日志.txt",          # 测试产生的安装日志
     "pack.py",               # 打包脚本自己不需要进包
 }
