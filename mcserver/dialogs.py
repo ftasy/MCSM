@@ -419,6 +419,124 @@ def _track(obj, w):
     return w
 
 
+# ================= ★ V1.8.10：图标异步加载 =================
+
+def _fetch_icon_img(url, timeout=6):
+    """后台线程里用 urllib 下载图标，返回 QImage（可跨线程）或 None。"""
+    import urllib.request
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "MCServerManager/0.1"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = r.read()
+        if not data:
+            return None
+        img = QImage()
+        if not img.loadFromData(data):
+            return None
+        if img.width() < 8 or img.height() < 8:
+            return None
+        return img
+    except Exception:
+        return None
+
+
+class IconWorker(QThread, _StopMixin):
+    """后台批量下载当前页的图标（一个线程遍历一批 URL）。
+
+    只发 QImage（线程安全），转 QPixmap 在 GUI 线程的槽里做。
+    """
+    got = Signal(str, object)   # icon_url, QImage
+
+    def __init__(self, urls, parent=None):
+        super().__init__(None)   # ★ 不传 parent，防对话框销毁连坐
+        self.urls = urls or []
+        _LIVE_THREADS.add(self)
+
+    def run(self):
+        for url in self.urls:
+            if self.isInterruptionRequested():
+                break
+            img = _fetch_icon_img(url)
+            if img is not None:
+                try:
+                    self.got.emit(url, img)
+                except Exception:
+                    pass
+        _LIVE_THREADS.discard(self)
+
+
+def _make_letter_pixmap(slug, size=64):
+    """首字母色块图标：按 slug 稳定取色，圆角方块 + 白色首字母。
+
+    ★ V1.8.10：推荐安装列表没有网络图标，用本地 icons/<slug>.png
+    回退到色块（绝不再画问号）。
+    """
+    name = (slug or "?")
+    letter = name[0].upper() if name else "?"
+    palette = [
+        ("#5b8def", "#e8f0ff"), ("#f59e0b", "#fff4e0"),
+        ("#4ade80", "#e6fbea"), ("#a78bfa", "#f2edff"),
+        ("#f87171", "#ffecec"), ("#22d3ee", "#e6fbff"),
+        ("#f472b6", "#ffeef6"), ("#facc15", "#fffbe6"),
+    ]
+    idx = sum(ord(c) for c in name) % len(palette)
+    bg, _fg = palette[idx]
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    from PySide6.QtGui import QPainter, QColor, QFont, QBrush, QPen
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setBrush(QBrush(QColor(bg)))
+    p.setPen(Qt.NoPen)
+    p.drawRoundedRect(4, 4, size - 8, size - 8, 12, 12)
+    p.setPen(QColor(_fg))
+    f = QFont()
+    f.setBold(True)
+    f.setPixelSize(int(size * 0.5))
+    p.setFont(f)
+    p.drawText(pm.rect(), Qt.AlignCenter, letter)
+    p.end()
+    return pm
+
+
+def _make_placeholder_pixmap(size=64):
+    """灰底圆角占位图（图标下载前的默认图，绝不再画问号）。"""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    from PySide6.QtGui import QPainter, QColor, QBrush
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setBrush(QBrush(QColor("#3a3d47")))
+    p.setPen(Qt.NoPen)
+    p.drawRoundedRect(4, 4, size - 8, size - 8, 12, 12)
+    p.end()
+    return pm
+
+
+def _global_show_icons():
+    """读 servers.json 的 display.show_icons（默认 True）。"""
+    try:
+        import json as _json
+        cand = [os.path.join(os.getcwd(), "servers.json")]
+        try:
+            cand.append(os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "servers.json"))
+        except Exception:
+            pass
+        for p in cand:
+            if not os.path.isfile(p):
+                continue
+            with open(p, "r", encoding="utf-8") as f:
+                d = _json.load(f)
+            v = ((d.get("display") or {}).get("show_icons"))
+            return True if v is None else bool(v)
+    except Exception:
+        pass
+    return True
+
+
 class LoaderVerWorker(QThread, _StopMixin):
     """后台查加载器可用版本，避免界面卡住。"""
     got = Signal(object, object)
@@ -6159,6 +6277,21 @@ class ModBrowseDialog(QDialog):
         self.builtin_hits = []      # 推荐清单全量（内存）
         self.builtin_offset = 0     # 推荐分页偏移（内存）
         self.builtin_total = 0
+        # ★ V1.8.9：并发竞态锁 —— 每次请求递增，过期回调直接丢弃
+        self._req_id = 0
+        self._pending = "first"     # 本次请求类型 first/next/prev
+        self._preloading = False    # 是否正在后台预取下一批
+        self._prefetched = None     # 已预取好的下一批 {"batch","total","offset"}
+        # ★ V1.8.10：图标显隐开关 + 缓存
+        self.show_icons = entry.get("show_icons")
+        if self.show_icons is None:
+            self.show_icons = _global_show_icons()
+        self._icon_cache = {}       # icon_url -> QPixmap
+        self._icon_loading = set()  # 正在下载的 icon_url（防重复）
+        self._ph_pixmap = None      # 灰底占位图（懒生成）
+        self._icons_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "icons")
 
         v = QVBoxLayout(self)
 
@@ -6461,7 +6594,8 @@ class ModBrowseDialog(QDialog):
             it.setData(Qt.UserRole, slug)
             it.setFlags(Qt.ItemIsEnabled)
             it.setSizeHint(QSize(0, 104))
-            card, chk = self._make_card(h, {}, True)
+            card, chk = self._make_card(
+                h, self._local_icon_for(slug), True)
             it._chk = chk
             self.list_builtin.addItem(it)
             self.list_builtin.setItemWidget(it, card)
@@ -6490,33 +6624,59 @@ class ModBrowseDialog(QDialog):
 
     # ---- 全库搜索 Tab：按批加载（★ V1.8.4）----
     def search(self):
-        """首次搜索：offset=0，请求 batch_size=100 条。"""
+        """显式搜索（首次/换关键词/切源/切分类）：offset=0 请求新一批。
+
+        ★ V1.8.9：显式搜索才清空列表 + 等待态；跨界翻页走无感预加载。
+        """
         self.offset = 0
         self._pending = "first"
         self._run()
 
-    def _page(self, d):
-        """按批加载翻页（batch=100，批内 5 页本地切片）。
+    # ---- 精准切片（★ V1.8.9：绝对边界，杜绝"第三页 13 个"）----
+    def _slice_page(self):
+        """按 local_page 从 current_batch 精确切出当前 20 条。"""
+        start = (self.local_page - 1) * self.page_size
+        end = min(start + self.page_size, len(self.current_batch))
+        return self.current_batch[start:end]
 
-        向后（d>0）：
-          - 批内还有下一页（local_page<5 且有数据）→ local_page+1，
-            直接读 current_batch 渲染（零网络，秒切）。
-          - 否则若 offset+100 < total_hits → 异步请求下一批
-            （offset+=100，返回后定位本批第 1 页）。
-        向前（d<0）：
-          - local_page>1 → local_page-1，本地渲染。
-          - 否则若 offset>0 → 异步请求上一批（offset-=100，
-            返回后定位本批最后 1 页）。
+    def _max_local_page(self):
+        """当前批次最多能本地切出几页（末批不足 100 时 <5）。"""
+        return max(1, (len(self.current_batch) + self.page_size - 1)
+                   // self.page_size)
+
+    def _page(self, d):
+        """按批加载翻页（batch=100，批内本地切片零网络秒切）。
+
+        ★ V1.8.9 彻底重写：
+          - 本地切片优先（绝对边界 min 截断）；
+          - 跨界向后：先用预取好的下一批（无感零网络），
+            没有预取才发网络请求（保留当前列表 + 轻提示，不清空防白屏）；
+          - 请求期间按钮全禁（防连点）+ req_id 竞态锁（防乱跳）。
         """
         if d > 0:
-            if (self.local_page < 5
-                    and self.local_page * 20 < len(self.current_batch)):
-                self.local_page += 1
+            if self.local_page < self._max_local_page():
+                nxt = self.local_page + 1
+                s = (nxt - 1) * self.page_size
+                if s < len(self.current_batch):
+                    self.local_page = nxt
+                    self._fill_lib()
+                    self._sync_page()
+                    self._maybe_preload()
+                    return
+            # 跨界向后：优先无感使用预取好的下一批
+            if self._prefetched is not None:
+                self.current_batch = self._prefetched["batch"]
+                self.total_hits = self._prefetched["total"]
+                self.total = self.total_hits
+                self.offset = self._prefetched["offset"]
+                self._prefetched = None
+                self.local_page = 1
                 self._fill_lib()
                 self._sync_page()
+                self._maybe_preload()
                 return
-            if self.offset + 100 < self.total_hits:
-                self.offset += 100
+            if self.offset + self.batch_size < self.total_hits:
+                self.offset += self.batch_size
                 self._pending = "next"
                 self._run()
             return
@@ -6527,25 +6687,45 @@ class ModBrowseDialog(QDialog):
                 self._sync_page()
                 return
             if self.offset > 0:
-                self.offset -= 100
+                self.offset -= self.batch_size
                 self._pending = "prev"
                 self._run()
 
     def _run(self):
+        """发起全库搜索请求。
+
+        ★ V1.8.9：
+          1. 请求 ID 递增（_req_id），过期回调直接丢弃 → 治"疯狂点翻页乱跳"；
+          2. 按钮防连点：请求瞬间禁用上一页/下一页/搜索，渲染完恢复；
+          3. 显式搜索先清空列表 + 等待态；跨界翻页保留当前列表（无感），
+             失败/超时显示"加载失败，请重试"，绝不白屏。
+        """
         self._lib_searched = True
-        self.btn_go.setEnabled(False)
-        self.btn_inst.setEnabled(False)
-        _hint = {"first": "正在搜索...",
-                 "next": "正在搜索下一批...",
-                 "prev": "正在搜索上一批..."}.get(
-            getattr(self, "_pending", "first"), "正在搜索...")
-        self.lbl_stat.setText(_hint)
-        self._lib_wait(True)
+        self._req_id += 1
+        req_id = self._req_id
+        self._set_nav_enabled(False)
+        pend = getattr(self, "_pending", "first")
+        if pend == "first":
+            self.lbl_stat.setText("正在搜索...")
+            self._lib_wait(True)
+        else:
+            # 跨界：无感 —— 保留当前列表，仅改状态行提示
+            self.lbl_stat.setText(
+                "正在加载下一页..." if pend == "next"
+                else "正在加载上一页...")
         self.worker = _track(self, Worker(
-            self._do_search, self._params(), self))
+            self._do_search, {**self._params(), "_req_id": req_id}, self))
         self.worker.log.connect(self._log)
         self.worker.done.connect(self._on_search)
         self.worker.start()
+
+    def _set_nav_enabled(self, on):
+        """★ V1.8.9 防连点：请求期间禁用搜索/翻页按钮。"""
+        for b in (self.btn_prev, self.btn_next, self.btn_go):
+            try:
+                b.setEnabled(on)
+            except Exception:
+                pass
 
     def _lib_wait(self, waiting):
         """全库 Tab 列表中央显示/隐藏『正在搜索...』（不白屏）。"""
@@ -6554,37 +6734,64 @@ class ModBrowseDialog(QDialog):
         except Exception:
             pass
 
+    def _fill_fail(self, msg="加载失败，请重试"):
+        """失败/超时占位：列表里放一条不可勾选的失败项，绝不白屏。"""
+        try:
+            self.list_lib.blockSignals(True)
+            self.list_lib.clear()
+            it = QListWidgetItem(msg)
+            it.setFlags(Qt.NoItemFlags)
+            it.setTextAlignment(Qt.AlignCenter)
+            it.setSizeHint(QSize(0, 96))
+            self.list_lib.addItem(it)
+            self.list_lib.blockSignals(False)
+            self.lbl_stat.setText(msg)
+        except Exception:
+            pass
+
     def _do_search(self, query="", category=None, sort="downloads",
-                   offset=0, source="modrinth", on_log=None):
+                   offset=0, source="modrinth", _req_id=0, on_log=None):
         """后台按批搜索（limit=batch_size=100，offset 为批次起点）。
 
         ★ V1.8.6：支持 source="curseforge"（Modrinth/CurseForge 双源）。
         CurseForge 的 category 是数字 categoryId，Modrinth 的 slug
         不通用，切到 CF 时忽略分类过滤。
+        ★ V1.8.9：永不抛异常 —— 成功/失败都返回 dict（带 _req_id），
+        由 _on_search 按竞态锁统一裁决。
         """
-        if source == "curseforge":
-            category = None
-        r = modman.browse_projects(
-            query=query, mc_version=self.mc_version,
-            loader=self.loader, category=category, sort=sort,
-            limit=self.batch_size, offset=offset, source=source,
-            project_type="plugin" if self.is_plugins else "mod")
-        if r.get("err"):
-            raise RuntimeError(r["err"])
-        return {"hits": r.get("hits") or [],
-                "total": r.get("total") or 0,
-                "offset": offset, "error": r.get("error"),
-                "builtin": False}
+        try:
+            if source == "curseforge":
+                category = None
+            r = modman.browse_projects(
+                query=query, mc_version=self.mc_version,
+                loader=self.loader, category=category, sort=sort,
+                limit=self.batch_size, offset=offset, source=source,
+                project_type="plugin" if self.is_plugins else "mod")
+            if r.get("err"):
+                raise RuntimeError(r["err"])
+            return {"hits": r.get("hits") or [],
+                    "total": r.get("total") or 0,
+                    "offset": offset, "error": r.get("error"),
+                    "builtin": False, "_req_id": _req_id}
+        except Exception as e:
+            return {"error": repr(e), "builtin": False,
+                    "_req_id": _req_id}
 
     def _on_search(self, ok, res):
-        self.btn_go.setEnabled(True)
-        self.btn_inst.setEnabled(True)
-        if not ok:
-            self._lib_wait(False)
-            self.lbl_stat.setText("搜索失败")
-            self._log("[错误] %r" % (res,))
-            return
+        """搜索结果回调。
+
+        ★ V1.8.9 竞态锁：req_id 不是最新 → 过期数据直接丢弃。
+        """
+        if not isinstance(res, dict) \
+                or res.get("_req_id") != self._req_id:
+            return  # ★ 过期请求（疯狂翻页时旧结果不覆盖新状态）
+        self._set_nav_enabled(True)
         pend = getattr(self, "_pending", "first")
+        if res.get("error"):
+            self._log("[失败] %s" % res["error"])
+            self._lib_wait(False)
+            self._fill_fail()
+            return
         self.current_batch = res.get("hits") or []
         self.total_hits = res.get("total") or 0
         self.total = self.total_hits
@@ -6592,29 +6799,153 @@ class ModBrowseDialog(QDialog):
         # 批次起点以实际请求为准
         self.offset = res.get("offset") or 0
         # 定位：首次/下一批 → 本批第 1 页；上一批 → 本批最后 1 页
-        self.local_page = 5 if pend == "prev" else 1
+        self.local_page = (self._max_local_page()
+                           if pend == "prev" else 1)
         self._lib_wait(False)
         self._fill_lib()
         self._sync_page()
-        err = res.get("error")
-        if err:
-            self.lbl_stat.setText("搜索失败：%s" % err)
-            self._log("[失败] %s" % err)
-            return
         if not self.current_batch:
             self.lbl_stat.setText(
                 "没找到匹配 %s + %s 的%s"
                 % (self.mc_version, self.loader,
                    "插件" if self.is_plugins else "模组"))
             self._log("[空] 试试放宽分类或换个关键词")
+            return
+        self._maybe_preload()
+
+    # ---- ★ V1.8.9：无感预加载（翻到边界零等待） ----
+    def _maybe_preload(self):
+        """浏览到当前批最后 1 页且还有下一批时，后台静默预取。
+
+        预取完成存到 _prefetched，用户点「下一页」时直接本地切换，
+        完全不感知网络延迟；预取失败静默，翻页时再走正常请求。
+        """
+        if self._preloading or self._prefetched is not None:
+            return
+        if not self.current_batch:
+            return
+        if self.local_page >= self._max_local_page() - 1 \
+                and self.offset + self.batch_size < self.total_hits:
+            self._preloading = True
+            self._req_id += 1
+            req_id = self._req_id
+            nxt = self.offset + self.batch_size
+            w = _track(self, Worker(
+                self._do_search,
+                {**self._params(), "offset": nxt, "_req_id": req_id},
+                self))
+            w.log.connect(self._log)
+            w.done.connect(self._on_preload)
+            w.start()
+
+    def _on_preload(self, ok, res):
+        self._preloading = False
+        if not isinstance(res, dict) \
+                or res.get("_req_id") != self._req_id:
+            return
+        if res.get("error"):
+            self._prefetched = None  # 失败静默，翻到时再请求
+            return
+        self._prefetched = {
+            "batch": res.get("hits") or [],
+            "total": res.get("total") or 0,
+            "offset": res.get("offset") or 0,
+        }
+        # 预取完成：更新按钮可用性（下一页现在可本地切）
+        self._sync_page()
+
+    # ---- ★ V1.8.10：图标（异步下载 + 缓存 + 显隐开关） ----
+    def _placeholder(self):
+        if self._ph_pixmap is None:
+            self._ph_pixmap = _make_placeholder_pixmap()
+        return self._ph_pixmap
+
+    def _icon_pm_for(self, h):
+        """给一条搜索结果显示的图标 pixmap（GUI 线程）。
+
+        开关关 → None（纯文字）；有缓存 → 真实图；
+        有 icon_url → 灰底占位（并触发异步下载）；否则 None。
+        """
+        if not self.show_icons:
+            return None
+        url = h.get("icon_url") or ""
+        if url and url in self._icon_cache:
+            return self._icon_cache[url]
+        if url:
+            self._spawn_icon_load([url])
+            return self._placeholder()
+        return None
+
+    def _local_icon_for(self, slug):
+        """推荐安装：本地 icons/<slug>.png，没有则首字母色块。"""
+        try:
+            p = os.path.join(self._icons_dir, "%s.png" % slug)
+            if os.path.isfile(p):
+                pm = QPixmap(p)
+                if not pm.isNull():
+                    return pm.scaled(
+                        48, 48, Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation)
+        except Exception:
+            pass
+        return _make_letter_pixmap(slug, 48)
+
+    def _spawn_icon_load(self, urls):
+        """为当前页启动一个后台图标下载线程（去重 + 缓存判断）。"""
+        todo = []
+        for u in dict.fromkeys(urls):
+            if u and u not in self._icon_cache \
+                    and u not in self._icon_loading:
+                self._icon_loading.add(u)
+                todo.append(u)
+        if not todo:
+            return
+        w = IconWorker(todo, self)
+        w.got.connect(self._on_icon)
+        _track(self, w)
+        w.start()
+
+    def _on_icon(self, url, img):
+        """图标下载完成：转 QPixmap 入缓存，替换对应卡片占位图。"""
+        try:
+            self._icon_loading.discard(url)
+            if not self.show_icons:
+                return
+            pm = QPixmap.fromImage(img)
+            if pm.isNull():
+                return
+            pm = pm.scaled(48, 48, Qt.KeepAspectRatio,
+                           Qt.SmoothTransformation)
+            self._icon_cache[url] = pm
+            self._apply_icon(url, pm)
+        except Exception:
+            pass
+
+    def _apply_icon(self, url, pm):
+        """遍历正在显示的卡片，把 icon_url 匹配的占位替换成真图。"""
+        for i in range(self.list_lib.count()):
+            it = self.list_lib.item(i)
+            w = self.list_lib.itemWidget(it)
+            if w is None:
+                continue
+            if getattr(w, "_icon_url", None) == url \
+                    and getattr(w, "_icon_lbl", None) is not None:
+                try:
+                    w._icon_lbl.setPixmap(pm)
+                except Exception:
+                    pass
 
     def _fill_lib(self):
-        """渲染当前批次内的当前页（20 条，纯文字无图标）。"""
+        """渲染当前批次内的当前页。
+
+        ★ V1.8.9：精准切片 —— start/end 用 min 截断，末批不足 20 条
+        也不会越界或串数据。
+        ★ V1.8.10：按 show_icons 开关渲染图标（占位 → 异步替换）。
+        """
         self.list_lib.blockSignals(True)
         self.list_lib.clear()
         self._slug_title = {}
-        start = (self.local_page - 1) * self.page_size
-        page = self.current_batch[start:start + self.page_size]
+        page = self._slice_page()
         for h in page:
             slug = h.get("slug") or ""
             title = h.get("title") or slug
@@ -6623,7 +6954,8 @@ class ModBrowseDialog(QDialog):
             it.setData(Qt.UserRole, slug)
             it.setFlags(Qt.ItemIsEnabled)
             it.setSizeHint(QSize(0, 96))
-            card, chk = self._make_card(h, {}, False)
+            card, chk = self._make_card(
+                h, self._icon_pm_for(h), False)
             it._chk = chk
             self.list_lib.addItem(it)
             self.list_lib.setItemWidget(it, card)
@@ -6645,8 +6977,13 @@ class ModBrowseDialog(QDialog):
         "区域保护": "#4ade80", "基础前置": "#f59e0b",
     }
 
-    def _make_card(self, h, icons, builtin):
-        """一行卡片：左侧勾选框 + 64x64 图标，右侧名称/简介/标签/百科按钮。"""
+    def _make_card(self, h, icon_pm, builtin):
+        """一行卡片：左侧勾选框 +（可选）48x48 图标，右侧名称/简介/标签/百科按钮。
+
+        ★ V1.8.4：无图标时复选框+文字顶格左对齐（纯文字紧凑排版）。
+        ★ V1.8.10：icon_pm 非 None 时在勾选框右侧插入图标；
+          带 icon_url 的卡片记录 _icon_url/_icon_lbl，供异步下载完成后替换。
+        """
         slug = h.get("slug") or ""
         title = h.get("title") or slug
         _raw_desc = (h.get("description") or "").replace("\n", " ")
@@ -6686,6 +7023,18 @@ class ModBrowseDialog(QDialog):
             chk.setChecked(False)
         chk.stateChanged.connect(lambda _st: self._sync_count())
         lay.addWidget(chk)
+
+        # ★ V1.8.10：可选图标（全库=占位/缓存图；推荐=本地图标/色块）
+        if icon_pm is not None:
+            lbl_icon = QLabel()
+            lbl_icon.setFixedSize(48, 48)
+            lbl_icon.setPixmap(icon_pm)
+            lay.addWidget(lbl_icon)
+            card._icon_url = h.get("icon_url") or ""
+            card._icon_lbl = lbl_icon
+        else:
+            card._icon_url = ""
+            card._icon_lbl = None
 
         # ★ V1.8.4：彻底移除图标列与 ? 占位，复选框+文字顶格左对齐
         # 右侧：三行文字 + 链接
@@ -6813,20 +7162,22 @@ class ModBrowseDialog(QDialog):
         self._sync_count()
 
     def _sync_page(self):
-        """全库 Tab 页码与按钮（★ V1.8.4 按批加载公式）。
+        """全库 Tab 页码与按钮。
 
-        下一页可用：(local_page<5 且批内还有下一页)
-                   或 (offset+100 < total_hits)
-        上一页可用：local_page>1 或 offset>0
+        ★ V1.8.9：精准公式 —— 批内下一页（local_page < 实际页数且有数据）、
+        已预取的下一批、或还有下一批可请求 → 下一页可用；
+        上一页：批内非第 1 页 或 offset>0。
         """
-        abs_page = self.offset // self.page_size + self.local_page
+        abs_page = (self.offset // self.page_size + self.local_page
+                    if self.total_hits else 1)
         self.lbl_page.setText("第 %d 页" % abs_page)
         self.btn_prev.setEnabled(
             self.local_page > 1 or self.offset > 0)
         self.btn_next.setEnabled(
-            (self.local_page < 5
+            (self.local_page < self._max_local_page()
              and self.local_page * self.page_size
                  < len(self.current_batch))
+            or self._prefetched is not None
             or (self.offset + self.batch_size < self.total_hits))
 
     # ---------- 操作 ----------

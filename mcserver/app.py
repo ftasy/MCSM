@@ -1992,6 +1992,14 @@ class MainWindow(QMainWindow):
         vv.addLayout(f)          # ★ v 是 QWidget，不是布局 —— 以前写成
                                  #   v.addLayout 一点『显示设置』就崩
 
+        # ★ V1.8.10：全库搜索图标显隐开关（默认开）
+        cb_icons = QCheckBox("全库搜索显示图标（开启后会略微增加加载时间）")
+        cb_icons.setChecked(bool(self.disp.get("show_icons", True)))
+        cb_icons.setToolTip(
+            "关闭后全库搜索列表只显示文字，翻页最快；\n"
+            "开启后图标异步加载，不阻塞列表渲染。")
+        vv.addWidget(cb_icons)
+
         vv.addWidget(QLabel(
             "提示：排序在列表上方的下拉框里选；"
             "选『自定义顺序』后可以直接拖动图标调整。"))
@@ -2034,6 +2042,8 @@ class MainWindow(QMainWindow):
             self.disp["view"] = cb_view.currentData() or "icon"
             self.disp["show"] = [k for k, cb in show_boxes.items()
                                  if cb.isChecked()]
+            # ★ V1.8.10：全库搜索图标开关
+            self.disp["show_icons"] = cb_icons.isChecked()
             # ★ V1.1.0：保存控制台配色
             self.disp["console_colors"] = cc["result"]()
             self.data["display"] = self.disp
