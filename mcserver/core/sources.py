@@ -214,6 +214,42 @@ def probe_all(timeout=8, on_log=None):
     return out
 
 
+def probe_one_latency(name, timeout=8):
+    """并发探测单个源：返回 (name, ok, delay_ms, why)。"""
+    import time
+    base = MCIM_MODRINTH if name == "mcim" else MODRINTH_OFFICIAL
+    t0 = time.time()
+    try:
+        _get_json(base, "/project/sodium", timeout=timeout)
+        mark_good(name)
+        return (name, True, int((time.time() - t0) * 1000), "通")
+    except Exception as e:
+        mark_bad(name, e)
+        return (name, False, -1, _brief(e))
+
+
+def probe_all_latency(timeout=8):
+    """★ 并发探测所有源，返回 [(name, ok, delay_ms, why)]（毫秒）。
+
+    与 probe_all 的区别：两个源同时发请求，界面不串行等待；
+    auto 模式下同样锁定第一个通的为 _active。
+    """
+    import concurrent.futures
+    out = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+        futs = [ex.submit(probe_one_latency, n, timeout)
+                for n in AUTO_ORDER]
+        for f in concurrent.futures.as_completed(futs):
+            out.append(f.result())
+    out.sort(key=lambda r: AUTO_ORDER.index(r[0]))
+    if _cfg["mirror"] == "auto":
+        for name, okk, _, _ in out:
+            if okk:
+                _cfg["_active"] = name
+                break
+    return out
+
+
 # =========================================================
 #  统一 HTTP
 # =========================================================

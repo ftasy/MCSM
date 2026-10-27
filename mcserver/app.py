@@ -572,6 +572,8 @@ class MainWindow(QMainWindow):
         act("删除服务器", self.do_delete_server,
             "删掉整个服务器文件夹（含存档）")
         tb.addSeparator()
+        act("下载源", self.do_sources,
+            "镜像 / 官方源 / CF Key / 测速（全局生效，模组与插件下载都用它）")
         act("显示设置", self.do_display, "调整列表字号与行高")
         act("检查更新", self.do_check_update,
             "检查 GitHub 上有没有新版本（后台线程，不卡界面）")
@@ -1918,6 +1920,51 @@ class MainWindow(QMainWindow):
                     _v.viewport().update()
             except Exception:
                 pass
+
+    def do_sources(self):
+        """下载源全局设置（镜像 / 官方源 / CF Key）+ 并发测速。
+
+        ★ 全局入口：服务器管理界面与模组/插件浏览界面共用同一配置
+          （sources.json），这里打开 SourceDialog 保存后立即并发测速，
+          各源延迟显示在主界面日志面板。
+        """
+        try:
+            from .core import sources as _src
+            from .dialogs import SourceDialog, _themed
+            dlg = _themed(SourceDialog(self))
+            if not dlg.exec():
+                return
+            mirror, key = dlg.values()
+            _src.set_mirror(mirror)
+            _src.set_cf_key(key)
+            ok_s, err_s = _src.save()
+            if not ok_s:
+                QMessageBox.warning(
+                    self, "没保存上",
+                    "下载源设置没能写入文件，重启后会回到之前的源。\n\n%s"
+                    % err_s)
+            self._log_console("[源] 已切换到：%s" % _src.describe())
+            if key:
+                self._log_console(
+                    "[源] CurseForge API Key 已保存（本地 sources.json）")
+            # ★ 并发测速：probe_all_latency 并行请求，显示各源延迟 ms
+            self._log_console("[源] 正在并发测速 ...")
+            res = _src.probe_all_latency(timeout=8)
+            for name, okk, ms, why in res:
+                lab = "MCIM 镜像" if name == "mcim" else "官方源"
+                if okk:
+                    self._log_console("[源] %s 可用（%d ms）" % (lab, ms))
+                else:
+                    self._log_console("[源] %s 不可用（%s）" % (lab, why))
+            if not any(r[1] for r in res):
+                QMessageBox.warning(
+                    self, "都不通",
+                    "镜像和官方源都请求失败了。\n\n已自动保持在官方源。")
+            else:
+                self._log_console("[源] 测速完成，当前源：%s"
+                                  % _src.describe())
+        except Exception as e:
+            self._log_console("[错误] 下载源设置：%r" % e)
 
     def do_display(self):
         # ★ 去掉以前那个保底的 dlg = QDialog(self) ——

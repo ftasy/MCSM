@@ -7275,6 +7275,7 @@ class ModBrowseDialog(QDialog):
 
         ★ V1.9.0：修复旧代码 _src.probe() 缺 name 参数导致的 TypeError；
           镜像 503 时在 UI 提示"镜像不可用，已自动切换官方源"。
+        ★ 并发测速：probe_all_latency 并行请求并返回各源延迟（ms）。
         """
         try:
             from .core import sources as _src
@@ -7289,7 +7290,7 @@ class ModBrowseDialog(QDialog):
 
     def _probe_task(self, on_log=None):
         from .core import sources as _src
-        return _src.probe_all(timeout=8, on_log=on_log)
+        return _src.probe_all_latency(timeout=8)
 
     def _on_probe_done(self, ok, res):
         self.btn_probe.setEnabled(True)
@@ -7301,7 +7302,15 @@ class ModBrowseDialog(QDialog):
             self._sync_src_ui()
             if not isinstance(res, list) or not res:
                 return
-            good = [n for n, o, _ in res if o]
+            good = [r for r in res if r[1]]
+            # 逐源报告延迟（★ 并发测速结果）
+            names = {"mcim": "MCIM 镜像", "official": "官方源"}
+            for name, okk, ms, why in res:
+                lab = names.get(name, name)
+                if okk:
+                    self._log("[探测] %s 可用（%d ms）" % (lab, ms))
+                else:
+                    self._log("[探测] %s 不可用（%s）" % (lab, why))
             if not good:
                 QMessageBox.warning(
                     self, "都不通",
@@ -7309,7 +7318,7 @@ class ModBrowseDialog(QDialog):
                 self._log("[探测] 全部不可用")
                 return
             # ★ V1.9.0：镜像 503/不可用 → UI 提示已自动切换官方源
-            mci = next((o for n, o, _ in res if n == "mcim"), True)
+            mci = next((o for n, o, _, _ in res if n == "mcim"), True)
             if not mci and _src.get_mirror() != "mcim":
                 QMessageBox.information(
                     self, "镜像不可用",
