@@ -13,7 +13,9 @@ OUT_ZIP = f"{APP_NAME}_{VERSION}_安装包.zip"
 
 # 绝对不要打进包里的目录和文件
 EXCLUDE_DIRS = {"__pycache__", ".git", ".idea", ".vscode",
-                "build", "dist"}  # ★ PyInstaller 产物不进源码包
+                "build", "dist",
+                "版本归档"}  # ★ V1.9.3：版本归档里全是历史 exe/dll，
+                             #   绝不能递归打进安装包（否则包里有包、体积膨胀）
 # ★ V1.6.3：用户解压安装包测试留下的 MCSM_vX.Y_安装包/ 目录
 #   绝不能递归打进新包（否则包里有包、体积膨胀）。
 EXCLUDE_PREFIX_DIRS = ("MCSM_v",)
