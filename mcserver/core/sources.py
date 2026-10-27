@@ -304,24 +304,29 @@ def _cf_headers():
 
 
 def cf_search(query="", mc_version=None, loader=None,
-              category=None, sort=1, page_size=20, index=0):
+              category=None, sort=1, page_size=20, index=0,
+              project_type="mod"):
     """搜 CurseForge 模组。
 
     镜像状态下不需要 key；官方 API 需要 key（否则 401）。
     返回 {"hits":[...], "total":N}
 
-    统一成和 Modrinth 一样的字段，UI 不用分两套：
+    ★ V1.9.1：classId 按 project_type 硬映射 —— 插件搜索必须
+      classId=5（CF 插件类），否则把模组当插件搜出来（"插件里混入模组"）。
+      统一成和 Modrinth 一样的字段，UI 不用分两套：
       title / slug / description / categories /
       downloads / versions / source / icon
     """
     if get_mirror() != "mcim" and not get_cf_key():
         return {"hits": [], "total": 0,
                 "err": "官方 CF 需要 API Key，建议切换 MCIM 镜像"}
+    # CurseForge classId：6=模组，5=Bukkit/Spigot 插件
+    _cid = 5 if project_type == "plugin" else CF_MOD_CLASS
     params = {
         "gameId": 432,          # Minecraft
-        "classId": CF_MOD_CLASS,
+        "classId": _cid,
         "pageSize": page_size,
-        "index": index,
+        "index": index,         # ★ 页码（1-based），调用方负责从 offset 换算
         "sortField": sort,      # 1=热门 2=下载量 ...
     }
     if query:

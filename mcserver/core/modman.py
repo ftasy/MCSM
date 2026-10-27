@@ -462,10 +462,15 @@ def browse_projects(query="", mc_version=None, loader=None,
         from . import sources
         smap = {"relevance": 1, "downloads": 2, "updated": 3,
                 "newest": 4}
+        # ★ V1.9.1：CF 的 index 是「页码」（1-based），Modrinth 的
+        #   offset 是「条数偏移」——必须换算，否则 offset=100 会被
+        #   CF 当成第 100 页 → 直接跳到不存在页（翻页乱跳/空白）。
+        cf_index = (offset // limit) + 1 if limit else 1
         return sources.cf_search(
             query=query, mc_version=mc_version, loader=loader,
             category=category, sort=smap.get(sort, 1),
-            page_size=limit, index=offset)
+            page_size=limit, index=cf_index,
+            project_type=project_type)
 
     # facets 语法：外层数组是 AND，内层数组是 OR。
     # ★ v0.3.0 修复：以前是手写字符串拼接 + _q() 加引号，

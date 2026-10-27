@@ -6263,10 +6263,17 @@ class ModBrowseDialog(QDialog):
         # ★ V1.8.4：按批加载（100 条/批）+ 批内 5 页本地切片翻页
         self.batch_size = 100      # 每次向后端请求的条数
         self.page_size = 20        # UI 每页显示的条数
-        self.offset = 0            # 当前批次起点（0,100,200...）
+        self.offset = 0            # 下一批请求起点（= len(current_batch)）
         self.total_hits = 0        # 后端返回的总结果数
-        self.current_batch = []    # 当前缓存的 100 条数据
-        self.local_page = 1        # 当前在 100 条内的第几页（1..5）
+        self.current_batch = []    # 已加载的全部数据（append 只增不减）
+        # ★ 全局页码模型（彻底告别 local_page/批次双状态错乱）：
+        #   UI 只看一个 global_page，切片 = current_batch[(g-1)*20 : g*20]，
+        #   向前翻永远内存秒切（append 不覆盖，前面数据都在），
+        #   向后翻数据未到时显示"正在加载..."并发起下一批请求。
+        self.global_page = 1       # 当前全局页（1-based，无上限）
+        self.local_page = 1        # 兼容旧引用（= global_page）
+        self.batch_idx = 1         # 已加载批数（1-based，预加载/追加后 +1）
+        self._fetching = False     # ★ 在途请求锁：禁止同一时刻重复拉同一批
         self.total = 0             # 兼容旧引用（= total_hits）
         self.hits = []             # 兼容旧引用（= current_batch）
         self.worker = None
@@ -6312,10 +6319,8 @@ class ModBrowseDialog(QDialog):
         self.btn_probe = QPushButton("测一下哪个能用")
         self.btn_probe.clicked.connect(self.do_probe)
         h.addWidget(self.btn_probe)
-        # 仅选择模式：隐藏网络调试按钮，保持界面干净
-        if self.select_only:
-            self.btn_mirror.hide()
-            self.btn_probe.hide()
+        # ★ V1.9.1：不再隐藏 —— 初始化向导（select_only）同样需要
+        #   切换下载源与测速（两个入口必须同一套组件，逻辑一致）。
         v.addLayout(h)
 
         # ★ V1.8.0：物理分离双视图（QTabWidget）
@@ -6560,11 +6565,9 @@ class ModBrowseDialog(QDialog):
         hits = []
         seen = set()
         if self.is_plugins:
-            # ★ V1.8.2：multilogin 最前（PLUGIN_TARGETS 已排好），
-            #   随后追加 MOD_TARGETS["paper"] 的 Cupboard 生态，去重平铺。
-            sources = []
-            sources.extend(install.PLUGIN_TARGETS)
-            sources.extend(install.MOD_TARGETS.get("paper") or [])
+            # ★ V1.9.1：插件推荐 = 纯 PLUGIN_TARGETS（全部是真插件）。
+            #   不再混入 MOD_TARGETS["paper"]（用户指出推荐里出现模组）。
+            sources = list(install.PLUGIN_TARGETS)
             for m in sources:
                 if m["slug"] in seen:
                     continue
@@ -6646,29 +6649,32 @@ class ModBrowseDialog(QDialog):
             bool(self.builtin_total)
             and self.builtin_offset + 20 < self.builtin_total)
 
-    # ---- 全库搜索 Tab：按批加载（★ V1.8.4）----
+    # ---- 全库搜索 Tab：按批加载（★ V1.8.4 / V1.9.1 全局页码模型）----
     def search(self):
-        """显式搜索（首次/换关键词/切源/切分类）：重置状态，offset=0 请求首批。
+        """显式搜索（首次/换关键词/切源/切分类）：重置全部状态，offset=0 请求首批。
 
-        ★ V1.9.0：current_batch 只增不减（append 式），local_page 无限增长，
-          预加载的数据追加进 current_batch，翻页永远内存切片。
+        ★ 全局页码模型：current_batch 只增不减（append 式），
+          global_page 是唯一页码状态，向前翻永远内存切片。
         """
         self.offset = 0
         self.current_batch = []
         self.total_hits = 0
+        self.global_page = 1
         self.local_page = 1
+        self.batch_idx = 1
+        self._fetching = False
         self._pending = "first"
         self._run()
 
-    # ---- 安全切片（★ V1.9.0：start 越界兜底，绝不越界/串数据）----
+    # ---- 安全切片（start 越界兜底，绝不越界/串数据）----
     def _slice_page(self):
-        """按 local_page 切出当前 20 条。
+        """按 global_page 切出当前 20 条。
 
         start 已超出已加载数据 → 返回 None（调用方显示"正在加载..."
         并触发 _load_next_batch()）；否则 start/end 用 min 截断，
         末批不足 20 条也不会越界。
         """
-        start = (self.local_page - 1) * self.page_size
+        start = (self.global_page - 1) * self.page_size
         if start >= len(self.current_batch):
             return None
         end = min(start + self.page_size, len(self.current_batch))
@@ -6680,36 +6686,48 @@ class ModBrowseDialog(QDialog):
                    // self.page_size)
 
     def _page(self, d):
-        """翻页（★ V1.9.0：无限下翻 + append 无感预加载，向前纯本地）。
+        """翻页（★ V1.9.1：全局页码，向前纯本地，向后按需拉批）。
 
         - 向后：数据已在 current_batch → 零网络秒切；
           数据未到（start 越界）→ 显示"正在加载..."并发起 _load_next_batch()。
-        - 向前：local_page>1 一律本地切片（前面数据早已 append 在内存）。
+        - 向前：global_page>1 一律本地切片（前面数据早已 append 在内存），
+          永不触发网络、永无"回不去"。
+        - 在途请求期间禁止重复发起同一批（_fetching 锁）。
         """
         if d > 0:
-            nxt = self.local_page + 1
+            nxt = self.global_page + 1
             if (nxt - 1) * self.page_size < len(self.current_batch):
+                self.global_page = nxt
                 self.local_page = nxt
                 self._fill_lib()
                 self._sync_page()
-                self._maybe_preload()
                 return
-            # 数据未加载到：兜底触发网络请求（防越界空页/死页）
+            # 数据未加载到：先走到目标页（显示"正在加载..."），
+            # 再兜底触发网络请求（防越界空页/死页）
             if len(self.current_batch) < self.total_hits:
+                self.global_page = nxt
                 self.local_page = nxt
                 self._load_next_batch()
             return
         if d < 0:
-            if self.local_page > 1:
-                self.local_page -= 1
+            if self.global_page > 1:
+                self.global_page -= 1
+                self.local_page = self.global_page
                 self._fill_lib()
                 self._sync_page()
 
     def _load_next_batch(self):
-        """★ V1.9.0：数据不足时拉下一批（返回后 append，不覆盖）。"""
+        """★ 数据不足时拉下一批（返回后 append，不覆盖）。
+
+        _fetching 锁：预加载/翻页兜底请求在途时，绝不重复请求同一批
+        （否则两个请求返回同一批 append 两次 = 数据翻倍错乱）。
+        """
+        if self._fetching:
+            return
         if len(self.current_batch) >= self.total_hits:
             self.lbl_stat.setText("已到底")
             return
+        self._fetching = True
         self.offset = len(self.current_batch)
         self._pending = "next"
         self._run()
@@ -6813,6 +6831,7 @@ class ModBrowseDialog(QDialog):
                 or res.get("_req_id") != self._req_id:
             return  # ★ 过期请求（疯狂翻页时旧结果不覆盖新状态）
         self._set_nav_enabled(True)
+        self._fetching = False
         pend = getattr(self, "_pending", "first")
         if res.get("error"):
             self._log("[失败] %s" % res["error"])
@@ -6824,11 +6843,20 @@ class ModBrowseDialog(QDialog):
         if pend == "first":
             self.current_batch = list(hits)
             self.total_hits = res.get("total") or 0
+            self.global_page = 1
             self.local_page = 1
+            self.batch_idx = 1
         else:
-            # ★ V1.9.0：追加（append），下一批数据并入 current_batch
+            # ★ 追加（append），下一批数据并入 current_batch，绝不覆盖
             self.current_batch.extend(hits)
             self.total_hits = res.get("total") or 0
+            self.batch_idx = (len(self.current_batch) + 99) // 100
+            # 等待"正在加载..."的那一页数据到位：保持在当前 global_page，
+            # 若该页现在可切出则下面 _fill_lib 直接渲染；否则停留等更多数据
+            if (self.global_page - 1) * self.page_size \
+                    >= len(self.current_batch):
+                self.global_page = self._max_local_page()
+                self.local_page = self.global_page
         self.total = self.total_hits
         self.hits = self.current_batch
         self.offset = len(self.current_batch)
@@ -6841,34 +6869,40 @@ class ModBrowseDialog(QDialog):
             return
         self._maybe_preload()
 
-    # ---- ★ V1.9.0：真正的无感预加载（append 式，翻页永远零等待） ----
+    # ---- 无感预加载（append 式，翻页永远零等待） ----
     def _maybe_preload(self):
-        """local_page==4 且还有下一批时，后台静默拉取并 append 进 current_batch。
+        """已加载数据快翻到底、且还有下一批时，后台静默拉取并 append。
 
-        用户看第 4 页时后台偷偷拉回下一批 100 条 → 点第 5 页的「下一页」
+        用户看到接近当前批末尾时后台偷偷拉回下一批 → 点「下一页」
         时数据已在内存，直接切片渲染，永远看不到"正在加载..."转圈。
-        请求携带 _req_id 竞态锁：预加载进行中若用户点了搜索，
-        预加载回调会因 req_id 不匹配被丢弃，不会污染新搜索结果。
+        请求携带 _req_id 竞态锁 + _fetching 在途锁：
+        预加载进行中若用户点了搜索或翻页拉批，回调不会重复 append。
         """
-        if self._preloading:
+        if self._preloading or self._fetching:
             return
-        if self.local_page == 4 \
-                and len(self.current_batch) < self.total_hits:
-            self._preloading = True
-            self._req_id += 1
-            req_id = self._req_id
-            nxt = len(self.current_batch)
-            w = _track(self, Worker(
-                self._do_search,
-                {**self._params(), "offset": nxt, "_req_id": req_id},
-                self))
-            w.log.connect(self._log)
-            w.done.connect(self._on_preload)
-            w.start()
+        if self.global_page < self._max_local_page() \
+                and (self.global_page + 1) * self.page_size \
+                < len(self.current_batch):
+            return  # 后面还有已加载数据，没必要现在预取
+        if len(self.current_batch) >= self.total_hits:
+            return
+        self._preloading = True
+        self._fetching = True
+        self._req_id += 1
+        req_id = self._req_id
+        nxt = len(self.current_batch)
+        w = _track(self, Worker(
+            self._do_search,
+            {**self._params(), "offset": nxt, "_req_id": req_id},
+            self))
+        w.log.connect(self._log)
+        w.done.connect(self._on_preload)
+        w.start()
 
     def _on_preload(self, ok, res):
         """预加载回调：req_id 匹配才 append；失败静默，翻页时再正常请求。"""
         self._preloading = False
+        self._fetching = False
         if not isinstance(res, dict) \
                 or res.get("_req_id") != self._req_id:
             return
@@ -6877,10 +6911,11 @@ class ModBrowseDialog(QDialog):
         self.current_batch.extend(res.get("hits") or [])
         self.total_hits = res.get("total") or 0
         self.total = self.total_hits
+        self.batch_idx = (len(self.current_batch) + 99) // 100
         self.offset = len(self.current_batch)
         self._sync_page()
-        # 若用户已翻到"正在加载..."等待页，数据到位后立即补渲染
-        if (self.local_page - 1) * self.page_size \
+        # 若用户正停在"正在加载..."等待页，数据到位后立即补渲染
+        if (self.global_page - 1) * self.page_size \
                 < len(self.current_batch):
             self._fill_lib()
 
@@ -7205,18 +7240,17 @@ class ModBrowseDialog(QDialog):
         self._sync_count()
 
     def _sync_page(self):
-        """全库 Tab 页码与按钮。
+        """全库 Tab 页码与按钮（★ V1.9.1 全局页码模型）。
 
-        ★ V1.9.0：local_page 无上限；下一页可用 =
-          当前页之后还有已加载数据 或 还有下一批可请求；
-          上一页可用 = local_page>1（前面数据都在内存，纯本地）。
+        页码 = global_page / 总页（ceil(total_hits/20)），不再用 offset
+        参与显示计算 —— 修复"开局跳第 3/5/9 页"的错乱显示。
+        下一页可用 = 当前页之后还有已加载数据 或 还有下一批可请求；
+        上一页可用 = global_page>1（前面数据都在内存，纯本地）。
         """
-        abs_page = (self.offset // self.page_size + self.local_page
-                    if self.total_hits else 1)
-        self.lbl_page.setText("第 %d 页" % abs_page)
-        self.btn_prev.setEnabled(self.local_page > 1)
+        self.lbl_page.setText("第 %d 页" % self.global_page)
+        self.btn_prev.setEnabled(self.global_page > 1)
         self.btn_next.setEnabled(
-            self.local_page * self.page_size < len(self.current_batch)
+            self.global_page * self.page_size < len(self.current_batch)
             or len(self.current_batch) < self.total_hits)
 
     # ---------- 操作 ----------
