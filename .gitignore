@@ -30,3 +30,6 @@ _create_v173.png
 build/
 dist/
 build_log.txt
+
+# 本地版本归档（发布产物，由 archive_versions.py 生成，不入版本库）
+版本归档/
