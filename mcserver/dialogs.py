@@ -6809,9 +6809,10 @@ class ModBrowseDialog(QDialog):
             "标注『无适配』的模组 = 作者暂未支持该版本"
             % (self.mc_version or "?", self.loader or "?"))
         self._fill_builtin()
-        # ★ V1.9.5：渲染后异步逐项探测真实适配性（不进列表不阻塞，
-        #   结果回来驱动勾选禁用 / 红字原因，缓存命中则零请求）
-        self._probe_compat()
+        # ★ V2.0.7：适配探测延迟到窗口显示后再启动（QTimer 单次 0ms），
+        #   避免构造期后台线程与首帧绘制争抢导致"空白小窗闪现"。
+        from PySide6.QtCore import QTimer as _QT
+        _QT.singleShot(0, self._probe_compat)
 
     def _fill_builtin(self):
         """渲染推荐清单当前页（内存分页每页 20）。"""
@@ -7681,15 +7682,14 @@ class ModBrowseDialog(QDialog):
         self._compat_worker_.start()
 
     def _compat_progress(self, msg):
-        """★ V2.0.6：适配检测进度 → 状态栏（含完成提示）。"""
+        """★ V2.0.6：适配检测进度 → 底部状态标签（ModBrowseDialog 无状态栏）。"""
         try:
             s = str(msg)
             if s.startswith("[适配检测]"):
-                self.statusBar().showMessage(
-                    "正在适配检测 %s 个推荐项（按 %s + %s 隔离）：%s"
+                self.lbl_stat.setText(
+                    "适配检测 %d 个推荐项（按 %s + %s 隔离）：%s"
                     % (len(self._compat_loading) or "?",
-                       self.mc_version or "?", self.loader or "?", s),
-                    0)
+                       self.mc_version or "?", self.loader or "?", s))
         except Exception:
             pass
 
@@ -7759,6 +7759,10 @@ class ModBrowseDialog(QDialog):
                 self._compat_fail[slug] = why
                 self._apply_compat_text(slug, None, why)
             self._compat_loading.clear()
+            try:
+                self.lbl_stat.setText("适配检测完成：本机网络不可用（失败项安装时再确认）")
+            except Exception:
+                pass
             self._sync_count()
             return
         changed = False
@@ -7779,10 +7783,10 @@ class ModBrowseDialog(QDialog):
             changed = True
             self._apply_compat_text(slug, r.get("ok"), r.get("why") or "")
         self._sync_count()
-        # ★ V2.0.1：探测结束提示
+        # ★ V2.0.1：探测结束提示（ModBrowseDialog 无状态栏 → 底部标签）
         try:
             if not self._compat_loading:
-                self.statusBar().showMessage("适配检测完成", 3000)
+                self.lbl_stat.setText("适配检测完成")
         except Exception:
             pass
         if changed:

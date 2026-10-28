@@ -740,7 +740,7 @@ class MainWindow(QMainWindow):
 
         # 左：列表（图标视图 / 表格视图，可在显示设置里切换）
         self.view_mode = self.disp.get("view", "icon")
-        self.sort_mode = self.disp.get("sort", "custom")
+        self.sort_mode = self.disp.get("sort", "version")
 
         # --- 图标视图 ---
         self.icon_view = QListWidget()
