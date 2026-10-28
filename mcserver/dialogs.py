@@ -2655,8 +2655,14 @@ class ServerConfigDialog(QDialog):
         b_open = QPushButton("打开 mods 文件夹")
         b_open.clicked.connect(self._open_mods_here)
         hb.addWidget(b_open)
-        b_full = QPushButton("完整管理（含更新检查）")
-        b_full.clicked.connect(self._open_mod_dialog)
+        # ★ V2.0.6：点"完整管理"直接打开浏览模组大窗，
+        #   不再先弹"模组管理"小窗、再手动点浏览（用户反馈多一步）；
+        #   已装模组管理/更新检查移入浏览大窗的"已装模组管理"按钮
+        b_full = QPushButton("浏览装模组（完整管理）")
+        b_full.setToolTip(
+            "打开模组浏览（推荐 + 全库搜索 + 勾选安装）；\n"
+            "已装模组的启用/禁用/更新检查在浏览窗口里点『已装模组管理』")
+        b_full.clicked.connect(self._add_mod_here)
         hb.addWidget(b_full)
         v.addLayout(hb)
 
@@ -6657,6 +6663,13 @@ class ModBrowseDialog(QDialog):
         self.btn_none = QPushButton("全不选")
         self.btn_none.clicked.connect(lambda: self._set_all(False))
         hb.addWidget(self.btn_none)
+        # ★ V2.0.6：已装模组管理（启用/禁用/更新检查/打开文件夹）
+        #   —— 从配置页"完整管理"移入浏览大窗，不再多一道小窗
+        self.btn_manage = QPushButton("已装模组管理")
+        self.btn_manage.setToolTip(
+            "已装模组的启用/禁用、检查更新、打开 mods 文件夹")
+        self.btn_manage.clicked.connect(self.open_mod_manager)
+        hb.addWidget(self.btn_manage)
         hb.addStretch(1)
         self.lbl_stat = QLabel("")
         self.lbl_stat.setStyleSheet(_muted())
@@ -6792,7 +6805,8 @@ class ModBrowseDialog(QDialog):
         self.builtin_offset = 0
         self.builtin_mode = True
         self.lbl_view_hint.setText(
-            "本地推荐：已按 %s + %s 过滤版本，剔除纯客户端组件"
+            "本地推荐：已按 %s + %s 过滤版本，剔除纯客户端组件；"
+            "标注『无适配』的模组 = 作者暂未支持该版本"
             % (self.mc_version or "?", self.loader or "?"))
         self._fill_builtin()
         # ★ V1.9.5：渲染后异步逐项探测真实适配性（不进列表不阻塞，
@@ -7658,30 +7672,75 @@ class ModBrowseDialog(QDialog):
             self._compat_worker,
             {"todo": todo, "mc_version": self.mc_version,
              "loader": self.loader}, self))
+        # ★ V2.0.6：探测进度实时显示到状态栏（不再干等"检测中…"）
+        try:
+            self._compat_worker_.log.connect(self._compat_progress)
+        except Exception:
+            pass
         self._compat_worker_.done.connect(self._apply_compat)
         self._compat_worker_.start()
 
+    def _compat_progress(self, msg):
+        """★ V2.0.6：适配检测进度 → 状态栏（含完成提示）。"""
+        try:
+            s = str(msg)
+            if s.startswith("[适配检测]"):
+                self.statusBar().showMessage(
+                    "正在适配检测 %s 个推荐项（按 %s + %s 隔离）：%s"
+                    % (len(self._compat_loading) or "?",
+                       self.mc_version or "?", self.loader or "?", s),
+                    0)
+        except Exception:
+            pass
+
     @staticmethod
     def _compat_worker(kwargs, on_log=None):
-        """后台并发探测每个推荐项的适配性（8 线程，单项限时 20s）。"""
+        """后台并发探测每个推荐项的适配性（8 线程，单项限时 18s）。
+
+        ★ V2.0.6：网络抖动自动重试一轮失败项（ok=None）——
+          首次超时/网络异常不代表真不适配，重试后大多能出结论，
+          显著减少"适配检测失败"的误报。
+        """
         from .core import install as _inst
         import concurrent.futures
+        import time as _t
         todo = kwargs.get("todo") or []
         mc_version = kwargs.get("mc_version") or ""
         loader = kwargs.get("loader") or ""
-        out = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
-            futs = [(slug, ex.submit(_inst.probe_compat, meta,
-                                     mc_version, loader))
-                    for slug, meta in todo]
-            for slug, fut in futs:
-                try:
-                    r = fut.result(timeout=20)
-                except Exception:
-                    r = {"ok": None,
-                         "why": "适配检测超时，安装时再确认"}
-                out[slug] = r if isinstance(r, dict) \
-                    else {"ok": None, "why": ""}
+
+        def run_once(items):
+            res = {}
+            total = len(items)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+                futs = [(slug, ex.submit(_inst.probe_compat, meta,
+                                         mc_version, loader))
+                        for slug, meta in items]
+                for i, (slug, fut) in enumerate(futs, 1):
+                    try:
+                        r = fut.result(timeout=18)
+                    except Exception:
+                        r = {"ok": None,
+                             "why": "适配检测超时，安装时再确认"}
+                    res[slug] = r if isinstance(r, dict) \
+                        else {"ok": None, "why": ""}
+                    # ★ V2.0.6：实时进度（状态栏）
+                    if on_log:
+                        try:
+                            on_log("[适配检测] %d/%d" % (i, total))
+                        except Exception:
+                            pass
+            return res
+
+        out = run_once(todo)
+        # 只重试"无结论"（网络/超时）的项；ok=False 是真不适配，不重试
+        retry = [it for it in todo
+                 if (out.get(it[0]) or {}).get("ok") is None]
+        if retry:
+            _t.sleep(1)
+            again = run_once(retry)
+            for slug, r in again.items():
+                if r.get("ok") is not None:
+                    out[slug] = r
         return out
 
     def _apply_compat(self, ok, res):
@@ -7947,6 +8006,20 @@ class ModBrowseDialog(QDialog):
 
     def _log(self, m):
         self.log.appendPlainText(m)
+
+    def open_mod_manager(self):
+        """★ V2.0.6：浏览大窗内的"已装模组管理"入口。
+
+        打开旧"模组管理"小窗（启用/禁用/检查更新/打开文件夹），
+        原配置页"完整管理"不再先弹这个小窗挡路。
+        """
+        try:
+            d = _themed(ModDialog(self.entry, self))
+            d.exec()
+            self.installed = self._installed_slugs()
+            self._load_builtin_local()
+        except Exception as e:
+            self._log("[错误] 已装模组管理：%r" % e)
 
 
 class ModDialog(QDialog):
