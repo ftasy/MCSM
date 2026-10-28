@@ -4480,12 +4480,28 @@ class MainWindow(QMainWindow):
         if not jpath:
             j = javacore.pick_for(need)
             if not j:
+                # ★ V2.0.1.2：首次没找到 → 强制全盘重扫一次再决定
+                #   （第一次扫描偶尔因缓存/环境失败，重扫可自愈，
+                #    避免用户无谓地被弹"手动选择 java.exe"）
+                try:
+                    j = javacore.pick_for(
+                        need, javas=javacore.find_all(force=True))
+                except Exception:
+                    j = None
+            if not j:
                 # ★ V1.9.8：自动扫描没找到时，给"手动选择 java.exe"入口
                 #   （很多用户把 JDK 装在 D:\JDK 这类自定义位置，扫描可能漏）
                 if not self._ask_pick_java(e, need):
                     self._restore_start_btn(e)
                 return
             jpath = j["path"]
+            # ★ V2.0.1.2：把自动找到的 Java 记进该服配置，
+            #   下次启动直接使用，不再每次依赖扫描结果
+            try:
+                sv["java"] = jpath
+                self._save_data()
+            except Exception:
+                pass
             try:
                 self._log_console("[启动] 自动扫描选中：%s（Java %d）"
                                   % (jpath, j["major"]))
@@ -4494,10 +4510,33 @@ class MainWindow(QMainWindow):
         else:
             try:
                 info = javacore.probe(jpath)
+                if not info:
+                    raise ValueError("bad saved java")
                 self._log_console("[启动] 使用已保存 Java：%s（Java %d）"
-                                  % (jpath, (info[0] if info else "?")))
+                                  % (jpath, info[0]))
             except Exception:
-                pass
+                # ★ V2.0.1.2：已保存的 Java 失效（如相对路径/被卸载），
+                #   回退自动扫描，而不是带着坏路径硬启动
+                self._log_console("[启动] 已保存的 Java 不可用，重新扫描 ...")
+                j = javacore.pick_for(need)
+                if not j:
+                    try:
+                        j = javacore.pick_for(
+                            need, javas=javacore.find_all(force=True))
+                    except Exception:
+                        j = None
+                if not j:
+                    if not self._ask_pick_java(e, need):
+                        self._restore_start_btn(e)
+                    return
+                jpath = j["path"]
+                try:
+                    sv["java"] = jpath
+                    self._save_data()
+                except Exception:
+                    pass
+                self._log_console("[启动] 重新扫描选中：%s（Java %d）"
+                                  % (jpath, j["major"]))
 
         # ★ V1.9.12：启动主体（曾因 v1.9.8 结构错误被误放进
         #   _ask_pick_java 的 return 之后变成死代码 —— 选完 Java 后
