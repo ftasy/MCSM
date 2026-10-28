@@ -78,7 +78,32 @@ class Console(QWidget):
         self.out.document().setMaximumBlockCount(5000)
         f = QFont("Consolas", 10)
         self.out.setFont(f)
-        self.out.setStyleSheet("background:#101010; color:#d0d0d0;")
+        # ★ V2.0.1.1：用 objectName 精确选择器 —— 主窗口主题样式表
+        #   的 QTextEdit{} 规则无法覆盖 QTextEdit#console_out，
+        #   保存显示设置后输出区不再被主题刷成白底。
+        #   background-image:none 必需：主题 centralwidget 若挂了背景图，
+        #   会级联到输入类控件，浅色图会盖在深色上。
+        #   ★ 注意：滚动条样式不要写进同一份 QSS —— 完整 QSS 在主题
+        #   级联下会整个失效（背景被主题输入类规则盖掉）；滚动条改由
+        #   palette 控制（见下方 setPalette）。
+        self.out.setObjectName("console_out")
+        self.out.setStyleSheet(
+            "QTextEdit#console_out{background:#101010 !important;"
+            "background-image:none !important;"
+            "color:#e6e6e6 !important;}")
+        # ★ 滚动条亮色：直接设 palette（Button=轨道、Highlight=滑块），
+        #   不依赖 QSS，主题级联怎么改都锁得住。
+        try:
+            from PySide6.QtGui import QPalette as _QPal2
+            from PySide6.QtGui import QColor as _QCol2
+            _pal = self.out.palette()
+            _pal.setColor(_QPal2.Button, _QCol2("#1e1e1e"))
+            _pal.setColor(_QPal2.Base, _QCol2("#101010"))
+            _pal.setColor(_QPal2.Text, _QCol2("#e6e6e6"))
+            _pal.setColor(_QPal2.Highlight, _QCol2("#4a4a4a"))
+            self.out.setPalette(_pal)
+        except Exception:
+            pass
         self.out.setLineWrapMode(QTextEdit.NoWrap)
         v.addWidget(self.out, 1)
 
@@ -138,12 +163,16 @@ class Console(QWidget):
         self.ed.installEventFilter(self)
 
     def eventFilter(self, obj, event):
-        """拦截输入框的上下键，实现历史记录"""
+        """拦截输入框的上下键，实现历史记录。
+
+        ★ V2.0.1.1：Tab 补全已按用户要求移除（会和 Tab 本身行为冲突）。
+          补全仍由 QCompleter 自动弹出，上下键选择、回车确认。
+        """
         if obj is self.ed and event.type() == QEvent.KeyPress:
             # ★ 如果补全弹窗正在显示，把上下键交给 QCompleter 处理
             if self.completer and self.completer.popup() and self.completer.popup().isVisible():
                 return super().eventFilter(obj, event)
-            
+
             if event.key() == Qt.Key_Up:
                 if self.history:
                     self.history_idx = max(0, self.history_idx - 1)
@@ -509,6 +538,7 @@ class MainWindow(QMainWindow):
         self._proc_buffers = {}  # ★ 日志缓冲区，防止多字节中文截断
         # ★ V0.5.0：实时监控 + 每日定时重启的状态
         self._ping_text = {}      # key -> "在线: 3/20 | 延迟: 2ms"
+        self._mon_extra = {}      # ★ V2.0.1: key -> (cpu_pct, mem_mb) 标题监测
         self._ping_busy = set()   # 正在探测的 key（防止 10s 轮次堆积）
         self._restart_timers = {}  # 每分钟检查定时重启的 QTimer
         self._restart_countdown = {}  # 已进入 60 秒倒计时的 key
@@ -556,21 +586,22 @@ class MainWindow(QMainWindow):
             tb.addWidget(b)
             return b
 
-        act("选择目录", self.pick_and_scan, "选择总目录并扫描")
-        act("重新扫描", self.do_scan)
-        act("统一搬迁", self.do_migrate)
-        tb.addSeparator()
+        # ★ V2.0.1：『选择目录 / 重新扫描 / 统一搬迁』挪到顶部总目录行，
+        #   工具栏不再重复；导入地图/整合包/统一搬迁合并为「导入」。
         self.act_start = act("启动", self.do_start, "启动选中服务器")
         self.act_stop = act("停止", self.do_stop, "停止选中服务器")
         self.act_stop.setEnabled(False)
+        self.act_stop_backup = act(
+            "停止并备份", self.do_stop_backup,
+            "停止选中服务器，退出后自动备份存档")
+        self.act_stop_backup.setEnabled(False)
         tb.addSeparator()
         act("初始化服务端", self.do_create, "为选中项下载核心/模组/生成配置")
         act("服务器配置", self.do_config,
             "server.properties / 核心 / 模组 / 备份 / 启动设置，都在这里")
         act("分析日志", self.do_analyze,
-            "自动分析日志里的报错，离线规则匹配，不联网")
-        act("导出报错诊断", self.do_diag,
-            "收集日志和配置，方便发给别人排查")
+            "自动分析日志里的报错，离线规则匹配，不联网\n"
+            "（导出报错诊断已并入此功能）")
         act("删除服务器", self.do_delete_server,
             "删掉整个服务器文件夹（含存档）")
         tb.addSeparator()
@@ -580,10 +611,6 @@ class MainWindow(QMainWindow):
         act("检查更新", self.do_check_update,
             "检查 GitHub 上有没有新版本（后台线程，不卡界面）")
         tb.addSeparator()
-        act("导入地图", self.do_import, "把一个地图文件夹加入管理")
-        act("导入整合包", self.do_import_modpack,
-            "导入 Modrinth/CurseForge 整合包 zip：\n"
-            "自动识别类型、装对应版本核心、并发下载全部模组")
         act("打开文件夹", self.do_open_dir)
 
         # 顶部：根目录（放进 centralWidget，不用 setMenuWidget）
@@ -604,6 +631,30 @@ class MainWindow(QMainWindow):
         b = QPushButton("选择...")
         b.clicked.connect(self.pick_and_scan)
         th.addWidget(b)
+        # ★ V2.0.1：总目录行 = 选择... / 刷新 / 导入（原重新扫描改名，
+        #   统一搬迁+导入地图+导入整合包合并为「导入」下拉）
+        b_ref = QPushButton("刷新")
+        b_ref.setToolTip("重新扫描总目录，识别服务器")
+        b_ref.clicked.connect(self.do_scan)
+        th.addWidget(b_ref)
+        b_imp = QPushButton("导入")
+        b_imp.setToolTip(
+            "导入地图 / 导入整合包 / 统一搬迁（三个入口合并）")
+        from PySide6.QtWidgets import QMenu
+        m_imp = QMenu(self)
+        a_map = m_imp.addAction("导入地图...")
+        a_map.setToolTip("把一个地图文件夹加入管理")
+        a_map.triggered.connect(self.do_import)
+        a_pack = m_imp.addAction("导入整合包...")
+        a_pack.setToolTip(
+            "导入 Modrinth/CurseForge 整合包 zip：\n"
+            "自动识别类型、装对应版本核心、并发下载全部模组")
+        a_pack.triggered.connect(self.do_import_modpack)
+        a_mig = m_imp.addAction("统一搬迁...")
+        a_mig.setToolTip("把分散的地图文件夹统一搬迁到新总目录")
+        a_mig.triggered.connect(self.do_migrate)
+        b_imp.setMenu(m_imp)
+        th.addWidget(b_imp)
 
         # 左：列表（图标视图 / 表格视图，可在显示设置里切换）
         self.view_mode = self.disp.get("view", "icon")
@@ -1868,6 +1919,44 @@ class MainWindow(QMainWindow):
             pass
         return dlg
 
+    def _force_console_dark(self):
+        """V2.0.1.1：锁死所有 Console 输出区深底。
+
+        根因：QTextEdit 的可见区域是内部 viewport，主题样式表的
+        QLineEdit,QTextEdit{background-color:浅色} 会作用到 viewport，
+        而 out 自身的 QSS 管不到 viewport（真实渲染实测）。必须对
+        viewport 直接 setStyleSheet + setPalette 才能锁死 #101010。
+        """
+        try:
+            from PySide6.QtGui import QPalette as _QP
+            from PySide6.QtGui import QColor as _QC
+            _cons = list(getattr(self, "consoles", {}).values())
+            _g = getattr(self, "console", None)
+            if _g is not None:
+                _cons.append(_g)
+            for _c in _cons:
+                try:
+                    if _c is None or not hasattr(_c, "out"):
+                        continue
+                    _o = _c.out
+                    _vp = _o.viewport()
+                    if _vp is not None:
+                        _vp.setStyleSheet(
+                            "QWidget{background:#101010;color:#e6e6e6;}")
+                        _vp.setAutoFillBackground(True)
+                        _pal = _vp.palette()
+                        _pal.setColor(_QP.Base, _QC("#101010"))
+                        _pal.setColor(_QP.Text, _QC("#e6e6e6"))
+                        _pal.setColor(_QP.Button, _QC("#1e1e1e"))
+                        _pal.setColor(_QP.Highlight, _QC("#4a4a4a"))
+                        _vp.setPalette(_pal)
+                        _vp.update()
+                    _o.update()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def _apply_theme(self):
         """把主题套到整个程序上。"""
         from .core import theme as _th
@@ -1914,6 +2003,11 @@ class MainWindow(QMainWindow):
                 self.row_delegate._th_cache["t"] = 0
         except Exception:
             pass
+
+        # ★ V2.0.1.1：apply_palette 会把主题浅色写进 palette，覆盖
+        #   Console 输出区的深色。QTextEdit 可见区域是 viewport，
+        #   必须对 viewport 直接 setStyleSheet + setPalette 锁深。
+        self._force_console_dark()
             
         for _v in (getattr(self, "icon_view", None),
                    getattr(self, "table", None)):
@@ -2049,6 +2143,16 @@ class MainWindow(QMainWindow):
             "开启：图标异步加载，不阻塞列表渲染。")
         vv.addWidget(cb_icons)
 
+        # ★ V2.0.1：停止时是否询问备份（默认询问；关闭则点停止直接停）
+        cb_stop_ask = QCheckBox(
+            "点「停止」时询问是否备份（关闭后直接停止，不弹窗）")
+        cb_stop_ask.setChecked(bool(self.disp.get("stop_ask_backup", True)))
+        cb_stop_ask.setToolTip(
+            "默认开启：点停止会先问要不要备份存档；\n"
+            "关闭：点停止直接优雅停机，不弹窗。\n"
+            "需要备份请用工具栏的「停止并备份」。")
+        vv.addWidget(cb_stop_ask)
+
         vv.addWidget(QLabel(
             "提示：排序在列表上方的下拉框里选；"
             "选『自定义顺序』后可以直接拖动图标调整。"))
@@ -2093,6 +2197,8 @@ class MainWindow(QMainWindow):
                                  if cb.isChecked()]
             # ★ V1.8.10：全库搜索图标开关
             self.disp["show_icons"] = cb_icons.isChecked()
+            # ★ V2.0.1：停止时是否询问备份
+            self.disp["stop_ask_backup"] = cb_stop_ask.isChecked()
             # ★ V1.1.0：保存控制台配色
             self.disp["console_colors"] = cc["result"]()
             self.data["display"] = self.disp
@@ -2455,17 +2561,42 @@ class MainWindow(QMainWindow):
         
         # 备份完成后的回调
         def on_done(ok, res):
+            # ★ V2.0.1：完成消息同时写进该服务器的控制台页签
+            c = self.consoles.get(k)
             if not ok:
                 self._log_console("[备份] 失败: %r" % res)
                 self._log_console("[备份] 备份未完成 —— 但服务器已经关闭。")
                 self.statusBar().showMessage("备份失败（服务器已关闭）", 6000)
+                if c is not None:
+                    c.append("[备份] 失败：备份未完成，但服务器已关闭。")
                 return
-            
+
             r = res
             self._log_console("[备份] 完成: %s (%.1f MB)" % (os.path.basename(r["path"]), r["size_mb"]))
             self._log_console("[备份] 备份已完成。")
             self._log_console("=== 服务器已关闭 ===")
             self.statusBar().showMessage("备份已完成，服务器已关闭", 6000)
+            if c is not None:
+                c.append("=== 备份完成: %s (%.1f MB) ==="
+                         % (os.path.basename(r["path"]), r["size_mb"]))
+                c.append("=== 服务器已关闭 ===")
+            # ★ V2.0.1：非模态弹窗，明确提示备份已完成（置顶，防被遮挡）
+            try:
+                from PySide6.QtWidgets import QMessageBox
+                box = QMessageBox(self)
+                box.setIcon(QMessageBox.Information)
+                box.setWindowTitle("备份完成")
+                box.setText("服务器「%s」已停止，备份完成。\n\n"
+                            "%s（%.1f MB）"
+                            % (e.get("name", ""),
+                               os.path.basename(r["path"]),
+                               r["size_mb"]))
+                box.setStandardButtons(QMessageBox.Ok)
+                box.setWindowModality(Qt.NonModal)
+                box.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+                box.show()
+            except Exception:
+                pass
             
         def on_done_and_cleanup(ok, res):
             self._forget_worker(w)  # ★ 清理线程对象
@@ -3346,6 +3477,17 @@ class MainWindow(QMainWindow):
         fmt = versions.pack_format(e.get("version")) if e.get("version") else None
         newmeta = versions.uses_new_packmeta(e.get("version")) \
             if e.get("version") else None
+        self._fill_info_detail(e, need, fmt, newmeta)
+
+        running = self._key(e) in self.procs
+        self.act_stop.setEnabled(running)
+        self.act_start.setEnabled(not running)
+
+    def _fill_info_detail(self, e, need=None, fmt=None, newmeta=None):
+        """信息面板：服务器详情视图（未运行时显示）。
+
+        ★ V2.0.1.1：抽出来供 _update_info_monitor 停止后恢复用。
+        """
         lines = [
             "<b>%s</b>" % (e.get("world_name")
                            or self._display_name(e)),
@@ -3372,9 +3514,33 @@ class MainWindow(QMainWindow):
                          % "；".join(e["notes"]))
         self.info.setHtml("<br>".join(lines))
 
-        running = self._key(e) in self.procs
-        self.act_stop.setEnabled(running)
-        self.act_start.setEnabled(not running)
+    def _update_info_monitor(self):
+        """★ V2.0.1.1：信息面板监测视图。
+
+        当前选中的服务器在运行时，把"信息"面板替换成实时监测
+        （在线/延迟/CPU/内存）；停止或停止并备份后自动恢复详情视图。
+        """
+        try:
+            e = self._cur()
+            if not e:
+                return
+            k = self._key(e)
+            if k not in self.procs:
+                self._fill_info_detail(e)
+                return
+            txt = self._ping_text.get(k) or "运行中"
+            cpu, mem = getattr(self, "_mon_extra", {}).get(k, (None, None))
+            name = e.get("world_name") or self._display_name(e)
+            lines = ["<b>%s</b>" % name,
+                     "<font color='#2e7d32'>● 运行中</font>",
+                     txt]
+            if cpu is not None:
+                lines.append("CPU: <b>%.0f%%</b>" % cpu)
+            if mem is not None:
+                lines.append("内存: <b>%.0f MB</b>" % mem)
+            self.info.setHtml("<br>".join(lines))
+        except Exception:
+            pass
 
     def _display_name(self, e):
         """界面显示名：优先用户自定义重命名（display_name），否则原名。"""
@@ -3859,10 +4025,17 @@ class MainWindow(QMainWindow):
         if not e:
             self.act_start.setEnabled(False)
             self.act_stop.setEnabled(False)
+            self.act_stop_backup.setEnabled(False)
             return
         running = self._key(e) in self.procs
         self.act_start.setEnabled(not running)
         self.act_stop.setEnabled(running)
+        self.act_stop_backup.setEnabled(running)
+        # ★ V2.0.1：选中变化时同步窗口标题监测
+        try:
+            self._update_title_monitor()
+        except Exception:
+            pass
 
     # ---------------- V0.5.0：实时状态监控 ----------------
     def _ping_round(self):
@@ -3881,11 +4054,31 @@ class MainWindow(QMainWindow):
                 continue
             self._ping_busy.add(k)
             port = self._port_of(e)
+            proc = self.procs.get(k)
+            pid = 0
+            try:
+                if proc is not None and proc.state() == QProcess.Running:
+                    pid = int(proc.processId() or 0)
+            except Exception:
+                pid = 0
 
-            def job(port=port):
-                return monitor.live_status(port)
+            def job(port=port, pid=pid, on_log=None):
+                r = monitor.live_status(port)
+                # ★ V2.0.1：进程 CPU/内存（只对真在跑的 java 进程）
+                if r.get("online") and pid > 0:
+                    st = monitor.proc_stats(pid)
+                    r["cpu_pct"] = st.get("cpu_pct")
+                    r["mem_mb"] = st.get("mem_mb")
+                return r
 
             w = _track(self, Worker(job, {}, self))
+            # ★ V2.0.1.1：ping 线程异常打到总输出，便于排查"无响应"
+            try:
+                w.log.connect(
+                    lambda m, kk=k: self._log_console(
+                        "[ping:%s] %s" % (kk, m)))
+            except Exception:
+                pass
             w.done.connect(
                 lambda ok, res, kk=k: self._on_ping_done(kk, ok, res))
             w.start()
@@ -3894,15 +4087,70 @@ class MainWindow(QMainWindow):
         self._ping_busy.discard(key)
         if key not in self.procs:
             self._ping_text.pop(key, None)
+            getattr(self, "_mon_extra", {}).pop(key, None)
+            self._update_title_monitor()
             return
         # ★ V1.5.0：成功显示"运行中 (在线: X/Y | 延迟: Zms)"，
         #   失败显示"运行中 (无响应)"，状态列一眼看懂
         text = monitor.ping_text(res) if ok else None
         if text:
             self._ping_text[key] = "运行中 (" + text + ")"
+            # ★ V2.0.1：CPU/内存供窗口标题监测用
+            m = getattr(self, "_mon_extra", {})
+            if ok and isinstance(res, dict) \
+                    and res.get("cpu_pct") is not None:
+                m[key] = (res.get("cpu_pct"), res.get("mem_mb"))
         else:
             self._ping_text[key] = "运行中 (无响应)"
         self._apply_ping_ui(key)
+        # ★ V2.0.1.1：标题/信息面板更新各自兜底 —— 任一抛异常
+        #   都不能中断另一处（此前 __version__ NameError 曾让
+        #   信息面板监测整个失效）
+        try:
+            self._update_title_monitor()
+        except Exception:
+            pass
+        # ★ V2.0.1.1：信息面板同步实时监测（仅当前选中该服时生效）
+        try:
+            self._update_info_monitor()
+        except Exception:
+            pass
+
+    def _update_title_monitor(self):
+        """★ V2.0.1：窗口标题 = 版本号 + 运行中服务器的实时监测。
+
+        有服务器在运行 → "MC 服务器管理器 v2.0.0 | 服务器名 在线 X/Y
+        | 延迟 Zms | CPU 12% | 内存 1560 MB …"；
+        停止后自动恢复纯版本号标题。
+        """
+        from . import __version__  # ★ V2.0.1.1：此前未导入导致 NameError
+        base = "MC 服务器管理器 v%s" % __version__
+        running = []
+        for en in self.entries:
+            k = self._key(en)
+            if k not in self.procs:
+                continue
+            name = en.get("name", "")
+            txt = self._ping_text.get(k)
+            cpu, mem = getattr(self, "_mon_extra", {}).get(k, (None, None))
+            bits = []
+            if txt:
+                bits.append(txt)
+            if cpu is not None:
+                bits.append("CPU %.0f%%" % cpu)
+            if mem is not None:
+                bits.append("内存 %.0f MB" % mem)
+            running.append((name, " | ".join(bits)))
+        if not running:
+            self.setWindowTitle(base)
+            return
+        parts = []
+        for name, info in running[:2]:
+            parts.append("%s %s" % (name, info) if info else name)
+        extra = " · ".join(parts)
+        if len(running) > 2:
+            extra += " 等 %d 台" % len(running)
+        self.setWindowTitle("%s | %s" % (base, extra))
 
     def _apply_ping_ui(self, key):
         """把监控文本刷到表格状态列 + 图标卡片文字上。"""
@@ -4601,6 +4849,7 @@ class MainWindow(QMainWindow):
         # ★ V0.5.0：计划重启标记提前取出；顺带清掉监控/倒计时状态
         is_plan = self._plan_restart.pop(key, False)
         self._ping_text.pop(key, None)
+        getattr(self, "_mon_extra", {}).pop(key, None)
         self._restart_countdown.pop(key, None)
         if key in self._restart_timers:
             self._restart_timers[key].stop()
@@ -4621,6 +4870,11 @@ class MainWindow(QMainWindow):
                 if self._key(en) == key:
                     self._refresh_status(en)
                     break
+        # ★ V2.0.1.1：服务器退出后信息面板恢复详情视图
+        try:
+            self._update_info_monitor()
+        except Exception:
+            pass
         if self.procs:
             self.statusBar().showMessage(
                 "已停止（还有 %d 个在运行）" % len(self.procs), 4000)
@@ -4769,23 +5023,28 @@ class MainWindow(QMainWindow):
             # ★ V1.1.0：没在运行直接提示，不弹备份确认框
             QMessageBox.information(self, "提示", "这个服没在运行")
             return
-        # ★ V1.1.0：停止时询问是否在停止后备份存档
-        r = QMessageBox.question(
-            self, "停止服务器",
-            "是否在停止后备份存档？\n\n"
-            "· 是：服务器退出后自动备份存档\n"
-            "  （格式按『服务器配置 → 备份』里的备份格式）\n"
-            "· 否：只停止，不备份",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if r == QMessageBox.Yes:
-            self.do_stop_backup(k, e, proc)
-            return
+        # ★ V2.0.1：是否弹「停止后备份？」由显示设置勾选决定
+        #   （disp["stop_ask_backup"]，默认 True；关闭则直接停止）
+        ask = self.disp.get("stop_ask_backup", True)
+        if ask:
+            r = QMessageBox.question(
+                self, "停止服务器",
+                "是否在停止后备份存档？\n\n"
+                "· 是：服务器退出后自动备份存档\n"
+                "  （格式按『服务器配置 → 备份』里的备份格式）\n"
+                "· 否：只停止，不备份\n\n"
+                "（可在『显示设置 → 列表』勾选关闭此弹窗）",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if r == QMessageBox.Yes:
+                self.do_stop_backup(k, e, proc)
+                return
         self._is_stopping[k] = True
         # ★ 立刻给反馈。以前点了停止什么提示都没有，
         #   服务器其实在慢慢保存世界，用户会以为卡住了。
         self._log_console("=== 正在停止，等待世界保存完毕 ===")
         self.statusBar().showMessage("正在停止 %s ..." % e.get("name"))
         self.act_stop.setEnabled(False)
+        self.act_stop_backup.setEnabled(False)
         try:
             proc.write(b"stop\n")
         except Exception:
@@ -5079,6 +5338,13 @@ def main():
             pass
         w = MainWindow()
         w.show()
+        # ★ V2.0.1.1：窗口真正显示后再强制一次输出区深底 ——
+        #   viewport 的深色样式只有在控件已 show 后重设才绝对生效。
+        try:
+            w._force_console_dark()
+            app.processEvents()
+        except Exception:
+            pass
         sys.exit(app.exec())
     except Exception as e:
         logging.exception("程序发生未捕获的致命异常：")

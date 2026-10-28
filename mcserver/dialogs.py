@@ -5334,6 +5334,12 @@ class AnalyzeDialog(QDialog):
         b_log = QPushButton("打开日志文件夹")
         b_log.clicked.connect(self.open_log_dir)
         h.addWidget(b_log)
+        # ★ V2.0.1：导出报错诊断并入分析日志（原工具栏独立按钮删除）
+        b_diag = QPushButton("导出诊断包")
+        b_diag.setToolTip(
+            "收集日志与配置到一个文件夹/zip，方便发给别人排查")
+        b_diag.clicked.connect(self.export_diag)
+        h.addWidget(b_diag)
         v.addLayout(h)
 
         # 结果列表
@@ -5487,6 +5493,18 @@ class AnalyzeDialog(QDialog):
                              creationflags=nw)
         except Exception:
             pass
+
+    # ★ V2.0.1：导出报错诊断并入分析日志（原工具栏独立入口删除）
+    def export_diag(self):
+        """打开导出诊断包对话框（复用 DiagDialog）。"""
+        try:
+            dlg = DiagDialog(self.entry,
+                             console_text=self.console_text,
+                             parent=self)
+            dlg.exec()
+        except Exception:
+            import traceback
+            traceback.print_exc()
 
     # ============ V1.0.0 AI 深度诊断 ============
 
@@ -6446,7 +6464,12 @@ class ModBrowseDialog(QDialog):
         #   落盘缓存跨会话复用（TTL 24h），探测结果驱动勾选禁用与
         #   卡片红字原因 —— 不再"声称已过滤版本"却装不上。
         self._compat = install.compat_cache_load()
+        # ★ V2.0.1：清掉历史写坏的 None 结论（无结论不缓存，
+        #   下次打开重新探测，避免"适配检测中…"被固化 24 小时）
+        self._compat = {k: v for k, v in self._compat.items()
+                        if v and v[0] is not None}
         self._compat_loading = set()  # 正在探测的 slug（防重复）
+        self._compat_fail = {}        # ★ V2.0.1: slug -> why（探测失败/无结论，内存）
         self._icons_dir = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "icons")
@@ -7247,6 +7270,9 @@ class ModBrowseDialog(QDialog):
         installed = _inst_hit(slug, title, self.installed)
 
         card = QWidget()
+        # ★ V2.0.1：卡片存原始数据，供适配探测落地后原地重建标签行
+        card._meta = h
+        card._builtin = builtin
         # ★ V1.6.2：卡片底色跟随主题（深色主题=深卡片，浅色主题=浅卡片），
         #   标题文字用主题字体色，彻底解决"黑字黑底看不见"。
         _card_bg = "#1e1f29"
@@ -7354,37 +7380,12 @@ class ModBrowseDialog(QDialog):
         rt.addWidget(lb_desc)
 
         # 标签行（★ V1.8.2：纯平铺、无分组标题；desc 的 [标签] 彩色渲染）
-        tags = []
-        # ★ V1.9.5：推荐项先查适配缓存，未命中显示"适配检测中…"，
-        #   探测结果回来由 _apply_compat 落卡片（禁用/红字/绿字）。
-        _ck = None
-        if builtin:
-            # 彩色小标签排最前（PCL2 风格，第三行灰字）
-            for t in _tags_desc:
-                tags.append('<span style="color:%s; font-weight:bold;">'
-                            '[%s]</span>'
-                            % (self._TAG_COLORS.get(t, "#8ab4ff"), t))
-            if req:
-                tags.append("前置: " + "、".join(req))
-            _ck = self._compat.get(self._compat_key(slug))
-            if _ck and _ck[0] is False:
-                tags.append('<span style="color:#ef4444;'
-                            'font-weight:bold;">⚠ %s</span>'
-                            % _esc_html(_ck[1]))
-            elif _ck and _ck[0] is True:
-                tags.append("版本兼容已按当前服过滤")
-            else:
-                tags.append("适配检测中…")
-        else:
-            if cat_txt:
-                tags.append("分类 " + cat_txt)
-            if dl:
-                tags.append("下载 " + _fmt_num(dl))
-            tags.append("%s + %s" % (self.mc_version or "?",
-                                     self.loader or "?"))
-        if installed:
-            tags.append("已安装（勾选可覆盖更新）")
-        lb_tags = QLabel("  ".join(tags))
+        # ★ V1.9.5 / V2.0.1：统一走 _build_tags —— 探测结果回来由
+        #   _rebuild_tags 原地重建同一行标签（含失败文案），
+        #   不再只写"适配检测中…"挂一辈子。
+        _tags_html, _ck = self._build_tags(
+            slug, title, _tags_desc, req, builtin, cat_txt, dl)
+        lb_tags = QLabel(_tags_html)
         lb_tags.setTextFormat(Qt.RichText)
         lb_tags.setStyleSheet(
             "color:#6b7280; font-size:10px; background:transparent;")
@@ -7502,6 +7503,97 @@ class ModBrowseDialog(QDialog):
         return "%s|%s|%s" % (self.mc_version or "?", self.loader or "?",
                              slug)
 
+    def _build_tags(self, slug, title, _tags_desc, req, builtin,
+                    cat_txt, dl):
+        """构建一张卡片的标签行 HTML（含适配结论）。
+
+        ★ V2.0.1：探测结论（False 红字 / True 兼容 / 失败灰字 /
+          未命中"适配检测中…"）在这里统一决定，_make_card 渲染与
+          _rebuild_tags 原地更新共用同一逻辑，绝不出现
+          "适配检测中…"挂一辈子。
+        """
+        tags = []
+        _ck = None
+        installed = _inst_hit(slug, title, self.installed)
+        if builtin:
+            # 彩色小标签排最前（PCL2 风格，第三行灰字）
+            for t in _tags_desc:
+                tags.append('<span style="color:%s; font-weight:bold;">'
+                            '[%s]</span>'
+                            % (self._TAG_COLORS.get(t, "#8ab4ff"), t))
+            if req:
+                tags.append("前置: " + "、".join(req))
+            _ck = self._compat.get(self._compat_key(slug))
+            if _ck and _ck[0] is False:
+                tags.append('<span style="color:#ef4444;'
+                            'font-weight:bold;">⚠ %s</span>'
+                            % _esc_html(_ck[1]))
+            elif _ck and _ck[0] is True:
+                tags.append("版本兼容已按当前服过滤")
+            elif slug in self._compat_fail:
+                # ★ V2.0.1：探测失败/无结论 —— 明确告诉用户，
+                #   不再是永远"适配检测中…"
+                _why = self._compat_fail.get(slug) or "网络异常"
+                tags.append('<span style="color:#9aa0b0;">适配检测失败'
+                            '（%s），安装时再确认</span>'
+                            % _esc_html(_why[:60]))
+            else:
+                tags.append("适配检测中…")
+        else:
+            if cat_txt:
+                tags.append("分类 " + cat_txt)
+            if dl:
+                tags.append("下载 " + _fmt_num(dl))
+            tags.append("%s + %s" % (self.mc_version or "?",
+                                     self.loader or "?"))
+        if installed:
+            tags.append("已安装（勾选可覆盖更新）")
+        return "  ".join(tags), _ck
+
+    def _rebuild_tags(self, card):
+        """★ V2.0.1：按卡片存的原始数据原地重建标签行（适配结果落地）。"""
+        h = getattr(card, "_meta", None)
+        if not h:
+            return
+        builtin = getattr(card, "_builtin", False)
+        slug = h.get("slug") or ""
+        title = h.get("title") or slug
+        _raw = (h.get("description") or "").replace("\n", " ")
+        _tags_desc = re.findall(r"\[([^\[\]]+)\]", _raw)
+        req = h.get("req") or []
+        dl = h.get("downloads")
+        cats = h.get("categories") or []
+        cat_txt = "、".join(
+            dict(modman.CATEGORIES).get(c, c) for c in cats[:3])
+        html, _ = self._build_tags(slug, title, _tags_desc, req,
+                                   builtin, cat_txt, dl)
+        lbl = getattr(card, "_tags_lbl", None)
+        if lbl is not None:
+            lbl.setText(html)
+
+    def _apply_compat_text(self, slug, ok, why):
+        """★ V2.0.1：按探测结论更新推荐列表里一张卡片的勾选与标签。"""
+        for i in range(self.list_builtin.count()):
+            it = self.list_builtin.item(i)
+            if it.data(Qt.UserRole) != slug:
+                continue
+            if ok is False:
+                chk = getattr(it, "_chk", None)
+                if chk is not None:
+                    chk.blockSignals(True)
+                    chk.setChecked(False)
+                    chk.setEnabled(False)
+                    chk.blockSignals(False)
+            elif ok is None:
+                chk = getattr(it, "_chk", None)
+                if chk is not None:
+                    # 失败只解禁（避免之前残留禁用），保持可勾选安装时再确认
+                    chk.setEnabled(True)
+            card = self.list_builtin.itemWidget(it)
+            if card is not None:
+                self._rebuild_tags(card)
+            break
+
     def _probe_compat(self):
         """收集推荐列表里还没结论的项，后台并发探测适配性。"""
         todo = []
@@ -7518,6 +7610,14 @@ class ModBrowseDialog(QDialog):
             return
         for slug, _m in todo:
             self._compat_loading.add(slug)
+        # ★ V2.0.1：明确告知适配检测在后台运行（不再是无声状态）
+        try:
+            self.statusBar().showMessage(
+                "正在适配检测 %d 个推荐项（按 %s + %s 隔离）..."
+                % (len(todo), self.mc_version or "?", self.loader or "?"),
+                0)
+        except Exception:
+            pass
         self._compat_worker_ = _track(self, Worker(
             self._compat_worker,
             {"todo": todo, "mc_version": self.mc_version,
@@ -7549,7 +7649,12 @@ class ModBrowseDialog(QDialog):
         return out
 
     def _apply_compat(self, ok, res):
-        """探测结果落地：不适配 → 禁用勾选 + 红字原因；并写缓存。"""
+        """探测结果落地：不适配 → 禁用勾选 + 红字原因；并写缓存。
+
+        ★ V2.0.1：无结论（网络失败/超时/未设置版本）只刷卡片灰字文案，
+          不写缓存 —— 避免"适配检测中…"被固化 24 小时；
+          下次打开会重新探测。
+        """
         if not isinstance(res, dict):
             return
         changed = False
@@ -7558,31 +7663,24 @@ class ModBrowseDialog(QDialog):
             if not isinstance(r, dict):
                 continue
             key = self._compat_key(slug)
+            if r.get("ok") is None:
+                self._compat_fail[slug] = r.get("why") or "网络异常"
+                self._apply_compat_text(slug, None, r.get("why") or "")
+                continue
             cur = self._compat.get(key)
             if cur and cur[0] is not None:
                 continue  # 已有结论的不覆盖（防止过期响应互踩）
             self._compat[key] = (r.get("ok"), r.get("why") or "")
+            self._compat_fail.pop(slug, None)
             changed = True
-        for i in range(self.list_builtin.count()):
-            it = self.list_builtin.item(i)
-            slug = it.data(Qt.UserRole)
-            if not slug:
-                continue
-            r = self._compat.get(self._compat_key(slug))
-            if not r or r[0] is not False:
-                continue
-            chk = getattr(it, "_chk", None)
-            if chk is not None:
-                chk.blockSignals(True)
-                chk.setChecked(False)
-                chk.setEnabled(False)
-                chk.blockSignals(False)
-            card = self.list_builtin.itemWidget(it)
-            if card is not None and getattr(card, "_tags_lbl", None):
-                card._tags_lbl.setText(
-                    "<span style='color:#ef4444;font-weight:bold;'>"
-                    "⚠ %s</span>" % _esc_html(r[1]))
+            self._apply_compat_text(slug, r.get("ok"), r.get("why") or "")
         self._sync_count()
+        # ★ V2.0.1：探测结束提示
+        try:
+            if not self._compat_loading:
+                self.statusBar().showMessage("适配检测完成", 3000)
+        except Exception:
+            pass
         if changed:
             install.compat_cache_save(self._compat)
 
