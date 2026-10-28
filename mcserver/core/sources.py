@@ -319,12 +319,22 @@ def _get_json_auto(path, timeout=30, headers=None, log=None):
 #  CurseForge（经 MCIM 镜像，免 key）
 # =========================================================
 def _cf_headers():
-    h = {"User-Agent": "MCServerManager/0.1",
-         "Accept": "application/json"}
+    h = {"User-Agent": "MCServerManager/0.1",         "Accept": "application/json"}
     k = get_cf_key()
     if k:
         h["x-api-key"] = k
     return h
+
+
+def _cf_base_auto():
+    """★ V2.0.4：CurseForge 请求基底 —— 官方源没配 API Key 时自动退回
+    MCIM 镜像（镜像免 key），不再每次搜索都被"官方 CF 需要 API Key"
+    拦死。官方有 key 或当前生效源是 MCIM 时正常走原逻辑。
+    返回 (base, headers)。
+    """
+    if _resolve() != "mcim" and not get_cf_key():
+        return MCIM_CURSEFORGE, {}
+    return curseforge_base(), _cf_headers()
 
 
 def cf_search(query="", mc_version=None, loader=None,
@@ -345,9 +355,9 @@ def cf_search(query="", mc_version=None, loader=None,
     #   只要实际生效的是 MCIM（health/探测已确认可用），就免 key；
     #   旧写法 get_mirror()=="auto" 永远不等于 "mcim"，auto 用户
     #   即使 MCIM 通也一律报"需要 API key"，CF 安装直接全挂。
-    if _resolve() != "mcim" and not get_cf_key():
-        return {"hits": [], "total": 0,
-                "err": "官方 CF 需要 API Key，建议切换 MCIM 镜像"}
+    # ★ V2.0.4：官方无 key 不再拦截 —— _cf_base_auto() 自动退回
+    #   MCIM 镜像（免 key），只有镜像也不通才报错。
+    base, headers = _cf_base_auto()
     # CurseForge classId：6=模组，5=Bukkit/Spigot 插件
     _cid = 5 if project_type == "plugin" else CF_MOD_CLASS
     params = {
@@ -372,7 +382,7 @@ def cf_search(query="", mc_version=None, loader=None,
 
     path = "/v1/mods/search?" + urllib.parse.urlencode(params)
     try:
-        d = _get_json(curseforge_base(), path, headers=_cf_headers())
+        d = _get_json(base, path, headers=headers)
     except Exception as e:
         return {"hits": [], "total": 0, "err": _brief(e)}
     raw = (d or {}).get("data") or []
@@ -402,7 +412,7 @@ def cf_search(query="", mc_version=None, loader=None,
             (query or "").strip().lower()]
         path = "/v1/mods/search?" + urllib.parse.urlencode(params)
         try:
-            d = _get_json(curseforge_base(), path, headers=_cf_headers())
+            d = _get_json(base, path, headers=headers)
         except Exception:
             d = None
         for m in ((d or {}).get("data") or []):
@@ -475,7 +485,8 @@ def cf_download_url(cf_id, mc_version=None, loader=None):
     """
     path = "/v1/mods/%s/files" % cf_id
     try:
-        d = _get_json(curseforge_base(), path, headers=_cf_headers())
+        base, headers = _cf_base_auto()
+        d = _get_json(base, path, headers=headers)
     except Exception as e:
         return {"err": _brief(e)}
     files = (d or {}).get("data") or []
@@ -521,7 +532,8 @@ def cf_file_url(project_id, file_id):
     """按精确 projectID + fileID 拿 CurseForge 文件直链（整合包清单用）。"""
     path = "/v1/mods/%s/files/%s" % (project_id, file_id)
     try:
-        d = _get_json(curseforge_base(), path, headers=_cf_headers())
+        base, headers = _cf_base_auto()
+        d = _get_json(base, path, headers=headers)
     except Exception as e:
         return {"err": _brief(e)}
     f = (d or {}).get("data") or {}

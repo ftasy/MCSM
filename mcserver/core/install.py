@@ -1330,7 +1330,7 @@ def collect_diag(server_dir, out_dir=None, extra_log=None):
 
 
 def _m(slug, name, desc, group, req=(), max_ver=None, source="modrinth",
-       repo=None):
+       repo=None, branch=None):
     """极简清单条目。
 
     max_ver：该模组最高支持的 MC 版本（如 LazyDFU 只到 1.18.2）。
@@ -1340,10 +1340,14 @@ def _m(slug, name, desc, group, req=(), max_ver=None, source="modrinth",
       指定 curseforge，install_mods / install_plugins 下载时按此分流。
     repo：★ V1.9.4：GitHub Releases 发布的插件（如 MultiLogin），
       指定 owner/name 后下载时走 GitHub 分支（sources.github_latest_jar）。
+    branch：★ V2.0.4：分支项目 —— (阈值版本, 替代 slug)。
+      当前服 MC 版本 >= 阈值时改用替代 slug 下载/探测。
+      如 ModernFix：1.21.5+ 原版停更不支持，改用社区版
+      modernfix-mvus（支持小版本更新的 fork）；更早版本用原版。
     """
     return {"slug": slug, "name": name, "desc": desc,
             "group": group, "req": list(req), "max_ver": max_ver,
-            "source": source, "repo": repo}
+            "source": source, "repo": repo, "branch": branch}
 
 
 MOD_TARGETS = {
@@ -1390,7 +1394,8 @@ MOD_TARGETS = {
         _m("c2me-fabric", "C2ME",
            "多线程区块生成与保存，跑图/预生成快很多 [优化]", ""),
         _m("modernfix", "ModernFix",
-           "修复 Mojang 的性能 bug，还加快启动 [优化]", ""),
+           "修复 Mojang 的性能 bug，还加快启动 [优化]", "",
+           branch=("1.21.5", "modernfix-mvus")),
         _m("krypton", "Krypton", "优化网络包处理，人多时明显 [优化]", ""),
         _m("servercore", "ServerCore",
            "服务端综合优化，可按 MSPT 动态调视距 [优化]", ""),
@@ -1439,7 +1444,8 @@ MOD_TARGETS = {
            "聊天记录上限与历史增强（暂无 NeoForge 版，失败按日志提示） [聊天]", ""),
         # 保留核心项
         _m("ferrite-core", "FerriteCore", "减少内存占用 [优化]", ""),
-        _m("modernfix", "ModernFix", "修复性能 bug + 加快启动 [优化]", ""),
+        _m("modernfix", "ModernFix", "修复性能 bug + 加快启动 [优化]", "",
+           branch=("1.21.5", "modernfix-mvus")),
         _m("krypton", "Krypton", "优化网络包处理 [优化]", ""),
         _m("saturn", "Saturn", "减少内存占用 [优化]", ""),
         _m("lithium", "Lithium", "优化游戏逻辑 [优化]", ""),
@@ -1480,7 +1486,8 @@ MOD_TARGETS = {
         # 保留核心项
         _m("ferrite-core", "FerriteCore",
            "减少内存占用（1.20.1 需开 populateNeighborTable 防崩溃） [优化]", ""),
-        _m("modernfix", "ModernFix", "修复性能 bug + 加快启动 [优化]", ""),
+        _m("modernfix", "ModernFix", "修复性能 bug + 加快启动 [优化]", "",
+           branch=("1.21.5", "modernfix-mvus")),
         _m("krypton-fnp", "Krypton FNP (Forge版)",
            "优化网络包处理（Forge 非官方重构版） [优化]", ""),
         _m("alternate-current", "Alternate Current",
@@ -1936,8 +1943,8 @@ def _cf_compat(cf_id, mc_version, loader):
     from . import sources as _s
     path = "/v1/mods/%s/files" % cf_id
     try:
-        d = _s._get_json(_s.curseforge_base(), path,
-                         headers=_s._cf_headers())
+        base, headers = _s._cf_base_auto()
+        d = _s._get_json(base, path, headers=headers)
     except Exception:
         raise  # 网络/无 key/镜像问题统一交上层判 None
     files = (d or {}).get("data") or []
@@ -1971,6 +1978,37 @@ def _cf_compat(cf_id, mc_version, loader):
         mc_version or "?", loader or "?", hint)
 
 
+def _ver_ge(a, b):
+    """粗判版本号 a >= b（数值段比较）。
+
+    用于分支项目阈值判断（如 1.21.5 / 26.3 vs 1.21.5）。
+    """
+    if not a or not b:
+        return False
+    if str(a).strip() == str(b).strip():
+        return True
+    try:
+        from . import modman as _mm
+        return _mm._ver_newer(str(a), str(b))
+    except Exception:
+        return False
+
+
+def effective_slug(meta, mc_version=None):
+    """★ V2.0.4：分支项目按 MC 版本返回实际安装的 slug。
+
+    branch=(阈值版本, 替代 slug)：当前服版本 >= 阈值时改用替代 slug。
+    如 ModernFix：1.21.5+ 原版停更不支持，用社区版 modernfix-mvus
+    （支持小版本更新的 fork）；1.21.4 及更早用原版 modernfix。
+    无 branch 的项目原样返回原 slug。
+    """
+    slug = (meta or {}).get("slug") or ""
+    br = meta.get("branch") or ()
+    if br and len(br) >= 2 and mc_version and _ver_ge(mc_version, br[0]):
+        return br[1]
+    return slug
+
+
 def probe_compat(meta, mc_version, loader):
     """探测一个推荐项在当前服（版本+加载器）下能否安装。
 
@@ -1980,6 +2018,9 @@ def probe_compat(meta, mc_version, loader):
     slug = (meta or {}).get("slug") or ""
     if not mc_version:
         return {"ok": None, "why": "未设置服务器版本，安装时再确认"}
+    # ★ V2.0.4：分支项目（如 ModernFix 1.21.5+ 用社区版）按版本解析
+    #   实际 slug 再探测，避免"原版没适配"误判成装不了。
+    slug = effective_slug(meta, mc_version)
     source = (meta.get("source") or "modrinth").lower()
     repo = meta.get("repo") or ""
     try:
@@ -2156,8 +2197,11 @@ def install_mods(server_dir, mc_version, loader, on_log=None,
             def _note(attempt, e, wait):
                 log("    [%s] 网络不稳（%s），%.1fs 后重试..."
                     % (desc, _brief(e), wait))
+            # ★ V2.0.4：分支项目（如 ModernFix 1.21.5+ 社区版）按版本
+            #   解析实际下载 slug，原版没适配也能装社区版。
+            dl_slug = effective_slug(meta, mc_version)
             # 获取版本信息（双重兜底已在 modrinth_pick 内实现）
-            v = modrinth_pick(slug, mc_version, loader, on_retry=_note)
+            v = modrinth_pick(dl_slug, mc_version, loader, on_retry=_note)
             if not v:
                 return False, slug, desc, "无 %s+%s 版本" % (mc_version, loader)
 

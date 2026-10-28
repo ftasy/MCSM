@@ -7255,6 +7255,15 @@ class ModBrowseDialog(QDialog):
         """
         slug = h.get("slug") or ""
         title = h.get("title") or slug
+        # ★ V2.0.4：分支项目（ModernFix 1.21.5+ 社区版）——
+        #   Modrinth 链接/存在性探测指向实际安装的项目
+        #   （原版在 1.21.5+ 没有适配版本，链接过去看不到东西）。
+        _eff = slug
+        try:
+            from .core import install as _inst
+            _eff = _inst.effective_slug(h, self.mc_version) or slug
+        except Exception:
+            pass
         _raw_desc = (h.get("description") or "").replace("\n", " ")
         # ★ V1.8.2：提取 desc 里的 [标签] 用于彩色渲染，简介正文去掉标签
         _tags_desc = re.findall(r"\[([^\[\]]+)\]", _raw_desc)
@@ -7342,7 +7351,7 @@ class ModBrowseDialog(QDialog):
                             "font-size:11px;}"
                             "QPushButton:hover{color:#8ab4ff;}")
         b_mod.clicked.connect(
-            lambda _c, s=slug: self._open_modlink("modrinth", s, title))
+            lambda _c, s=_eff: self._open_modlink("modrinth", s, title))
         b_mc = QPushButton("[MC百科]")
         b_mc.setCursor(Qt.PointingHandCursor)
         b_mc.setStyleSheet("QPushButton{border:none;color:#5b8def;"
@@ -7368,6 +7377,7 @@ class ModBrowseDialog(QDialog):
         card._site_btns = {"modrinth": b_mod, "mcmod": b_mc,
                            "curseforge": b_cf}
         card._site_slug = slug
+        card._site_mod_slug = _eff  # ★ V2.0.4：Modrinth 探测用实际分支 slug
         card._site_name = title
         rt.addLayout(h1)
 
@@ -7433,16 +7443,22 @@ class ModBrowseDialog(QDialog):
                 if card is None or not getattr(card, "_site_btns", None):
                     continue
                 slug = getattr(card, "_site_slug", "") or ""
-                if not slug or slug in self._site_loading:
+                if not slug:
                     continue
                 name = getattr(card, "_site_name", "") or slug
                 st = self._site_cache.get(slug) or {}
                 for kind, b in card._site_btns.items():
                     if b.isVisible() or kind in st:
                         continue  # 已显示，或已有结论（保持隐藏）
-                    todo.append((slug, name, kind))
-                if todo and slug not in self._site_loading:
-                    self._site_loading.add(slug)
+                    # ★ V2.0.4：Modrinth 站点用实际分支 slug 探测
+                    #   （ModernFix 1.21.5+ 原版没有适配版本）
+                    s = slug
+                    if kind == "modrinth":
+                        s = getattr(card, "_site_mod_slug", None) or slug
+                    if not s or s in self._site_loading:
+                        continue
+                    todo.append((s, name, kind))
+                    self._site_loading.add(s)
         if not todo:
             return
         self._probe_worker_ = _track(self, Worker(
@@ -7487,7 +7503,11 @@ class ModBrowseDialog(QDialog):
         slug = getattr(card, "_site_slug", "") or ""
         st = self._site_cache.get(slug) or {}
         for kind, b in btns.items():
-            v = st.get(kind)
+            # ★ V2.0.4：Modrinth 用实际分支 slug 查缓存（与探测 key 一致）
+            s = slug
+            if kind == "modrinth":
+                s = getattr(card, "_site_mod_slug", None) or slug
+            v = (self._site_cache.get(s) or {}).get(kind)
             if v is None:
                 continue
             if v and not b.isVisible():
@@ -7739,29 +7759,17 @@ class ModBrowseDialog(QDialog):
         self.search()
 
     def ask_mirror(self):
-        """镜像源设置：非模态（show() 而非 exec()），实例由 self._src_dialog
-        持有，点确定（accepted）后立即保存并刷新全库列表。"""
-        try:
-            d = getattr(self, "_src_dialog", None)
-            if d is None:
-                # ★ V1.9.0：修复旧代码 SourceDialog(self, self) 双参
-                #   TypeError（__init__ 只接受一个 parent）被静默吞掉
-                d = _themed(SourceDialog(self))
-                self._src_dialog = d
-                d.accepted.connect(self._on_src_saved)
-            d.show()
-            d.raise_()
-            d.activateWindow()
-        except Exception as e:
-            self._log("[错误] 镜像源设置：%r" % e)
+        """镜像源设置：★ V2.0.4 改回模态 exec()。
 
-    def _on_src_saved(self):
-        """★ V1.9.0：源设置保存后立即生效（写入 sources.json + 刷新 + 重搜）。"""
+        旧版非模态 show() 的 SourceDialog 会一直挂在屏幕上不消失，
+        用户每次操作（搜索/翻页）都看到它，误以为"每次搜索都弹窗"。
+        模态 exec() 关掉才返回，杜绝残留；保存后立即刷新并重搜。
+        """
         try:
-            from .core import sources as _src
-            d = getattr(self, "_src_dialog", None)
-            if d is None:
+            d = _themed(SourceDialog(self))
+            if d.exec() != QDialog.Accepted:
                 return
+            from .core import sources as _src
             mirror, key = d.values()
             _src.set_mirror(mirror)
             _src.set_cf_key(key)
@@ -7778,8 +7786,8 @@ class ModBrowseDialog(QDialog):
                 self._log("[源] CurseForge API Key 已保存（本地 sources.json）")
             # 保存后立即用新源重新搜索全库列表
             self.search()
-        except Exception:
-            pass
+        except Exception as e:
+            self._log("[错误] 镜像源设置：%r" % e)
 
     def do_probe(self):
         """探测所有下载源（后台 Worker，避免卡 UI）。

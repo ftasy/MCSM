@@ -588,14 +588,9 @@ def install_from_project(slug, mc_version, loader, mods_dir,
             cf_id = sources.cf_resolve_id(
                 slug, mc_version=mc_version, loader=loader)
             if not cf_id:
-                # ★ V1.9.3：把"可能缺 key"说清楚 —— 官方 CF 无 key 时
-                #   搜索会 403，和"项目真的不存在"是两回事。
-                from . import sources as _s
-                if _s._resolve() != "mcim" and not _s.get_cf_key():
-                    return {"ok": False,
-                            "reason": "找不到 %s 的 CurseForge 项目："
-                                      "当前是官方源且未配 API Key，"
-                                      "请把下载源切到 MCIM 镜像再试" % slug}
+                # ★ V2.0.4：官方 CF 无 key 已由 sources._cf_base_auto()
+                #   自动退回 MCIM 镜像，这里不再有"缺 key"分支；
+                #   只剩"项目真不存在 / 镜像索引缺失"一种可能。
                 return {"ok": False,
                         "reason": "CurseForge 上找不到 %s"
                                   "（可能没收录，或镜像索引缺失）" % slug}
