@@ -2270,13 +2270,6 @@ class MainWindow(QMainWindow):
             pass
         if e is not None:
             self.statusBar().showMessage("就绪", 3000)
-        # ★ V1.9.6：启动失败/中止路径统一在这里解锁防重入锁
-        #   （do_start 里的提前 return 分支不再各自 discard）。
-        try:
-            if e is not None:
-                self._starting.discard(self._key(e))
-        except Exception:
-            pass
 
     # ★ V1.6.0：双击卡片/行 = 未运行就启动，运行中就停止
     #   （服务器配置改从右键菜单进）
@@ -4158,18 +4151,13 @@ class MainWindow(QMainWindow):
         k = self._key(e)
         if k in self.procs:
             return
-        # ★ V1.9.6：防重入 —— 启动流程可能异步（下载登录组件），
-        #   期间再点一次"启动"会重复走 do_start（防火墙放行两次、
-        #   两个 Worker 抢着启动）。用 _starting 记下"正在启动"的服。
-        starting = getattr(self, "_starting", None)
-        if starting is None:
-            starting = self._starting = set()
-        if k in starting:
-            return
-        starting.add(k)
         # ★ V1.6.0：点击启动立即给反馈并禁用按钮，防止狂点。
         #   真正启动成功后 _refresh_actions() 会重设按钮；
         #   提前中止的路径各自调用 _restore_start_btn 恢复。
+        # ★ V1.9.11：移除 v1.9.6 的 _starting 防重入锁 —— 它的
+        #   _finish_start 中间层让启动路径变复杂，且锁的释放时机
+        #   一旦出错就会"点启动完全没反应"。恢复最直接的链路：
+        #   do_start → _prepare_auth → _go_start_now（v1.9.5 结构）。
         self.statusBar().showMessage(
             "正在启动: %s ..." % (e.get("name") or e.get("folder")), 0)
         try:
@@ -4186,12 +4174,10 @@ class MainWindow(QMainWindow):
                                 "没有 run.bat 也没有服务端 jar，"
                                 "请先『初始化服务端』")
             self._restore_start_btn(e)
-            self._starting.discard(k)
             return
 
         if not self._check_port_conflict(e):
             self._restore_start_btn(e)
-            self._starting.discard(k)
             return
 
         # ★ V0.4.0：防火墙自动放行 server-port（静默，失败不打断启动）
@@ -4199,27 +4185,18 @@ class MainWindow(QMainWindow):
 
         # ★ V1.3.0：登录环境准备（正版/离线 即时处理；
         #   多源共存 需下载登录组件时先走 Worker，完成后自动继续启动）
-        self._prepare_auth(
-            e, lambda: self._finish_start(e, auto_restart, k))
+        self._prepare_auth(e, lambda: self._finish_start(e, auto_restart))
 
-    def _finish_start(self, e, auto_restart, k):
-        """登录环境就绪后的启动延续。★ V1.9.7：无条件解锁防重入锁。
+    def _finish_start(self, e, auto_restart):
+        """登录环境就绪后的启动延续（★ V1.9.11：无锁版本）。
 
-        之前"只在 procs 里有该服才解锁"——如果 _go_start_now 抛异常
-        （缺 Java 之外的意外、保存数据出错等），finally 里条件不满足，
-        锁永远不解锁：该服从此点启动没反应，按钮也可能被禁用。
-        现在 finally 无条件 discard；同步路径下第二次连点已被
-        do_start / _go_start_now 入口的 procs 检查拦截（同一 UI 线程
-        同步执行，进程已登记），异步下载期间 _finish_start 尚未被调用，
-        锁自然保持 —— 两种场景都安全。
+        直接调 _go_start_now；异常一律留痕（manager.log 完整堆栈 +
+        控制台红字），绝不静默吞掉 —— 这是"点启动没反应"的根治。
         """
         try:
             self._go_start_now(e, auto_restart)
         except Exception:
             # 异常路径：恢复按钮/状态栏，绝不把启动按钮永久禁用。
-            # ★ V1.9.9：异常必须留痕 —— 之前静默吞掉，启动失败完全
-            #   看不到原因（如 v1.9.6 的 NameError 让"点启动没反应"）。
-            #   现在写 manager.log 完整堆栈，并在控制台给一行红色提示。
             try:
                 import traceback as _tb
                 _tb.print_exc()
@@ -4236,11 +4213,6 @@ class MainWindow(QMainWindow):
                     "[启动异常] 启动流程出错，详见 manager.log 或上方堆栈")
             except Exception:
                 pass
-        finally:
-            try:
-                self._starting.discard(k)
-            except Exception:
-                pass
 
     def _go_start_now(self, e, auto_restart=False):
         k = self._key(e)
@@ -4251,6 +4223,12 @@ class MainWindow(QMainWindow):
         need = versions.need_java(v) if v else None
         sv = self._saved(e)
         jpath = sv.get("java")
+        # ★ V1.9.10：启动过程逐步诊断 —— 卡在哪一步，控制台直接看到
+        try:
+            self._log_console("[启动] 第 1 步：查找 Java %s ..."
+                              % (need or "（任意版本）"))
+        except Exception:
+            pass
         if not jpath:
             j = javacore.pick_for(need)
             if not j:
@@ -4260,6 +4238,179 @@ class MainWindow(QMainWindow):
                     self._restore_start_btn(e)
                 return
             jpath = j["path"]
+            try:
+                self._log_console("[启动] 自动扫描选中：%s（Java %d）"
+                                  % (jpath, j["major"]))
+            except Exception:
+                pass
+        else:
+            try:
+                info = javacore.probe(jpath)
+                self._log_console("[启动] 使用已保存 Java：%s（Java %d）"
+                                  % (jpath, (info[0] if info else "?")))
+            except Exception:
+                pass
+
+        # ★ V1.9.12：启动主体（曾因 v1.9.8 结构错误被误放进
+        #   _ask_pick_java 的 return 之后变成死代码 —— 选完 Java 后
+        #   什么都不做，这就是"点启动没反应"的真相。现在移回这里）。
+        # ★ 读取 Aikar 优化开关
+        use_aikar = sv.get("aikar", False)
+        raw_xms = sv.get("xms", 1024)
+        raw_xmx = sv.get("xmx", 4096)
+        # Aikar 官方强烈建议 Xms 和 Xmx 保持一致
+        if use_aikar:
+            raw_xmx = raw_xms
+        xms = "%dM" % raw_xms
+        xmx = "%dM" % raw_xmx
+
+        launch_mode = "jar"
+        # ★ V1.9.9：jar_name 必须初始化为 None，由 find_launch 覆盖，
+        #   否则会抛 NameError（历史 bug 根因）。
+        jar_name = None
+        args_rel = None
+        try:
+            L = install.find_launch(sd)
+            launch_mode = L.get("launch") or "jar"
+            args_rel = L.get("args_rel")
+            jar_name = (os.path.join(sd, L["jar"])
+                        if L.get("jar") else None)
+            try:
+                self._log_console("[启动] 第 2 步：核心检测 OK（%s：%s）"
+                                  % (launch_mode,
+                                     jar_name or args_rel or "?"))
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # ★ V1.9.12（终版）：用 QProcess 启动 java，输出流进
+        #   软件内右下角控制台页签（用户明确要的形态：主页点启动 →
+        #   右下角输出窗口新建该服务器的监控页签并滚动显示服务器日志）。
+        proc = QProcess(self)
+        proc.setWorkingDirectory(sd)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyRead.connect(lambda p=proc: self._read(p))
+        proc.finished.connect(lambda code, st, p=proc: self._finished(p, code))
+        # ★ A1：FailedToStart 不走 finished，不接这个信号 UI 会卡死在"运行中"
+        proc.errorOccurred.connect(
+            lambda err, p=proc: self._start_failed(p, err))
+        # ★ V1.9.10：进程真正起来后打印 PID —— 确认"到了哪一步"
+        try:
+            proc.started.connect(
+                lambda p=proc: self._log_console(
+                    "[启动] 进程已启动 PID=%d" % (p.processId() or 0)))
+        except Exception:
+            pass
+
+        if launch_mode == "argsfile" and args_rel:
+            # 新版 Forge：java @user_jvm_args.txt @...\win_args.txt
+            uj = os.path.join(sd, "user_jvm_args.txt")
+            aikar_args = builder.AIKAR_FLAGS if use_aikar else []
+            try:
+                if not os.path.isfile(uj):
+                    with open(uj, "w", encoding="utf-8") as f:
+                        f.write("-Xms%s\n-Xmx%s\n" % (xms, xmx))
+                        if aikar_args:
+                            f.write("\n".join(aikar_args) + "\n")
+                elif aikar_args:
+                    with open(uj, "r", encoding="utf-8") as f:
+                        c = f.read()
+                    need = False
+                    if "-XX:+UseG1GC" not in c:
+                        c = c.rstrip("\n") + "\n" + "\n".join(aikar_args) + "\n"
+                        need = True
+                    m = re.search(r"-Xmx(\S+)", c)
+                    if m and m.group(1) != ("%s" % xms):
+                        c = re.sub(r"-Xmx\S+", "-Xmx%s" % xms, c)
+                        need = True
+                    if need:
+                        with open(uj, "w", encoding="utf-8") as f:
+                            f.write(c)
+            except Exception:
+                pass
+            # ★ 绝对路径即可。QProcess 会自动为带空格的参数加双引号，
+            #   如果这里手动加了双引号，反而会被转义成 "\"@...\"" 导致 Java 认不出。
+            proc.start(jpath, ["@" + uj,
+                               "@" + os.path.join(sd, args_rel),
+                               "nogui"])
+        elif launch_mode == "jar" and jar_name and os.path.isfile(jar_name):
+            java_args = ["-Xms%s" % xms, "-Xmx%s" % xmx]
+            if use_aikar:
+                java_args.extend(builder.AIKAR_FLAGS)
+            java_args.extend(["-jar", jar_name, "nogui"])
+            proc.start(jpath, java_args)
+        elif os.path.isfile(bat):
+            # 兜底：实在判断不出来才走 bat
+            proc.start(bat, [])
+        else:
+            QMessageBox.warning(self, "无法启动",
+                                "没找到可启动的核心，"
+                                "请先『初始化服务端』")
+            self._restore_start_btn(e)
+            return
+
+        # ★ 隐患 3：把"是不是自动重启"记在 proc 上，
+        #   _start_failed 据此决定是否弹窗（自动重启失败不弹）
+        try:
+            proc._auto_restart = bool(auto_restart)
+        except Exception:
+            pass
+        self.procs[k] = proc
+        self._is_stopping[k] = False
+        # ★ 只有手动启动才重置崩溃计数，自动重启不能重置，否则会无限循环
+        if not auto_restart:
+            self.auto_restart_count[k] = 0
+
+        # 记录最近开服时间（"按最近开服"排序要用）
+        try:
+            import time as _t
+            sv = self.data.setdefault("servers", {}).setdefault(k, {})
+            sv["last_start"] = _t.time()
+            self._save_data()
+
+            # ★ 开启定时备份
+            if sv.get("auto_backup"):
+                interval = sv.get("backup_interval", 30) * 60 * 1000
+                if k in self.auto_backup_timers:
+                    self.auto_backup_timers[k].stop()
+                timer = QTimer(self)
+                timer.timeout.connect(lambda: self._do_auto_backup(k, e))
+                timer.start(interval)
+                self.auto_backup_timers[k] = timer
+                self._log_console(f"[备份] 已开启定时备份，每 {sv.get('backup_interval')} 分钟一次")
+
+            # ★ V0.5.0：每日定时重启（每分钟检查一次，命中就倒计时重启）
+            rt = sv.get("auto_restart_time") or ""
+            if rt:
+                if k in self._restart_timers:
+                    self._restart_timers[k].stop()
+                rt_timer = QTimer(self)
+                rt_timer.timeout.connect(lambda: self._check_restart_time(k, e))
+                rt_timer.start(60000)
+                self._restart_timers[k] = rt_timer
+                self._log_console("[定时重启] 已开启，每天 %s 自动重启"
+                                  % rt)
+                # 启动后立即检查一次（配置时间刚好到点的场景）
+                self._check_restart_time(k, e)
+        except Exception:
+            pass
+
+        # ★ 每个服务器一个独立控制台页签（右下角输出窗口）。
+        #   新建/切到该服务器的监控页签，服务器输出滚动显示在这里。
+        c = self._console_tab(k, e.get("name") or "服务器")
+        c.proc = proc
+        c.set_running(True)
+        c.clear()
+        c.append("=== 启动 %s ===" % (e.get("name")))
+        self.console_tabs.setCurrentIndex(self.console_tabs.indexOf(c))
+
+        self._refresh_actions()
+        self._refresh_status(e)
+        self._warn_bad_levelname(e)
+        self.statusBar().showMessage(
+            "运行中: %s（共 %d 个在运行）"
+            % (e.get("name"), len(self.procs)))
 
     def _ask_pick_java(self, e, need):
         """自动扫描没找到 Java 时，让用户手动指定 java.exe。
@@ -4307,159 +4458,10 @@ class MainWindow(QMainWindow):
             pass
         self._log_console("[Java] 已指定 %s (Java %d)" % (jp, major))
         return True
-        # ★ 读取 Aikar 优化开关
-        use_aikar = sv.get("aikar", False)
-        raw_xms = sv.get("xms", 1024)
-        raw_xmx = sv.get("xmx", 4096)
-        # Aikar 官方强烈建议 Xms 和 Xmx 保持一致
-        if use_aikar:
-            raw_xmx = raw_xms
-        xms = "%dM" % raw_xms
-        xmx = "%dM" % raw_xmx
 
-        proc = QProcess(self)
-        proc.setWorkingDirectory(sd)
-        proc.setProcessChannelMode(QProcess.MergedChannels)
-        proc.readyRead.connect(lambda p=proc: self._read(p))
-        proc.finished.connect(lambda code, st, p=proc: self._finished(p, code))
-        # ★ A1：FailedToStart 不走 finished，不接这个信号 UI 会卡死在"运行中"
-        proc.errorOccurred.connect(
-            lambda err, p=proc: self._start_failed(p, err))
-
-        # ★ 不走 run.bat，直接启动 java。
-        #   原因：run.bat 结尾有 pause（"按任意键继续"），
-        #   在管理器里启动的话，那个 pause 会卡住子进程 ——
-        #   服务器已经关了，但进程不退出，你得跑到 cmd 窗口
-        #   按一下键才能结束。这就是"关闭很久"的原因。
-        #   直接调 java 还能拿到准确退出码。
-        launch_mode = "jar"
-        # ★ V1.9.9：jar_name = jar 引用的是 do_start 的局部变量，
-        #   这里作用域不存在 → 每次点启动必抛 NameError，被 _finish_start
-        #   的 except 静默吞掉 → 现象就是"点启动没反应、java 没起"。
-        #   改成 None，由下面 find_launch 正常覆盖。
-        jar_name = None
-        args_rel = None
-        try:
-            L = install.find_launch(sd)
-            launch_mode = L.get("launch") or "jar"
-            args_rel = L.get("args_rel")
-            jar_name = (os.path.join(sd, L["jar"])
-                        if L.get("jar") else None)
-        except Exception:
-            pass
-
-        if launch_mode == "argsfile" and args_rel:
-            # 新版 Forge：java @user_jvm_args.txt @...\win_args.txt
-            uj = os.path.join(sd, "user_jvm_args.txt")
-            aikar_args = builder.AIKAR_FLAGS if use_aikar else []
-            try:
-                if not os.path.isfile(uj):
-                    with open(uj, "w", encoding="utf-8") as f:
-                        f.write("-Xms%s\n-Xmx%s\n" % (xms, xmx))
-                        if aikar_args:
-                            f.write("\n".join(aikar_args) + "\n")
-                elif aikar_args:
-                    # 已存在：补上 Aikar 参数（防重复），并保证 Xmx 与 Xms 一致
-                    with open(uj, "r", encoding="utf-8") as f:
-                        c = f.read()
-                    need = False
-                    if "-XX:+UseG1GC" not in c:
-                        c = c.rstrip("\n") + "\n" + "\n".join(aikar_args) + "\n"
-                        need = True
-                    m = re.search(r"-Xmx(\S+)", c)
-                    if m and m.group(1) != ("%s" % xms):
-                        c = re.sub(r"-Xmx\S+", "-Xmx%s" % xms, c)
-                        need = True
-                    if need:
-                        with open(uj, "w", encoding="utf-8") as f:
-                            f.write(c)
-            except Exception:
-                pass
-            # ★ 绝对路径即可。QProcess 会自动为带空格的参数加双引号，
-            #   如果这里手动加了双引号，反而会被转义成 "\"@...\"" 导致 Java 认不出。
-            proc.start(jpath, ["@" + uj,
-                               "@" + os.path.join(sd, args_rel),
-                               "nogui"])
-        elif launch_mode == "jar" and jar_name and os.path.isfile(jar_name):
-            # ★ 直接用 java 启动，绕开 run.bat 里的 pause
-            java_args = ["-Xms%s" % xms, "-Xmx%s" % xmx]
-            if use_aikar:
-                java_args.extend(builder.AIKAR_FLAGS)
-            java_args.extend(["-jar", jar_name, "nogui"])
-            proc.start(jpath, java_args)
-        elif os.path.isfile(bat):
-            # 兜底：实在判断不出来才走 bat
-            proc.start(bat, [])
-        else:
-            QMessageBox.warning(self, "无法启动",
-                                "没找到可启动的核心，"
-                                "请先『初始化服务端』")
-            self._restore_start_btn(e)
-            return
-
-        # ★ 隐患 3：把"是不是自动重启"记在 proc 上，
-        #   _start_failed 据此决定是否弹窗（自动重启失败不弹）
-        try:
-            proc._auto_restart = bool(auto_restart)
-        except Exception:
-            pass
-        self.procs[k] = proc
-        self._is_stopping[k] = False
-        # ★ 只有手动启动才重置崩溃计数，自动重启不能重置，否则会无限循环
-        if not auto_restart:
-            self.auto_restart_count[k] = 0
-        
-        # 记录最近开服时间（"按最近开服"排序要用）
-        try:
-            import time as _t
-            sv = self.data.setdefault("servers", {}).setdefault(k, {})
-            sv["last_start"] = _t.time()
-            self._save_data()
-            
-            # ★ 开启定时备份
-            if sv.get("auto_backup"):
-                interval = sv.get("backup_interval", 30) * 60 * 1000
-                if k in self.auto_backup_timers:
-                    self.auto_backup_timers[k].stop()
-                timer = QTimer(self)
-                timer.timeout.connect(lambda: self._do_auto_backup(k, e))
-                timer.start(interval)
-                self.auto_backup_timers[k] = timer
-                self._log_console(f"[备份] 已开启定时备份，每 {sv.get('backup_interval')} 分钟一次")
-
-            # ★ V0.5.0：每日定时重启（每分钟检查一次，命中就倒计时重启）
-            rt = sv.get("auto_restart_time") or ""
-            if rt:
-                if k in self._restart_timers:
-                    self._restart_timers[k].stop()
-                rt_timer = QTimer(self)
-                rt_timer.timeout.connect(lambda: self._check_restart_time(k, e))
-                rt_timer.start(60000)
-                self._restart_timers[k] = rt_timer
-                self._log_console("[定时重启] 已开启，每天 %s 自动重启"
-                                  % rt)
-                # 启动后立即检查一次（配置时间刚好到点的场景）
-                self._check_restart_time(k, e)
-        except Exception:
-            pass
-
-        # ★ 每个服务器一个独立控制台页签。
-        #   以前共用一个 console + 一个 proc 指针：
-        #   开第二个会把 proc 覆盖掉，输入框就打到错的服上，
-        #   而且第一个服退出时 set_running(False) 会把输入框锁死。
-        c = self._console_tab(k, e.get("name") or "服务器")
-        c.proc = proc
-        c.set_running(True)
-        c.clear()
-        c.append("=== 启动 %s ===" % (e.get("name")))
-        self.console_tabs.setCurrentIndex(self.console_tabs.indexOf(c))
-
-        self._refresh_actions()
-        self._refresh_status(e)
-        self._warn_bad_levelname(e)
-        self.statusBar().showMessage(
-            "运行中: %s（共 %d 个在运行）"
-            % (e.get("name"), len(self.procs)))
+    # ★ V1.9.12：下方原为 v1.9.8 结构错误遗留的死代码（误放在
+    #   _ask_pick_java 的 return 之后，永不执行）—— 已整体移回
+    #   _go_start_now 并重写为"独立窗口启动"。此处不再保留。
 
     def _read(self, proc):
         # ★ 把 readAll 和 state() 一起放进 try ——

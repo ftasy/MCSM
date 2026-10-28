@@ -667,7 +667,8 @@ class JavaPick(QGroupBox):
         w.start()
 
     def _scan_job(self, on_log=None):
-        return javacore.find_all()
+        # ★ V1.9.10：手动点『重新扫描』才强制全盘重扫；平时用缓存
+        return javacore.find_all(force=True)
 
     def _on_scan_done(self, ok, res):
         if not ok or not isinstance(res, list):
@@ -2322,6 +2323,15 @@ class ServerConfigDialog(QDialog):
         f1.addRow("核心文件:", self.lbl_core)
         self.lbl_loader = QLabel(self.entry.get("loader") or "未知")
         f1.addRow("加载器:", self.lbl_loader)
+        # ★ V1.9.10：刷新 —— 重新检测当前核心/加载器
+        hbf = QHBoxLayout()
+        self.btn_core_refresh = QPushButton("刷新")
+        self.btn_core_refresh.setToolTip(
+            "重新检测服务器目录里的核心 jar 和加载器类型")
+        self.btn_core_refresh.clicked.connect(self._core_refresh)
+        hbf.addWidget(self.btn_core_refresh)
+        hbf.addStretch(1)
+        f1.addRow("", hbf)
         v.addWidget(g1)
 
         g2 = QGroupBox("选择 / 更换核心")
@@ -2342,6 +2352,12 @@ class ServerConfigDialog(QDialog):
         self.btn_switch = QPushButton("下载并更换")
         self.btn_switch.clicked.connect(self._switch_core)
         hb.addWidget(self.btn_switch)
+        # ★ V1.9.10：浏览 —— 手动指定已下载好的核心 jar
+        self.btn_core_browse = QPushButton("浏览...")
+        self.btn_core_browse.setToolTip(
+            "手动选择一个已下载好的核心 jar（如 fabric.jar / paper.jar）直接替换")
+        self.btn_core_browse.clicked.connect(self._core_browse)
+        hb.addWidget(self.btn_core_browse)
         hb.addStretch(1)
         v2.addLayout(hb)
 
@@ -2371,6 +2387,92 @@ class ServerConfigDialog(QDialog):
 
         v.addStretch(1)
         return w
+
+    # ---------- V1.9.10：核心页 加载器 刷新/浏览 ----------
+    def _core_refresh(self):
+        """刷新：重新检测服务器目录里的核心 jar，并推断加载器类型。"""
+        sd = self.entry.get("server_dir") or self.entry["folder"]
+        cj = install.find_core(sd)
+        self.lbl_core.setText(
+            os.path.basename(cj) if cj else "未识别到核心")
+        loader = self._guess_loader_from_core(cj)
+        if loader:
+            self.lbl_loader.setText(loader)
+            try:
+                i = self.cb_loader.findText(loader)
+                if i >= 0:
+                    self.cb_loader.setCurrentIndex(i)
+            except Exception:
+                pass
+        else:
+            self.lbl_loader.setText("未知")
+
+    def _guess_loader_from_core(self, cj):
+        """从核心 jar 文件名推断加载器类型（fabric/paper/forge/neoforge/vanilla）。"""
+        if not cj:
+            return None
+        n = os.path.basename(cj).lower()
+        for ld in ("fabric", "paper", "forge", "neoforge"):
+            if ld in n:
+                return ld
+        if n.startswith("minecraft_server") or n == "server.jar":
+            return "vanilla"
+        return None
+
+    def _core_browse(self):
+        """浏览：手动选择一个已下载好的核心 jar 直接替换。"""
+        sd = self.entry.get("server_dir") or self.entry["folder"]
+        filt = ("JAR 文件 (*.jar);;所有文件 (*)" if os.name == "nt"
+                else "All Files (*)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择服务端核心 jar", "", filt)
+        if not path:
+            return
+        try:
+            import shutil as _sh
+            cj = install.find_core(sd)
+            old = os.path.basename(cj) if cj else None
+            r = QMessageBox.question(
+                self, "更换核心",
+                "将用你选中的 jar 替换当前核心%s。\n\n"
+                "选中的文件会复制进服务器目录，源文件保留。\n"
+                "存档、模组、server.properties 不受影响。\n\n"
+                "继续吗？"
+                % ("（%s）" % old if old else ""),
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if r != QMessageBox.Yes:
+                return
+            if cj:
+                try:
+                    os.remove(cj)
+                except Exception:
+                    _force_drop = getattr(install, "_force_drop", None)
+                    if _force_drop:
+                        _force_drop(cj, lambda m: None)
+                    else:
+                        QMessageBox.warning(
+                            self, "删除旧核心失败",
+                            "旧核心文件被占用无法删除，请关闭相关程序后重试。")
+                        return
+            dst = os.path.join(sd, os.path.basename(path))
+            _sh.copy2(path, dst)
+            self.lbl_core.setText(os.path.basename(dst))
+            ld = self._guess_loader_from_core(dst)
+            self.lbl_loader.setText(ld or "未知")
+            if ld:
+                try:
+                    i = self.cb_loader.findText(ld)
+                    if i >= 0:
+                        self.cb_loader.setCurrentIndex(i)
+                except Exception:
+                    pass
+            self._need_rescan = True
+            QMessageBox.information(
+                self, "核心已更换",
+                "已用 %s 替换核心。\n可点『启动』测试；"
+                "如启动报错请检查版本与加载器是否匹配。" % os.path.basename(dst))
+        except Exception as ex:
+            QMessageBox.critical(self, "更换核心失败", repr(ex))
 
     def _switch_core(self):
         """真正换核心：删旧的 -> 下新的，带进度日志。"""

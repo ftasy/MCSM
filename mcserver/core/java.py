@@ -71,8 +71,25 @@ def probe(path):
     return (major, first[:80])
 
 
-def find_all():
-    """扫描系统里所有 Java，返回 [{path, major, version}]。"""
+_SCAN_CACHE = None  # ★ V1.9.10：扫描结果缓存 —— 启动不再反复全盘扫描
+
+
+def invalidate():
+    """清掉 Java 扫描缓存（用户主动点『重新扫描』时用）。"""
+    global _SCAN_CACHE
+    _SCAN_CACHE = None
+
+
+def find_all(force=False):
+    """扫描系统里所有 Java，返回 [{path, major, version}]。
+
+    ★ V1.9.10：结果缓存 —— 第一次调用全盘扫描，之后直接返回缓存；
+    force=True（用户手动刷新）才重新扫描。启动流程用缓存，不再
+    每次点启动都全盘扫一遍。
+    """
+    global _SCAN_CACHE
+    if not force and _SCAN_CACHE is not None:
+        return _SCAN_CACHE
     found = {}
     seen = set()
 
@@ -80,12 +97,13 @@ def find_all():
         if not p:
             return
         p = os.path.abspath(p)
-        if p in seen:
+        np = os.path.normcase(p)  # ★ V1.9.10：大小写去重（D:\JDK 与 D:\jdk 同目录）
+        if np in seen:
             return
-        seen.add(p)
+        seen.add(np)
         info = probe(p)
         if info:
-            found[p] = {"path": p, "major": info[0], "version": info[1]}
+            found[np] = {"path": p, "major": info[0], "version": info[1]}
 
     # 1) PATH 里的 java
     try:
@@ -125,7 +143,9 @@ def find_all():
         except Exception:
             pass
 
-    return sorted(found.values(), key=lambda x: (-x["major"], x["path"]))
+    res = sorted(found.values(), key=lambda x: (-x["major"], x["path"]))
+    _SCAN_CACHE = res
+    return res
 
 
 def pick_for(need, javas=None, mc_version=None):

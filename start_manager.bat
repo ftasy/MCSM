@@ -20,7 +20,7 @@ for /f "tokens=*" %%i in ('!PY! -c "import sys;print(sys.executable)"') do set "
 set "PYW=!PYW:\python.exe=\pythonw.exe!"
 if not exist "!PYW!" set "PYW=!PYW:\pythonw.exe=\python.exe!"
 start "" "!PYW!" -m mcserver
-goto END
+exit /b 0
 
 :NOPY
 echo.
