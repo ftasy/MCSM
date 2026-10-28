@@ -64,9 +64,28 @@ from . import updater   # ★ V1.6.0：软件更新检测
 
 DATA_FILE = "servers.json"
 
+# ★ V2.0.3：控制台配色默认跟随主题（和信息面板一致）。
+#   旧默认/历史测试值视为"未自定义"，自动迁移到当前主题色。
+#   bg 旧默认：深黑 #101010（V2.0.2 默认）、#e2e4e6/#f0f0f0（用户试过的浅灰）、
+#              #f4f6f8（浅灰白主题自身）
+#   info 旧默认：#e6e6e6（V2.0 前）、#cfcfcf（V2.0.2 调深默认）
+_CONSOLE_STALE_BG = {"#e2e4e6", "#f0f0f0", "#101010", "#f4f6f8"}
+_CONSOLE_STALE_INFO = {"#e6e6e6", "#cfcfcf"}
+
 
 class Console(QWidget):
     """单个服务器的控制台。"""
+
+    @staticmethod
+    def _theme_colors():
+        """当前主题 (fg, bg)——控制台默认配色跟随它，和信息面板一致。"""
+        try:
+            t = theme.get()
+            fg = t.get("fg") or "#1a1a1a"
+            bg = t.get("bg") or "#f4f6f8"
+            return fg, bg
+        except Exception:
+            return "#1a1a1a", "#f4f6f8"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -87,23 +106,8 @@ class Console(QWidget):
         #   级联下会整个失效（背景被主题输入类规则盖掉）；滚动条改由
         #   palette 控制（见下方 setPalette）。
         self.out.setObjectName("console_out")
-        self.out.setStyleSheet(
-            "QTextEdit#console_out{background:#101010 !important;"
-            "background-image:none !important;"
-            "color:#e6e6e6 !important;}")
-        # ★ 滚动条亮色：直接设 palette（Button=轨道、Highlight=滑块），
-        #   不依赖 QSS，主题级联怎么改都锁得住。
-        try:
-            from PySide6.QtGui import QPalette as _QPal2
-            from PySide6.QtGui import QColor as _QCol2
-            _pal = self.out.palette()
-            _pal.setColor(_QPal2.Button, _QCol2("#1e1e1e"))
-            _pal.setColor(_QPal2.Base, _QCol2("#101010"))
-            _pal.setColor(_QPal2.Text, _QCol2("#e6e6e6"))
-            _pal.setColor(_QPal2.Highlight, _QCol2("#4a4a4a"))
-            self.out.setPalette(_pal)
-        except Exception:
-            pass
+        # ★ V2.0.2：背景/文字色由 _apply_console_bg() 按 self._bg 统一设置
+        #   （不再硬编码 #101010；颜色相近时文字自动调整）
         self.out.setLineWrapMode(QTextEdit.NoWrap)
         v.addWidget(self.out, 1)
 
@@ -121,21 +125,91 @@ class Console(QWidget):
         self.proc_name = ""
         self.proc_key = None
 
+        # ★ V2.0.3：控制台背景/文字默认跟随主题（和信息面板一致）
+        th_fg, th_bg = Console._theme_colors()
+        self._bg = th_bg
+        self._fit_cache = {}
         # ★ V1.1.0：控制台配色（可被「显示设置 → 控制台配色」覆盖）
         self._colors = dict(self.DEFAULT_COLORS)
+        self._colors["info"] = th_fg
+        self._apply_console_bg()
+
+    def _apply_console_bg(self):
+        """按 self._bg 刷新输出区背景与默认文字色（viewport 锁）。
+
+        QTextEdit 的可见区域是内部 viewport，主题样式表的输入类 QSS
+        会作用到 viewport；必须对 viewport 直接 setStyleSheet + setPalette
+        才锁得住背景。文字色与背景太相近时自动调整保证可读。
+        """
+        try:
+            from PySide6.QtGui import QPalette as _QP
+            from PySide6.QtGui import QColor as _QC
+            txt = self._fit(self._colors.get("info") or "#cfcfcf")
+            self.out.setStyleSheet(
+                "QTextEdit#console_out{background:%s !important;"
+                "background-image:none !important;"
+                "color:%s !important;}" % (self._bg, txt))
+            # ★ 滚动条亮色：直接设 palette（Button=轨道、Highlight=滑块）
+            _pal = self.out.palette()
+            _pal.setColor(_QP.Button, _QC("#1e1e1e"))
+            _pal.setColor(_QP.Base, _QC(self._bg))
+            _pal.setColor(_QP.Text, _QC(txt))
+            _pal.setColor(_QP.Highlight, _QC("#4a4a4a"))
+            self.out.setPalette(_pal)
+        except Exception:
+            pass
+
+    def _fit(self, color):
+        """文字色与背景太相近时自动调整（复用 theme.ensure_contrast）。
+
+        背景亮就把字往黑推、背景暗就往白推，保留原有色相感；
+        结果按 (背景,文字) 缓存，日志刷屏时不重复计算。
+        """
+        try:
+            key = (self._bg, color)
+            v = self._fit_cache.get(key)
+            if v is None:
+                from .core import theme as _th
+                v, _ = _th.ensure_contrast(color, self._bg, 4.5)
+                self._fit_cache[key] = v
+            return v
+        except Exception:
+            return color
 
     def set_colors(self, colors):
-        """应用自定义控制台配色（None / 空 dict = 恢复默认）。"""
+        """应用自定义控制台配色（None / 空 dict = 恢复默认）。
+
+        ★ V2.0.3：未自定义（或仍是旧默认值）的 bg/info 跟随主题，
+          与控制台信息面板配色一致；用户真正挑过的颜色保留。
+        """
         try:
+            th_fg, th_bg = Console._theme_colors()
             if colors:
                 for k in self.DEFAULT_COLORS:
                     v = colors.get(k)
                     if v:
+                        # ★ V2.0.3：旧默认普通信息色视为"未自定义"→ 主题前景
+                        if k == "info" and v.lower() in _CONSOLE_STALE_INFO:
+                            v = th_fg
                         self._colors[k] = v
+                bg = colors.get("bg")
+                if bg and bg.lower() not in _CONSOLE_STALE_BG:
+                    self._bg = bg
+                else:
+                    self._bg = th_bg
             else:
                 self._colors = dict(self.DEFAULT_COLORS)
+                self._colors["info"] = th_fg
+                self._bg = th_bg
         except Exception:
+            try:
+                _, th_bg = Console._theme_colors()
+            except Exception:
+                th_bg = "#f4f6f8"
             self._colors = dict(self.DEFAULT_COLORS)
+            self._bg = th_bg
+        self._fit_cache.clear()
+        self._apply_console_bg()
         
         # ★ 指令历史与补全
         self.history = []
@@ -190,9 +264,9 @@ class Console(QWidget):
 
     # 日志级别 -> 颜色（★ V1.1.0：可用「显示设置 → 控制台配色」覆盖）
     DEFAULT_COLORS = {
-        # ★ V1.9.6：info 由 #d0d0d0 调亮到 #e6e6e6。
-        #   深色控制台底（#101010）上灰白字偏暗，用户反馈"普通信息太浅"。
-        "info":       "#e6e6e6",  # 普通信息（近白）
+        # ★ V2.0.3：info/bg 默认跟随主题（和信息面板一致）——
+        #   这里 info 仅是兜底；实际由 _theme_colors() 决定。
+        "info":       "#cfcfcf",  # 普通信息（未自定义时=主题前景色）
         "warn":       "#ffd166",  # 警告（黄）
         "error":      "#ff6b6b",  # 普通错误（红）
         "error_bold": "#ff5252",  # 报错堆栈：亮红 + 加粗
@@ -205,7 +279,11 @@ class Console(QWidget):
         r"(exception|caused by|\bat net\.minecraft\b|fatal|severe)",
         re.IGNORECASE)
     # 玩家聊天：<玩家名> 内容
-    CHAT_RE = re.compile(r"<[A-Za-z0-9_]{1,16}>")
+    # ★ V2.0.2.1：原只匹配 [A-Za-z0-9_]，中文/符号玩家名
+    #   （如 <[记者] CYT233>）不命中 → 聊天被当成普通信息灰字。
+    #   放宽为尖括号内任意字符；Java 堆栈的 <init>/<clinit>
+    #   由 _level() 里的 "at "/"caused by" 前缀排除。
+    CHAT_RE = re.compile(r"<[^<>]{1,40}>")
     # 启动完成
     DONE_RE = re.compile(r"\bDone\b|启动完成|server started", re.IGNORECASE)
 
@@ -246,7 +324,8 @@ class Console(QWidget):
                 return "warn"
             if lv == "INFO":
                 # 玩家聊天优先（服务端聊天是 INFO 级别）
-                if self.CHAT_RE.search(line):
+                if (self.CHAT_RE.search(line)
+                        and not low.startswith(("at ", "caused by"))):
                     return "chat"
                 if any(k in low for k in ("error", "exception", "failed",
                                           "failed to", "unable")):
@@ -258,7 +337,8 @@ class Console(QWidget):
                 return "info"
         # 无前缀的兜底（V1.0.0：聊天优先于错误关键词，
         # 否则玩家聊天里带个 "error" 会被误标成红色）
-        if self.CHAT_RE.search(line):
+        if (self.CHAT_RE.search(line)
+                and not low.startswith(("at ", "caused by"))):
             return "chat"
         if self.ERR_STACK_RE.search(low):
             return "error"
@@ -288,6 +368,8 @@ class Console(QWidget):
             if lv == "error" and self.ERR_STACK_RE.search(line):
                 color = self._colors.get("error_bold") or self._colors["error"]
                 bold = True
+            # ★ V2.0.2：与背景太相近的颜色自动调整（保证可读）
+            color = self._fit(color)
             safe = (line.replace("&", "&amp;")
                         .replace("<", "&lt;").replace(">", "&gt;"))
             if bold:
@@ -1533,11 +1615,22 @@ class MainWindow(QMainWindow):
         返回 {"widget": 页签widget, "result": 取色函数}。
         """
         cur = self.disp.get("console_colors") or {}
+        # ★ V2.0.3：旧默认/历史测试值迁移到当前主题色（与信息面板一致）。
+        #   用户真正自定义过的颜色保留。
+        th_fg, th_bg = Console._theme_colors()
+        if (cur.get("bg") or "").lower() in _CONSOLE_STALE_BG:
+            cur = dict(cur)
+            cur["bg"] = th_bg
+        if (cur.get("info") or "").lower() in _CONSOLE_STALE_INFO:
+            cur = dict(cur)
+            cur["info"] = th_fg
         w = QWidget()
         vv = QVBoxLayout(w)
 
         tip = QLabel(
-            "自定义控制台各类型日志的颜色，不设置就恢复默认。\n"
+            "自定义控制台背景与各类型日志的颜色。\n"
+            "不设置就跟随主题（和信息面板配色一致）。\n"
+            "背景选浅色时，与背景太接近的文字会自动调整保证可读。\n"
             "报错堆栈（Exception / Caused by / at net.minecraft...）\n"
             "会使用『错误』的颜色并加粗。")
         tip.setWordWrap(True)
@@ -1546,6 +1639,7 @@ class MainWindow(QMainWindow):
 
         f = QFormLayout()
         items = [
+            ("bg", "背景"),
             ("info", "普通信息"),
             ("warn", "警告"),
             ("error", "错误"),
@@ -1563,8 +1657,16 @@ class MainWindow(QMainWindow):
             except Exception:
                 return "#ffffff"
 
+        def _default(key):
+            # ★ V2.0.3：默认背景/普通信息跟随主题（和信息面板一致）
+            if key == "bg":
+                return th_bg
+            if key == "info":
+                return th_fg
+            return Console.DEFAULT_COLORS.get(key, "#d0d0d0")
+
         def _mk(key, label):
-            default = Console.DEFAULT_COLORS.get(key, "#d0d0d0")
+            default = _default(key)
             hexs = cur.get(key) or default
             b = QPushButton(hexs)
             b.setStyleSheet(
@@ -1604,7 +1706,7 @@ class MainWindow(QMainWindow):
 
         def _reset(bts, its):
             for key, label in its:
-                d = Console.DEFAULT_COLORS.get(key, "#d0d0d0")
+                d = _default(key)
                 bts[key].setText(d)
                 bts[key].setStyleSheet(
                     "QPushButton{background:%s; color:%s;"
@@ -1619,8 +1721,7 @@ class MainWindow(QMainWindow):
         def _result():
             out = {}
             for key, label in items:
-                out[key] = btns[key].text().strip() or \
-                    Console.DEFAULT_COLORS.get(key, "#d0d0d0")
+                out[key] = btns[key].text().strip() or _default(key)
             return out
 
         return {"widget": w, "result": _result}
@@ -1925,11 +2026,28 @@ class MainWindow(QMainWindow):
         根因：QTextEdit 的可见区域是内部 viewport，主题样式表的
         QLineEdit,QTextEdit{background-color:浅色} 会作用到 viewport，
         而 out 自身的 QSS 管不到 viewport（真实渲染实测）。必须对
-        viewport 直接 setStyleSheet + setPalette 才能锁死 #101010。
+        viewport 直接 setStyleSheet + setPalette 才能锁住背景。
+
+        ★ V2.0.2：背景色改为读「显示设置 → 控制台配色 → 背景」
+          （默认 #101010）；默认文字色按背景自动对比调整。
         """
         try:
             from PySide6.QtGui import QPalette as _QP
             from PySide6.QtGui import QColor as _QC
+            cc = self.disp.get("console_colors") or {}
+            # ★ V2.0.3：默认/旧值跟随主题（和信息面板一致）
+            th_fg, th_bg = Console._theme_colors()
+            _bg = cc.get("bg") or th_bg
+            if _bg.lower() in _CONSOLE_STALE_BG:
+                _bg = th_bg
+            _info = cc.get("info") or th_fg
+            if _info.lower() in _CONSOLE_STALE_INFO:
+                _info = th_fg
+            try:
+                from .core import theme as _th
+                _info, _ = _th.ensure_contrast(_info, _bg, 4.5)
+            except Exception:
+                pass
             _cons = list(getattr(self, "consoles", {}).values())
             _g = getattr(self, "console", None)
             if _g is not None:
@@ -1942,11 +2060,12 @@ class MainWindow(QMainWindow):
                     _vp = _o.viewport()
                     if _vp is not None:
                         _vp.setStyleSheet(
-                            "QWidget{background:#101010;color:#e6e6e6;}")
+                            "QWidget{background:%s;color:%s;}"
+                            % (_bg, _info))
                         _vp.setAutoFillBackground(True)
                         _pal = _vp.palette()
-                        _pal.setColor(_QP.Base, _QC("#101010"))
-                        _pal.setColor(_QP.Text, _QC("#e6e6e6"))
+                        _pal.setColor(_QP.Base, _QC(_bg))
+                        _pal.setColor(_QP.Text, _QC(_info))
                         _pal.setColor(_QP.Button, _QC("#1e1e1e"))
                         _pal.setColor(_QP.Highlight, _QC("#4a4a4a"))
                         _vp.setPalette(_pal)
