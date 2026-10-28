@@ -6758,6 +6758,8 @@ class ModBrowseDialog(QDialog):
                     # ★ V1.9.5：GitHub 来源插件（MultiLogin）→ 适配探测走
                     #   GitHub Releases 平台过滤，不进 Modrinth/CF 查询
                     "repo": m.get("repo") or "",
+                    # ★ V2.0.5：透传分支配置（ModernFix 1.21.5+ 社区版）
+                    "branch": m.get("branch") or (),
                 })
         else:
             lst = install.mod_list_for(self.loader, self.mc_version)
@@ -6782,6 +6784,8 @@ class ModBrowseDialog(QDialog):
                     # ★ V1.9.5：透传 repo（当前模组清单没有 GitHub 项，
                     #   留字段备用，插件清单已用）
                     "repo": m.get("repo") or "",
+                    # ★ V2.0.5：透传分支配置（ModernFix 1.21.5+ 社区版）
+                    "branch": m.get("branch") or (),
                 })
         self.builtin_hits = hits
         self.builtin_total = len(hits)
@@ -7590,6 +7594,16 @@ class ModBrowseDialog(QDialog):
         lbl = getattr(card, "_tags_lbl", None)
         if lbl is not None:
             lbl.setText(html)
+            # ★ V2.0.5：悬停说明"适配检测中…"是干嘛的（正在后台探测该
+            #   模组在当前 MC 版本 + 加载器下有没有适配版本，出结论后自动
+            #   更新标签；不适配会禁用勾选并红字说明）
+            if "适配检测中" in html:
+                lbl.setToolTip(
+                    "正在后台检测该模组在 %s + %s 下是否有适配版本，"
+                    "出结论后自动更新；不适配会自动禁用勾选并红字说明"
+                    % (self.mc_version or "?", self.loader or "?"))
+            else:
+                lbl.setToolTip("")
 
     def _apply_compat_text(self, slug, ok, why):
         """★ V2.0.1：按探测结论更新推荐列表里一张卡片的勾选与标签。"""
@@ -7625,7 +7639,9 @@ class ModBrowseDialog(QDialog):
                 continue  # 缓存命中（含跨会话落盘缓存）
             todo.append((slug, {"slug": slug,
                                 "source": h.get("source") or "modrinth",
-                                "repo": h.get("repo") or ""}))
+                                "repo": h.get("repo") or "",
+                                # ★ V2.0.5：透传分支（ModernFix 探测走社区版）
+                                "branch": h.get("branch") or ()}))
         if not todo:
             return
         for slug, _m in todo:
@@ -7676,6 +7692,15 @@ class ModBrowseDialog(QDialog):
           下次打开会重新探测。
         """
         if not isinstance(res, dict):
+            # ★ V2.0.5：Worker 异常/崩溃兜底 —— 不再残留"适配检测中…"
+            #   挂一辈子（之前会跳过这些 slug 永不重探）。全部标为失败，
+            #   卡片灰字说明，下次打开可重新探测。
+            why = "适配检测失败（网络异常）"
+            for slug in list(self._compat_loading):
+                self._compat_fail[slug] = why
+                self._apply_compat_text(slug, None, why)
+            self._compat_loading.clear()
+            self._sync_count()
             return
         changed = False
         for slug, r in res.items():

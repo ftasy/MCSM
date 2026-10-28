@@ -493,7 +493,9 @@ def cf_download_url(cf_id, mc_version=None, loader=None):
     if not files:
         return {"err": "这个模组没有可下载的文件"}
 
-    # 按 MC 版本 + 加载器挑，挑不到就退到最新一个
+    # 按 MC 版本 + 加载器挑
+    # ★ V2.0.5：挑不到就明确报错（带该模组最新支持版本提示），
+    #   绝不退到最新一个 —— 修复 recipeessentials 在 26.3 服被塞 1.21 jar。
     def match(f):
         if mc_version:
             gvs = f.get("gameVersions") or []
@@ -506,7 +508,18 @@ def cf_download_url(cf_id, mc_version=None, loader=None):
         return True
 
     cand = [f for f in files if match(f)]
-    pool = cand or files
+    if not cand:
+        import re as _re
+        # ★ V2.0.5：只取"纯数字点分"的版本标签做提示
+        #   （CF gameVersions 里还混有 Fabric/Forge/Server 等非版本标签）
+        tops = sorted({g for f in files
+                       for g in (f.get("gameVersions") or [])
+                       if g.lower() not in (loader or "").lower()
+                       and _re.match(r"^[\d.]+$", g)})
+        hint = "（该模组当前最新文件支持 %s）" % " / ".join(tops[-4:]) if tops else ""
+        return {"err": "CurseForge 暂无 %s + %s 的适配文件%s，请更换服务器版本或换模组"
+                % (mc_version or "任意版本", loader or "任意加载器", hint)}
+    pool = cand
     # releaseType: 1=release 2=beta 3=alpha，小的优先；
     # 同类型里日期新的优先
     def _key(f):

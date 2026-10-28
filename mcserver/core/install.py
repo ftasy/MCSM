@@ -1357,8 +1357,10 @@ MOD_TARGETS = {
     #   不装 morechathistory（Chat Patches 更强）。
     "fabric": [
         # 1. 第三方登录（排最前）
+        # ★ V2.0.5：MultiYggdrasil 最高支持 26.2，26.3 起不出现在推荐清单
         _m("multiyggdrasil", "MultiYggdrasil",
-           "多源外置登录：正版+第三方皮肤站共存 [第三方登录]", ""),
+           "多源外置登录：正版+第三方皮肤站共存 [第三方登录]", "",
+           max_ver="26.2"),
         # ★ V1.8.4：Cupboard 生态（强行补全，Modrinth 暂无发布则手动装）
         _m("cupboard", "Cupboard",
            "提供 JSON 配置框架与崩溃追踪的核心前置 [Cupboard生态]", ""),
@@ -1399,8 +1401,9 @@ MOD_TARGETS = {
         _m("krypton", "Krypton", "优化网络包处理，人多时明显 [优化]", ""),
         _m("servercore", "ServerCore",
            "服务端综合优化，可按 MSPT 动态调视距 [优化]", ""),
-        _m("saturn", "Saturn",
-           "减少内存占用（与 FerriteCore 互补） [优化]", ""),
+        # ★ V2.0.5：Saturn fabric 版未发布（Modrinth 无 fabric 版本；
+        #   neoforge 最高 1.21.1、forge 最高 1.20.6），
+        #   从 fabric 推荐清单移除，避免 26.3 下显示却装不上。
         _m("alternate-current", "Alternate Current",
            "重写红石粉更新逻辑，大型红石机械明显变快 [优化]", ""),
         _m("lazydfu", "LazyDFU",
@@ -1409,13 +1412,16 @@ MOD_TARGETS = {
         _m("put-a-plug-in-it!", "Put A Plug In It!",
            "修内存泄漏（替代已停更的 Memory Leak Fix） [优化]", ""),
         _m("noisium", "Noisium",
-           "加速新区块生成（26.3 起停更） [优化]", ""),
+           "加速新区块生成（26.3 起停更） [优化]", "",
+           max_ver="1.21.6"),
     ],
 
     "neoforge": [
         # 1. 第三方登录（排最前）
+        # ★ V2.0.5：MultiYggdrasil 最高支持 26.2
         _m("multiyggdrasil", "MultiYggdrasil",
-           "多源外置登录：正版+第三方皮肤站共存 [第三方登录]", ""),
+           "多源外置登录：正版+第三方皮肤站共存 [第三方登录]", "",
+           max_ver="26.2"),
         _m("akiyggdrasil", "AkiYggdrasil",
            "第三方外置登录（1.21.1 NeoForge；Modrinth 暂无发布，"
            "失败按日志手动装 jar） [第三方登录]", "", max_ver="1.21.1"),
@@ -1447,18 +1453,23 @@ MOD_TARGETS = {
         _m("modernfix", "ModernFix", "修复性能 bug + 加快启动 [优化]", "",
            branch=("1.21.5", "modernfix-mvus")),
         _m("krypton", "Krypton", "优化网络包处理 [优化]", ""),
-        _m("saturn", "Saturn", "减少内存占用 [优化]", ""),
+        _m("saturn", "Saturn", "减少内存占用 [优化]", "",
+           max_ver="1.21.1"),
         _m("lithium", "Lithium", "优化游戏逻辑 [优化]", ""),
         _m("alternate-current", "Alternate Current",
            "重写红石粉更新逻辑 [优化]", ""),
-        _m("memoryleakfix", "Memory Leak Fix", "修内存泄漏 [优化]", ""),
-        _m("noisium", "Noisium", "加速新区块生成 [优化]", ""),
+        _m("memoryleakfix", "Memory Leak Fix", "修内存泄漏 [优化]", "",
+           max_ver="1.20.4"),
+        _m("noisium", "Noisium", "加速新区块生成 [优化]", "",
+           max_ver="1.21.6"),
     ],
 
     "forge": [
         # 1. 第三方登录（排最前）
+        # ★ V2.0.5：MultiYggdrasil 最高支持 26.2
         _m("multiyggdrasil", "MultiYggdrasil",
-           "多源外置登录：正版+第三方皮肤站共存 [第三方登录]", ""),
+           "多源外置登录：正版+第三方皮肤站共存 [第三方登录]", "",
+           max_ver="26.2"),
         # ★ V1.8.4：Cupboard 生态（强行补全，Modrinth 暂无发布则手动装）
         _m("cupboard", "Cupboard",
            "提供 JSON 配置框架与崩溃追踪的核心前置 [Cupboard生态]", ""),
@@ -1491,9 +1502,12 @@ MOD_TARGETS = {
         _m("krypton-fnp", "Krypton FNP (Forge版)",
            "优化网络包处理（Forge 非官方重构版） [优化]", ""),
         _m("alternate-current", "Alternate Current",
-           "重写红石粉更新逻辑（Forge 版最高到 1.20.4） [优化]", ""),
-        _m("memoryleakfix", "Memory Leak Fix", "修内存泄漏 [优化]", ""),
-        _m("noisium", "Noisium", "加速新区块生成 [优化]", ""),
+           "重写红石粉更新逻辑（Forge 版最高到 1.20.4） [优化]", "",
+           max_ver="1.20.4"),
+        _m("memoryleakfix", "Memory Leak Fix", "修内存泄漏 [优化]", "",
+           max_ver="1.20.4"),
+        _m("noisium", "Noisium", "加速新区块生成 [优化]", "",
+           max_ver="1.21.6"),
     ],
 
     "vanilla": [],
@@ -1797,15 +1811,19 @@ def modrinth_pick(slug, mc_version, loader, on_retry=None):
     # ★ V1.9.3：确认到底是不是“真没有适配”，而不是版本标签填错。
     #   该加载器的全部版本里都找不到这个 MC 版本 → 明确报“无适配”，
     #   绝不跨版本乱装（比如 26.3 服务端塞 26.2 的 MultiYggdrasil 必崩）。
+    # ★ V2.0.5：若存在适配版本（第 1 步因标签填错/漏填/索引延迟没匹配上），
+    #   只从“包含当前 MC 版本标签”的版本里挑最佳（release 优先），
+    #   绝不退到任意最新版本 —— 修复 recipeessentials 在 26.3 服被塞 1.21 jar。
     try:
         from . import modman as _mm
         _close = _mm._ver_eq
     except Exception:
         def _close(a, b):
             return a == b
-    if not any(_close(mc_version, g)
-               for v in all_vs
-               for g in (v.get("game_versions") or [])):
+    match = [v for v in all_vs
+             if any(_close(mc_version, g)
+                    for g in (v.get("game_versions") or []))]
+    if not match:
         tops = sorted({g for v in all_vs
                        for g in (v.get("game_versions") or [])})
         hint = "（该项目当前支持到 %s）" % tops[-1] if tops else ""
@@ -1814,24 +1832,9 @@ def modrinth_pick(slug, mc_version, loader, on_retry=None):
             % (mc_version, loader, hint))
 
     # 3. 动态回退已移除（严禁跨小版本乱装，1.20.4 的 Forge 模组塞给 1.20.1 必崩）
-        
-    # 4. 终极兜底：不带任何过滤条件，取该项目的最新版本
-    #   应对某些模组在 Modrinth 上的版本标签（如 game_versions）填错、
-    #   漏填，或者索引延迟导致完全匹配不上。
-    try:
-        from . import sources
-        base = sources.modrinth_base()
-        url = "%s/project/%s/version" % (base, slug)
-        all_vs_any = json.loads(_get(url, timeout=15))
-        if all_vs_any:
-            # 取最新的 5 个版本里，挑第一个带 .jar 文件的
-            best = _pick_best(all_vs_any[:5])
-            if best:
-                return best
-    except Exception as e:
-        raise RuntimeError("获取 %s 的 Modrinth 数据失败: %s" % (slug, _brief(e)))
-        
-    return None
+    #   旧的“终极兜底”（不带过滤取任意最新版本）同步移除 —— 它会让
+    #   recipeessentials 在 26.3 服被塞 1.21 jar 且显示“安装成功”。
+    return _pick_best(match)
 
 
 def _pick_best(versions):
@@ -1961,13 +1964,13 @@ def _cf_compat(cf_id, mc_version, loader):
             break
     if ok:
         return True, ""
-    # 收集该项目支持的最高 MC 版本（剔除加载器/平台标签）
+    # 收集该项目支持的最高 MC 版本（★ V2.0.5：只认纯数字点分版本号，
+    # 剔除 Fabric/Forge/Server 等非版本标签，避免提示"最高支持 Server"）
     mc_sets = set()
     for f in files:
         for g in (f.get("gameVersions") or []):
             s = str(g).strip()
-            if s.lower() in ("forge", "fabric", "neoforge", "paper",
-                             "spigot", "bukkit", "modloader", "latest"):
+            if not re.match(r"^[\d.]+$", s):
                 continue
             mc_sets.add(s)
     tops = sorted(mc_sets, key=lambda s: [int(x) if x.isdigit()
