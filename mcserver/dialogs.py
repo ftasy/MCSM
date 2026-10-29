@@ -3551,6 +3551,12 @@ class ServerConfigDialog(QDialog):
                 cb.blockSignals(False)
             f.addRow("预设:", cb)
             self._mc_widgets["preset"] = cb
+            # ★ V2.1.1：ServerCore 预设旁加方向提示（数值越大越保守）
+            if spec["key"] != "simple-voice-chat":
+                lbl_hint = QLabel("数值越大越接近原版（保守），越小优化越狠（激进）")
+                lbl_hint.setStyleSheet(_muted())
+                lbl_hint.setWordWrap(True)
+                f.addRow("", lbl_hint)
 
             # ★ V1.7.0-4：按模组找配置文件（ServerCore / SVC 路径不同）
             if spec["key"] == "simple-voice-chat":
