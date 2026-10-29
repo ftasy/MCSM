@@ -291,7 +291,12 @@ def read_servercore(server_dir):
         m = re.search(r"^\s*%s:\s*(-?\d+)" % re.escape(key), t, re.M)
         return int(m.group(1)) if m else default
 
-    out["dynamic"] = _b("enabled", True)
+    # ★ V2.1.0：dynamic 的 enabled 必须匹配 dynamic: 块下的那个，
+    #   否则 _b("enabled") 先匹配到 features 里 lobotomize-villagers 的
+    #   enabled（4 空格缩进），dynamic 开关读错（lobotomize 关了
+    #   却显示动态调整也关了）。
+    m = re.search(r"^dynamic:\s*\n\s*enabled:\s*(true|false)", t, re.M)
+    out["dynamic"] = (m.group(1) == "true") if m else True
     out["target_mspt"] = _i("target-mspt", 40)
     out["autosave"] = _i("autosave-interval-seconds", 600)
     out["xp_merge"] = _i("xp-merge-fraction", 20)
@@ -307,6 +312,10 @@ def read_servercore(server_dir):
     mins = re.findall(r"SIMULATION_DISTANCE'\s*\n\s*max:\s*\d+\s*\n"
                       r"\s*min:\s*(-?\d+)", t)
     out["sim_min"] = int(mins[-1]) if mins else max(4, out["sim_default"] - 2)
+    mins = re.findall(r"CHUNK_TICK_DISTANCE'\s*\n\s*max:\s*\d+\s*\n"
+                      r"\s*min:\s*(-?\d+)", t)
+    out["chunk_tick_min"] = int(mins[-1]) if mins else max(
+        3, out["chunk_tick_default"] - 3)
     mins = re.findall(r"MOBCAP_PERCENTAGE'\s*\n\s*max:\s*\d+\s*\n"
                       r"\s*min:\s*(-?\d+)", t)
     out["mobcap_min"] = int(mins[-1]) if mins else 70

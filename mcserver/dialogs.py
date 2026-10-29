@@ -108,6 +108,24 @@ def _sec_bg():
     return t.section_bg() if t else "#e8e8e8"
 
 
+def _preset_matches(p, rd, key):
+    """判断读回的配置 rd 是否就是预设 p 这一档（按该模组的关键数值）。
+
+    ★ V2.1.0：ServerCore 用 target_mspt（保守50/均衡40/激进35 唯一区分），
+      Simple Voice Chat 用 voice_distance+broadcast_range 组合。
+    返回 True 时下拉应自动选中这一档，避免"下拉显示均衡、数值却是旧档"。
+    """
+    try:
+        if key == "servercore":
+            return p.get("target_mspt") == rd.get("target_mspt")
+        if key == "simple-voice-chat":
+            return (p.get("voice_distance") == rd.get("voice_distance")
+                    and p.get("broadcast_range") == rd.get("broadcast_range"))
+    except Exception:
+        pass
+    return False
+
+
 def _muted():
     """次要文字（提示/说明）的 CSS。
 
@@ -3498,6 +3516,13 @@ class ServerConfigDialog(QDialog):
 
             f.addRow(QLabel(spec.get("help", "")))
 
+            # ★ V2.1.0：先读回已生成配置（下拉自动选档要参考它）
+            rd = None
+            try:
+                rd = spec["read"](sd)
+            except Exception:
+                rd = None
+
             # 预设
             cb = QComboBox()
             for k, p in spec["presets"].items():
@@ -3505,9 +3530,19 @@ class ServerConfigDialog(QDialog):
             # ★ V1.9.6：默认选中"均衡（推荐）"（若存在），
             #   与下方初始渲染基准 balanced 保持一致；
             #   不加这个，下拉显示"保守"但数值却是均衡档，看着像没切换。
+            # ★ V2.1.0：读回已生成的配置后，按数值自动匹配预设档位 ——
+            #   否则服务器保存过激进档后重开页面，下拉仍显示"均衡"
+            #   但数值是激进的，看起来就像"保守/激进数值反了"。
             cb.blockSignals(True)
             try:
-                j = cb.findData("balanced")
+                j = -1
+                if rd:
+                    for k, p in spec["presets"].items():
+                        if _preset_matches(p, rd, spec["key"]):
+                            j = cb.findData(k)
+                            break
+                if j < 0:
+                    j = cb.findData("balanced")
                 if j < 0:
                     j = cb.findData("default")
                 if j >= 0:
@@ -3535,11 +3570,6 @@ class ServerConfigDialog(QDialog):
                 self._mc_widgets[key] = sp
                 return sp
 
-            rd = None
-            try:
-                rd = spec["read"](sd)
-            except Exception:
-                rd = None
             # ★ V1.7.0-4：不同模组预设 key 不同（ServerCore 用 balanced，
             #   SVC 用 default），按 spec 取第一个可用预设
             d = dict(spec["presets"].get("balanced")
