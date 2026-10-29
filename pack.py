@@ -6,7 +6,7 @@ import zipfile
 import time
 
 # 版本号（用来给压缩包命名）
-VERSION = "v2.0.8"
+VERSION = "v2.0.9"
 # 产品名（MCSM = Minecraft Server Manager）
 APP_NAME = "MCSM"
 OUT_ZIP = f"{APP_NAME}_{VERSION}_安装包.zip"

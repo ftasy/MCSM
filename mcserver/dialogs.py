@@ -2618,20 +2618,23 @@ class ServerConfigDialog(QDialog):
         except Exception:
             self.mod_mods = []
 
-        self.mod_table = QTableWidget(0, 4)
+        self.mod_table = QTableWidget(0, 5)
         self.mod_table.setHorizontalHeaderLabels(
-            ["状态", "名称", "版本", "文件"])
+            ["状态", "名称", "版本", "最新版本", "文件"])
         self.mod_table.verticalHeader().setVisible(False)
         self.mod_table.setEditTriggers(
             QAbstractItemView.NoEditTriggers)
         self.mod_table.setSelectionBehavior(
             QAbstractItemView.SelectRows)
         hh = self.mod_table.horizontalHeader()
-        for i, m in enumerate((80, 200, 140, 1)):
+        for i, m in enumerate((80, 200, 140, 140, 1)):
             hh.setSectionResizeMode(
                 i, QHeaderView.ResizeToContents if m != 1
                 else QHeaderView.Stretch)
         v.addWidget(self.mod_table, 1)
+
+        # ★ V2.0.9：检查更新结果缓存（path -> res）
+        self._mod_results = {}
 
         for m in self.mod_mods:
             r = self.mod_table.rowCount()
@@ -2642,7 +2645,8 @@ class ServerConfigDialog(QDialog):
                                    QTableWidgetItem(m.get("name", "?")))
             self.mod_table.setItem(r, 2,
                                    QTableWidgetItem(m.get("version", "")))
-            self.mod_table.setItem(r, 3, QTableWidgetItem(
+            self.mod_table.setItem(r, 3, QTableWidgetItem("-"))
+            self.mod_table.setItem(r, 4, QTableWidgetItem(
                 os.path.basename(m.get("path", ""))))
 
         hb = QHBoxLayout()
@@ -2657,21 +2661,17 @@ class ServerConfigDialog(QDialog):
         hb.addWidget(b_open)
         # ★ V2.0.6：点"完整管理"直接打开浏览模组大窗，
         #   不再先弹"模组管理"小窗、再手动点浏览（用户反馈多一步）；
-        #   已装模组管理/更新检查移入浏览大窗的"已装模组管理"按钮
-        b_full = QPushButton("浏览装模组（完整管理）")
+        #   ★ V2.0.9：改名"+添加模组"（与原 hb2 的＋添加模组合并，删旧按钮）
+        b_full = QPushButton("＋ 添加模组")
         b_full.setToolTip(
             "打开模组浏览（推荐 + 全库搜索 + 勾选安装）；\n"
-            "已装模组的启用/禁用/更新检查在浏览窗口里点『已装模组管理』")
+            "已装模组的启用/禁用在这里下方操作，检查更新看『最新版本』列")
         b_full.clicked.connect(self._add_mod_here)
         hb.addWidget(b_full)
         v.addLayout(hb)
 
-        # ---- 第二行：添加 / 更新 ----
+        # ---- 第二行：更新 ----
         hb2 = QHBoxLayout()
-        b_add = QPushButton("＋ 添加模组")
-        b_add.setToolTip("从 Modrinth / CurseForge 搜并安装")
-        b_add.clicked.connect(self._add_mod_here)
-        hb2.addWidget(b_add)
         b_up = QPushButton("↑ 更新加载器")
         b_up.setToolTip("只换核心文件，存档/模组/配置都不动")
         b_up.clicked.connect(self._update_loader_here)
@@ -2681,6 +2681,18 @@ class ServerConfigDialog(QDialog):
                          "所有模组一起加载失败")
         b_api.clicked.connect(self._update_fapi_here)
         hb2.addWidget(b_api)
+        # ★ V2.0.9：已装模组管理的"检查更新/下载更新"移到这里
+        b_chk = QPushButton("检查更新（选中）")
+        b_chk.setToolTip("检查表格里选中的已装模组有没有新版本（结果写『最新版本』列）")
+        b_chk.clicked.connect(lambda: self._check_mod_updates_here(True))
+        hb2.addWidget(b_chk)
+        b_chkall = QPushButton("一键检查全部更新")
+        b_chkall.clicked.connect(lambda: self._check_mod_updates_here(False))
+        hb2.addWidget(b_chkall)
+        b_dlupd = QPushButton("下载选中项的更新")
+        b_dlupd.setToolTip("打开表格里选中模组的更新下载页（需先检查过更新）")
+        b_dlupd.clicked.connect(self._download_mod_update_here)
+        hb2.addWidget(b_dlupd)
         hb2.addStretch(1)
         v.addLayout(hb2)
         return w
@@ -3199,7 +3211,13 @@ class ServerConfigDialog(QDialog):
                                    QTableWidgetItem(m.get("name", "?")))
             self.mod_table.setItem(r, 2,
                                    QTableWidgetItem(m.get("version", "")))
-            self.mod_table.setItem(r, 3, QTableWidgetItem(
+            # ★ V2.0.9：第 4 列显示缓存的最新版本结果（若有）
+            res = self._mod_results.get(m.get("path")) or {}
+            latest = res.get("latest") or res.get("cur") or "-"
+            if res.get("status") == "update":
+                latest = "%s ←可更新" % latest
+            self.mod_table.setItem(r, 3, QTableWidgetItem(latest))
+            self.mod_table.setItem(r, 4, QTableWidgetItem(
                 os.path.basename(m.get("path", ""))))
 
     def _update_loader_here(self):
@@ -3267,6 +3285,103 @@ class ServerConfigDialog(QDialog):
             "Fabric API -> %s\n\n"
             "旧的已留成 .old，出问题可以换回来。\n"
             "重启服务端生效。" % (res.get("version") or "最新"))
+
+    # ---------- ★ V2.0.9：已装模组"检查更新/下载更新"搬到配置窗 ----------
+    def _check_mod_updates_here(self, only_sel=True):
+        """检查选中/全部已装模组的更新，结果写『最新版本』列。"""
+        loader = (self.entry.get("loader") or "").lower()
+        mc = (self.entry.get("version") or "").strip()
+        if not mc or loader in ("", "unknown", "paper", "vanilla"):
+            QMessageBox.information(
+                self, "检查不了",
+                "需要有效的 MC 版本 + Fabric/Forge/NeoForge 加载器\n"
+                "才能查更新。当前：%s + %s" % (mc or "?", loader or "?"))
+            return
+        if only_sel:
+            r = self.mod_table.currentRow()
+            if r < 0 or r >= len(self.mod_mods):
+                QMessageBox.information(
+                    self, "提示", "先在表格里选中一个已装模组")
+                return
+            mods = [self.mod_mods[r]]
+        else:
+            mods = list(self.mod_mods)
+        if not mods:
+            QMessageBox.information(self, "提示", "mods 目录里没有模组")
+            return
+        self._log("[更新检查] 开始检查 %d 个模组（%s + %s）..."
+                  % (len(mods), mc, loader))
+        for m in mods:
+            r = self._row_of_mod_here(m)
+            if r is not None:
+                self.mod_table.setItem(r, 3, QTableWidgetItem("查询中..."))
+            QApplication.processEvents()
+            try:
+                res = modman.check_update(
+                    m, mc, loader, on_log=lambda x: None)
+            except Exception as e:
+                res = {"status": "error", "err": repr(e)}
+            self._mod_results[m.get("path")] = res
+            status = res.get("status")
+            latest = res.get("latest") or res.get("cur") or ""
+            url = res.get("url") or ""
+            if r is not None:
+                if status == "update":
+                    col = QTableWidgetItem("%s ←可更新" % latest)
+                    col.setForeground(QColor(_on_bg("#ffd166")))
+                    self.mod_table.setItem(r, 3, col)
+                elif status == "latest":
+                    col = QTableWidgetItem("%s [最新]" % latest)
+                    col.setForeground(QColor(_on_bg("#06d6a0")))
+                    self.mod_table.setItem(r, 3, col)
+                else:
+                    self.mod_table.setItem(
+                        r, 3, QTableWidgetItem(
+                            (res.get("err") or "查询失败")[:20]))
+            self._log("[更新检查] %s -> %s（%s）%s"
+                      % (m.get("name") or "?", latest or "?",
+                         status or "?",
+                         ("下载: %s" % url)
+                         if url and status == "update" else ""))
+        self._log("[更新检查] 完成")
+
+    def _row_of_mod_here(self, m):
+        for i in range(self.mod_table.rowCount()):
+            it = self.mod_table.item(i, 4)
+            if it and it.text() == os.path.basename(m.get("path", "")):
+                return i
+        return None
+
+    def _download_mod_update_here(self):
+        """打开表格里选中模组的更新下载页（需先检查过更新）。"""
+        r = self.mod_table.currentRow()
+        if r < 0 or r >= len(self.mod_mods):
+            QMessageBox.information(self, "提示", "先选中一个已装模组")
+            return
+        m = self.mod_mods[r]
+        res = self._mod_results.get(m.get("path")) or {}
+        url = res.get("url") or ""
+        if not url:
+            QMessageBox.information(
+                self, "提示",
+                "这个模组还没检查过更新，先点『检查更新（选中）』。")
+            return
+        if res.get("status") == "latest":
+            rr = QMessageBox.question(
+                self, "已是最新",
+                "已是 %s。\n仍打开它的下载页吗？"
+                % (res.get("latest") or ""),
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if rr != QMessageBox.Yes:
+                return
+        import webbrowser
+        try:
+            webbrowser.open(url)
+            self._log("已打开: %s" % url)
+        except Exception as e:
+            QMessageBox.warning(
+                self, "打不开",
+                "没法自动打开浏览器：%r\n\n链接：%s" % (e, url))
 
 
     def _log(self, m):
@@ -6479,6 +6594,8 @@ class ModBrowseDialog(QDialog):
         # ★ V2.0.8：推荐页跨页勾选状态（slug -> bool）——翻页不丢勾选，
         #   安装时合并全部页的勾选
         self._builtin_checked = {}
+        # ★ V2.0.9：全库搜索页跨页勾选状态（slug -> bool）
+        self._lib_checked = {}
         self._icons_dir = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "icons")
@@ -6666,13 +6783,8 @@ class ModBrowseDialog(QDialog):
         self.btn_none = QPushButton("全不选")
         self.btn_none.clicked.connect(lambda: self._set_all(False))
         hb.addWidget(self.btn_none)
-        # ★ V2.0.6：已装模组管理（启用/禁用/更新检查/打开文件夹）
-        #   —— 从配置页"完整管理"移入浏览大窗，不再多一道小窗
-        self.btn_manage = QPushButton("已装模组管理")
-        self.btn_manage.setToolTip(
-            "已装模组的启用/禁用、检查更新、打开 mods 文件夹")
-        self.btn_manage.clicked.connect(self.open_mod_manager)
-        hb.addWidget(self.btn_manage)
+        # ★ V2.0.9：已装模组管理入口删除 —— 启用/禁用在配置窗模组页，
+        #   检查更新/下载更新也搬到配置窗模组页按钮行
         hb.addStretch(1)
         self.lbl_stat = QLabel("")
         self.lbl_stat.setStyleSheet(_muted())
@@ -6868,6 +6980,14 @@ class ModBrowseDialog(QDialog):
             pass
         self._sync_count()
 
+    def _on_lib_toggled(self, slug, on):
+        """★ V2.0.9：全库搜索页勾选状态写回字典（跨页保留）。"""
+        try:
+            self._lib_checked[slug] = bool(on)
+        except Exception:
+            pass
+        self._sync_count()
+
     def _sync_bpage(self):
         page = self.builtin_offset // 20 + 1
         self.lbl_bpage.setText("第 %d 页" % page)
@@ -6891,6 +7011,8 @@ class ModBrowseDialog(QDialog):
         self.batch_idx = 1
         self._fetching = False
         self._pending = "first"
+        # ★ V2.0.9：换关键词/换源后旧勾选失效，清空跨页勾选
+        self._lib_checked.clear()
         self._run()
 
     # ---- 安全切片（start 越界兜底，绝不越界/串数据）----
@@ -7258,6 +7380,13 @@ class ModBrowseDialog(QDialog):
             card, chk = self._make_card(
                 h, self._icon_pm_for(h), False)
             it._chk = chk
+            # ★ V2.0.9：全库搜索跨页勾选 —— 翻页重建时恢复，并写回字典
+            chk.blockSignals(True)
+            if slug in self._lib_checked:
+                chk.setChecked(bool(self._lib_checked[slug]))
+            chk.blockSignals(False)
+            chk.toggled.connect(
+                lambda on, s=slug: self._on_lib_toggled(s, on))
             self.list_lib.addItem(it)
             self.list_lib.setItemWidget(it, card)
         self.list_lib.blockSignals(False)
@@ -7798,16 +7927,12 @@ class ModBrowseDialog(QDialog):
             if ck and ck[0] is False:
                 continue  # 已知不适配不装
             out.append(slug)
-        # 全库 Tab：当前渲染的勾选
-        for i in range(self.list_lib.count()):
-            it = self.list_lib.item(i)
-            chk = getattr(it, "_chk", None)
-            if chk is not None and chk.isEnabled() \
-                    and chk.isChecked():
-                s = it.data(Qt.UserRole)
-                if s and s not in seen:
-                    seen.add(s)
-                    out.append(s)
+        # 全库 Tab：跨页保留的勾选（★ V2.0.9 支持跨页）
+        for slug, on in self._lib_checked.items():
+            if not on or slug in seen:
+                continue
+            seen.add(slug)
+            out.append(slug)
         return out
 
     def _set_all(self, on):
@@ -8005,6 +8130,8 @@ class ModBrowseDialog(QDialog):
         self.installed = self._installed_slugs()
         # ★ V2.0.8：安装完成后清空跨页勾选状态（避免已装项残留勾选重装）
         self._builtin_checked.clear()
+        # ★ V2.0.9：全库搜索勾选同步清空
+        self._lib_checked.clear()
         self.search()
 
     def _log(self, m):
