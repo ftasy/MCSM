@@ -1356,6 +1356,8 @@ MOD_TARGETS = {
     #   冲突项已剔除：不装 packetfixer（Connectivity 更全）、
     #   不装 morechathistory（Chat Patches 更强）。
     "fabric": [
+        # ★ V2.0.8：Fabric API 置顶 —— 几乎所有模组的前置，先装它
+        _m("fabric-api", "Fabric API", "绝大多数模组的前置 [前置库]", ""),
         # 1. 第三方登录（排最前）
         # ★ V2.0.5：MultiYggdrasil 最高支持 26.2，26.3 起不出现在推荐清单
         _m("multiyggdrasil", "MultiYggdrasil",
@@ -1388,7 +1390,6 @@ MOD_TARGETS = {
            "近距离语音，客户端也要装同名模组 [语音]", "",
            req=["fabric-api"]),
         # 保留核心项（同样平铺 + 标签）
-        _m("fabric-api", "Fabric API", "绝大多数模组的前置 [前置库]", ""),
         _m("lithium", "Lithium",
            "优化游戏逻辑（实体AI/红石/区块刻），收益最大 [优化]", ""),
         _m("ferrite-core", "FerriteCore",

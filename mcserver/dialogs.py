@@ -6476,6 +6476,9 @@ class ModBrowseDialog(QDialog):
                         if v and v[0] is not None}
         self._compat_loading = set()  # 正在探测的 slug（防重复）
         self._compat_fail = {}        # ★ V2.0.1: slug -> why（探测失败/无结论，内存）
+        # ★ V2.0.8：推荐页跨页勾选状态（slug -> bool）——翻页不丢勾选，
+        #   安装时合并全部页的勾选
+        self._builtin_checked = {}
         self._icons_dir = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "icons")
@@ -6832,6 +6835,13 @@ class ModBrowseDialog(QDialog):
             card, chk = self._make_card(
                 h, self._local_icon_for(slug), True)
             it._chk = chk
+            # ★ V2.0.8：跨页勾选 —— 翻页重建时恢复勾选，并写回状态字典
+            chk.blockSignals(True)
+            if slug in self._builtin_checked:
+                chk.setChecked(bool(self._builtin_checked[slug]))
+            chk.blockSignals(False)
+            chk.toggled.connect(
+                lambda on, s=slug: self._on_builtin_toggled(s, on))
             self.list_builtin.addItem(it)
             self.list_builtin.setItemWidget(it, card)
         self.list_builtin.blockSignals(False)
@@ -6849,6 +6859,14 @@ class ModBrowseDialog(QDialog):
             return
         self.builtin_offset = new
         self._fill_builtin()
+
+    def _on_builtin_toggled(self, slug, on):
+        """★ V2.0.8：推荐页勾选状态写回字典（跨页保留）。"""
+        try:
+            self._builtin_checked[slug] = bool(on)
+        except Exception:
+            pass
+        self._sync_count()
 
     def _sync_bpage(self):
         page = self.builtin_offset // 20 + 1
@@ -7562,22 +7580,10 @@ class ModBrowseDialog(QDialog):
                             % (self._TAG_COLORS.get(t, "#8ab4ff"), t))
             if req:
                 tags.append("前置: " + "、".join(req))
+            # ★ V2.0.8：适配检测结论提示全部隐藏（不再显示
+            #   "适配检测中… / 适配检测失败 / ⚠无适配"），
+            #   但 _ck 仍返回 —— 已知不适配的项照常禁勾选（防乱装）。
             _ck = self._compat.get(self._compat_key(slug))
-            if _ck and _ck[0] is False:
-                tags.append('<span style="color:#ef4444;'
-                            'font-weight:bold;">⚠ %s</span>'
-                            % _esc_html(_ck[1]))
-            elif _ck and _ck[0] is True:
-                tags.append("版本兼容已按当前服过滤")
-            elif slug in self._compat_fail:
-                # ★ V2.0.1：探测失败/无结论 —— 明确告诉用户，
-                #   不再是永远"适配检测中…"
-                _why = self._compat_fail.get(slug) or "网络异常"
-                tags.append('<span style="color:#9aa0b0;">适配检测失败'
-                            '（%s），安装时再确认</span>'
-                            % _esc_html(_why[:60]))
-            else:
-                tags.append("适配检测中…")
         else:
             if cat_txt:
                 tags.append("分类 " + cat_txt)
@@ -7609,16 +7615,8 @@ class ModBrowseDialog(QDialog):
         lbl = getattr(card, "_tags_lbl", None)
         if lbl is not None:
             lbl.setText(html)
-            # ★ V2.0.5：悬停说明"适配检测中…"是干嘛的（正在后台探测该
-            #   模组在当前 MC 版本 + 加载器下有没有适配版本，出结论后自动
-            #   更新标签；不适配会禁用勾选并红字说明）
-            if "适配检测中" in html:
-                lbl.setToolTip(
-                    "正在后台检测该模组在 %s + %s 下是否有适配版本，"
-                    "出结论后自动更新；不适配会自动禁用勾选并红字说明"
-                    % (self.mc_version or "?", self.loader or "?"))
-            else:
-                lbl.setToolTip("")
+            # ★ V2.0.8：适配检测提示已隐藏，不再挂说明 tooltip
+            lbl.setToolTip("")
 
     def _apply_compat_text(self, slug, ok, why):
         """★ V2.0.1：按探测结论更新推荐列表里一张卡片的勾选与标签。"""
@@ -7661,14 +7659,7 @@ class ModBrowseDialog(QDialog):
             return
         for slug, _m in todo:
             self._compat_loading.add(slug)
-        # ★ V2.0.1：明确告知适配检测在后台运行（不再是无声状态）
-        try:
-            self.statusBar().showMessage(
-                "正在适配检测 %d 个推荐项（按 %s + %s 隔离）..."
-                % (len(todo), self.mc_version or "?", self.loader or "?"),
-                0)
-        except Exception:
-            pass
+        # ★ V2.0.8：检测提示已全部隐藏（用户要求）—— 只静默后台探测
         self._compat_worker_ = _track(self, Worker(
             self._compat_worker,
             {"todo": todo, "mc_version": self.mc_version,
@@ -7682,16 +7673,8 @@ class ModBrowseDialog(QDialog):
         self._compat_worker_.start()
 
     def _compat_progress(self, msg):
-        """★ V2.0.6：适配检测进度 → 底部状态标签（ModBrowseDialog 无状态栏）。"""
-        try:
-            s = str(msg)
-            if s.startswith("[适配检测]"):
-                self.lbl_stat.setText(
-                    "适配检测 %d 个推荐项（按 %s + %s 隔离）：%s"
-                    % (len(self._compat_loading) or "?",
-                       self.mc_version or "?", self.loader or "?", s))
-        except Exception:
-            pass
+        """★ V2.0.8：适配检测进度提示已隐藏（用户要求），保留空实现。"""
+        pass
 
     @staticmethod
     def _compat_worker(kwargs, on_log=None):
@@ -7760,7 +7743,7 @@ class ModBrowseDialog(QDialog):
                 self._apply_compat_text(slug, None, why)
             self._compat_loading.clear()
             try:
-                self.lbl_stat.setText("适配检测完成：本机网络不可用（失败项安装时再确认）")
+                self.lbl_stat.setText("")
             except Exception:
                 pass
             self._sync_count()
@@ -7783,10 +7766,10 @@ class ModBrowseDialog(QDialog):
             changed = True
             self._apply_compat_text(slug, r.get("ok"), r.get("why") or "")
         self._sync_count()
-        # ★ V2.0.1：探测结束提示（ModBrowseDialog 无状态栏 → 底部标签）
+        # ★ V2.0.8：完成提示已隐藏（适配检测提示整体隐藏）
         try:
             if not self._compat_loading:
-                self.lbl_stat.setText("适配检测完成")
+                self.lbl_stat.setText("")
         except Exception:
             pass
         if changed:
@@ -7800,17 +7783,31 @@ class ModBrowseDialog(QDialog):
     def _checked_slugs(self):
         """★ V1.8.0：合并两个 Tab 的勾选（推荐 + 全库）。
         ★ V1.9.5：跳过不适配已禁用的项（disabled 的 chk 即使被
-          程序化勾上也不算，绝不把装不了的项带进安装队列）。"""
+          程序化勾上也不算，绝不把装不了的项带进安装队列）。
+        ★ V2.0.8：推荐页翻页后勾选不丢 —— 从跨页状态字典取全部页勾选，
+          全库 Tab 仍实时遍历当前渲染列表；已知不适配（缓存 False）
+          的项无论在哪一页都不带进安装队列。"""
         out = []
-        for lst in (self.list_builtin, self.list_lib):
-            for i in range(lst.count()):
-                it = lst.item(i)
-                chk = getattr(it, "_chk", None)
-                if chk is not None and chk.isEnabled() \
-                        and chk.isChecked():
-                    s = it.data(Qt.UserRole)
-                    if s:
-                        out.append(s)
+        seen = set()
+        # 推荐 Tab：跨页保留的勾选
+        for slug, on in self._builtin_checked.items():
+            if not on or slug in seen:
+                continue
+            seen.add(slug)
+            ck = self._compat.get(self._compat_key(slug))
+            if ck and ck[0] is False:
+                continue  # 已知不适配不装
+            out.append(slug)
+        # 全库 Tab：当前渲染的勾选
+        for i in range(self.list_lib.count()):
+            it = self.list_lib.item(i)
+            chk = getattr(it, "_chk", None)
+            if chk is not None and chk.isEnabled() \
+                    and chk.isChecked():
+                s = it.data(Qt.UserRole)
+                if s and s not in seen:
+                    seen.add(s)
+                    out.append(s)
         return out
 
     def _set_all(self, on):
@@ -8006,6 +8003,8 @@ class ModBrowseDialog(QDialog):
         for f in fail_l:
             self._log("  [失败] %s - %s" % (f.get("name"), f.get("reason")))
         self.installed = self._installed_slugs()
+        # ★ V2.0.8：安装完成后清空跨页勾选状态（避免已装项残留勾选重装）
+        self._builtin_checked.clear()
         self.search()
 
     def _log(self, m):
