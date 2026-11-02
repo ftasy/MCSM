@@ -352,6 +352,7 @@ SVC_PATHS = [
 SVC_DEFAULT_PORT = 24454
 SVC_DEFAULT_DISTANCE = 8
 SVC_DEFAULT_BROADCAST = 64
+SVC_DEFAULT_HOST = "0.0.0.0"
 
 SVC_PRESETS = {
     "default": {
@@ -359,6 +360,7 @@ SVC_PRESETS = {
         "port": SVC_DEFAULT_PORT,
         "voice_distance": SVC_DEFAULT_DISTANCE,
         "broadcast_range": SVC_DEFAULT_BROADCAST,
+        "voice_host": SVC_DEFAULT_HOST,
         "enable": True,
         "enable_groups": True,
     },
@@ -367,6 +369,7 @@ SVC_PRESETS = {
         "port": SVC_DEFAULT_PORT,
         "voice_distance": 8,
         "broadcast_range": 16,
+        "voice_host": SVC_DEFAULT_HOST,
         "enable": True,
         "enable_groups": True,
     },
@@ -375,6 +378,7 @@ SVC_PRESETS = {
         "port": SVC_DEFAULT_PORT,
         "voice_distance": 16,
         "broadcast_range": 128,
+        "voice_host": SVC_DEFAULT_HOST,
         "enable": True,
         "enable_groups": True,
     },
@@ -384,6 +388,7 @@ _SVC_TEMPLATE = """#Server properties for Simple Voice Chat
 port={port}
 voice_distance={voice_distance}
 broadcast_range={broadcast_range}
+voice_host={voice_host}
 keep_voice_connection=false
 udp_thread_count=2
 show_voice_chat_settings=true
@@ -430,6 +435,7 @@ def read_svc(server_dir):
         "port": SVC_DEFAULT_PORT,
         "voice_distance": SVC_DEFAULT_DISTANCE,
         "broadcast_range": SVC_DEFAULT_BROADCAST,
+        "voice_host": SVC_DEFAULT_HOST,
         "enable": True,
         # ★ V1.8.0：分组功能开关（disable_groups=false => 开启）
         "enable_groups": True,
@@ -449,6 +455,9 @@ def read_svc(server_dir):
         m = re.search(r"^\s*broadcast_range\s*=\s*(\d+)", t, re.M)
         if m:
             out["broadcast_range"] = int(m.group(1))
+        m = re.search(r"^\s*voice_host\s*=\s*(.+)", t, re.M)
+        if m:
+            out["voice_host"] = m.group(1).strip()
         m = re.search(r"^\s*enable_voice_chat\s*=\s*(\w+)", t, re.M)
         if m:
             out["enable"] = m.group(1).lower() in ("true", "1", "yes")
@@ -491,6 +500,7 @@ def apply_svc(server_dir, opts):
                         "voice_distance", SVC_DEFAULT_DISTANCE))),
                     "broadcast_range": str(int(d.get(
                         "broadcast_range", SVC_DEFAULT_BROADCAST))),
+                    "voice_host": str(d.get("voice_host", SVC_DEFAULT_HOST)),
                     "enable_voice_chat": (
                         "true" if d.get("enable", True) else "false"),
                     "disable_groups": disable_groups,
@@ -498,7 +508,7 @@ def apply_svc(server_dir, opts):
                 return ("%s = %s" % (key, val)) if val is not None \
                     else m.group(0)
             body = re.sub(r"^\s*(port|voice_distance|broadcast_range|"
-                          r"enable_voice_chat|disable_groups)"
+                          r"voice_host|enable_voice_chat|disable_groups)"
                           r"\s*=\s*\S+.*$",
                           _sub, old, flags=re.M)
             if body == old:
@@ -515,6 +525,7 @@ def apply_svc(server_dir, opts):
                     "voice_distance", SVC_DEFAULT_DISTANCE)),
                 broadcast_range=int(d.get(
                     "broadcast_range", SVC_DEFAULT_BROADCAST)),
+                voice_host=str(d.get("voice_host", SVC_DEFAULT_HOST)),
                 enable="true" if d.get("enable", True) else "false",
                 disable_groups=disable_groups)
             # 按找到/目标路径建目录：优先新路径

@@ -3603,6 +3603,19 @@ class ServerConfigDialog(QDialog):
                 f.addRow("广播范围（格，默认 64）:",
                          _svc_spin("svc_broadcast", 8, 512,
                                    d.get("broadcast_range", 64)))
+                # ★ V2.0.14：voice_host 语音主机地址
+                host_edit = QLineEdit()
+                host_edit.setText(str(d.get("voice_host", "0.0.0.0")))
+                host_edit.setPlaceholderText("0.0.0.0")
+                self._mc_widgets["svc_host"] = host_edit
+                f.addRow("voice_host 语音主机地址:", host_edit)
+                lbl_host = QLabel(
+                    "语音服务绑定的主机地址。0.0.0.0 = 监听所有网卡（默认）；\n"
+                    "填具体 IP（如 192.168.1.100）可限制只监听该网卡。\n"
+                    "云服务器多网卡时按需指定，一般保持默认即可。")
+                lbl_host.setStyleSheet(_muted())
+                lbl_host.setWordWrap(True)
+                f.addRow("", lbl_host)
                 self._mc_widgets["svc_enable"] = self._mk_check(
                     "启用语音聊天（关掉后进服不加载语音）",
                     bool(d.get("enable", True)))
@@ -3708,6 +3721,9 @@ class ServerConfigDialog(QDialog):
                     if g("svc_groups"):
                         g("svc_groups").setChecked(
                             bool(p.get("enable_groups", True)))
+                    if g("svc_host"):
+                        g("svc_host").setText(
+                            str(p.get("voice_host", "0.0.0.0")))
                     if g("dynamic"):
                         g("dynamic").setChecked(bool(p.get("dynamic", True)))
                     if g("target_mspt"):
@@ -3809,6 +3825,8 @@ class ServerConfigDialog(QDialog):
                 # ★ V1.8.0：分组功能开关
                 "enable_groups": bool(g("svc_groups").isChecked())
                 if g("svc_groups") else True,
+                "voice_host": str(g("svc_host").text()).strip()
+                if g("svc_host") else "0.0.0.0",
             }
         else:
             opts = {
