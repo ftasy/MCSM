@@ -455,7 +455,7 @@ def read_svc(server_dir):
         m = re.search(r"^\s*broadcast_range\s*=\s*(\d+)", t, re.M)
         if m:
             out["broadcast_range"] = int(m.group(1))
-        m = re.search(r"^\s*voice_host\s*=\s*(.+)", t, re.M)
+        m = re.search(r"^[ \t]*voice_host[ \t]*=[ \t]*(.+)", t, re.M)
         if m:
             out["voice_host"] = m.group(1).strip()
         m = re.search(r"^\s*enable_voice_chat\s*=\s*(\w+)", t, re.M)
@@ -507,9 +507,9 @@ def apply_svc(server_dir, opts):
                 }.get(key)
                 return ("%s = %s" % (key, val)) if val is not None \
                     else m.group(0)
-            body = re.sub(r"^\s*(port|voice_distance|broadcast_range|"
+            body = re.sub(r"^[ \t]*(port|voice_distance|broadcast_range|"
                           r"voice_host|enable_voice_chat|disable_groups)"
-                          r"\s*=\s*\S+.*$",
+                          r"[ 	]*=[ 	]*\S+.*$",
                           _sub, old, flags=re.M)
             if body == old:
                 return {"ok": True, "rel": rel, "backup": False}
