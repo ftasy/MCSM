@@ -405,6 +405,50 @@ class Console(QWidget):
             pass
 
 
+class FloatConsole(QDialog):
+    """★ V2.0.13：独立调出的服务器控制台窗口。
+
+    从主窗口『调出控制台』打开：只读输出 + 指令输入（复用 Console），
+    关闭该窗口只销毁视图，不向服务器发任何指令、不停止服务器；
+    主窗口关闭后服务器照常后台运行（进程解耦，见 closeEvent）。
+    """
+    closed = Signal(str)  # proc_key
+
+    def __init__(self, parent, proc, proc_key, name):
+        super().__init__(parent)
+        self.proc_key = proc_key
+        self.setWindowTitle(
+            "%s —— 服务器控制台（关闭窗口不会停止服务器）" % name)
+        self.resize(900, 560)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(8, 8, 8, 8)
+        self.console = Console()
+        self.console.proc = proc
+        self.console.proc_name = name
+        self.console.proc_key = proc_key
+        self.console.set_running(True)
+        v.addWidget(self.console, 1)
+        tip = QLabel(
+            "提示：关闭此窗口仅关闭视图，服务器继续在后台运行；"
+            "下方输入指令直接发给服务器。")
+        tip.setStyleSheet("color:#888888;")
+        v.addWidget(tip)
+
+    def append(self, text):
+        try:
+            self.console.append(text)
+        except Exception:
+            pass
+
+    def closeEvent(self, ev):
+        # 只关视图，不碰服务器进程
+        ev.accept()
+        try:
+            self.closed.emit(self.proc_key)
+        except Exception:
+            pass
+
+
 class NavButton(QWidget):
     """顶栏文字按钮：悬停淡入 + 按下回弹。
 
@@ -677,6 +721,12 @@ class MainWindow(QMainWindow):
             "停止并备份", self.do_stop_backup,
             "停止选中服务器，退出后自动备份存档")
         self.act_stop_backup.setEnabled(False)
+        # ★ V2.0.13：为正在运行的服务器调出独立控制台窗口
+        self.act_float_console = act(
+            "调出控制台", self.do_open_float_console,
+            "为正在运行的服务器打开独立控制台窗口\n"
+            "关闭窗口不会停止服务器，输入指令直接发给服务器")
+        self.act_float_console.setEnabled(False)
         tb.addSeparator()
         act("初始化服务端", self.do_create, "为选中项下载核心/模组/生成配置")
         act("服务器配置", self.do_config,
@@ -861,6 +911,8 @@ class MainWindow(QMainWindow):
         self.console.set_colors(self.disp.get("console_colors") or None)
         # 每个运行中的服务器一个独立控制台，互不干扰 -> 支持多开
         self.consoles = {}
+        # ★ V2.0.13：独立调出的控制台窗口（key → FloatConsole）
+        self.float_consoles = {}
 
         right = QSplitter(Qt.Vertical)
         g = QGroupBox("信息")
@@ -3615,6 +3667,7 @@ class MainWindow(QMainWindow):
         running = self._key(e) in self.procs
         self.act_stop.setEnabled(running)
         self.act_start.setEnabled(not running)
+        self.act_float_console.setEnabled(running)
 
     def _fill_info_detail(self, e, need=None, fmt=None, newmeta=None):
         """信息面板：服务器详情视图（未运行时显示）。
@@ -4133,6 +4186,59 @@ class MainWindow(QMainWindow):
                 return c
         return None
 
+    # ★ V2.0.13：调出服务器后台管理台（独立控制台窗口）
+    def do_open_float_console(self):
+        """为正在运行的服务器打开独立控制台窗口。
+
+        - 关闭该窗口不停止服务器（进程解耦），输入指令直接发给服务器。
+        - 同一服务器只保留一个悬浮窗，重复点击只是把它调到前台。
+        """
+        e = self._cur()
+        if not e:
+            QMessageBox.information(
+                self, "提示", "请先在列表里选中一个服务器")
+            return
+        key = self._key(e)
+        if key not in self.procs:
+            QMessageBox.information(
+                self, "提示",
+                "该服务器未在运行，无法调出控制台。\n请先点『启动』。")
+            return
+        w = self.float_consoles.get(key)
+        if w is not None:
+            w.raise_()
+            w.activateWindow()
+            return
+        proc = self.procs[key]
+        name = self._display_name(e)
+        w = FloatConsole(self, proc, key, name)
+        # 灌入主窗页签里已有的输出，窗口打开即有完整上下文
+        try:
+            c = self._console_of(proc)
+            if c is not None:
+                w.append(c.toPlainText())
+        except Exception:
+            pass
+        w.closed.connect(
+            lambda k=key: self.float_consoles.pop(k, None))
+        self.float_consoles[key] = w
+        w.show()
+
+    def _float_broadcast(self, c, line_str):
+        """★ V2.0.13：把一行输出同步给该服务器的独立控制台窗口。"""
+        if not self.float_consoles:
+            return
+        _wk = getattr(c, "proc_key", None)
+        if not _wk:
+            return
+        _w = self.float_consoles.get(_wk)
+        if _w is None:
+            return
+        try:
+            _w.append(line_str)
+        except Exception:
+            pass
+
     def _close_console_tab(self, idx):
         if idx <= 0:
             return  # 总输出页不关
@@ -4159,11 +4265,13 @@ class MainWindow(QMainWindow):
             self.act_start.setEnabled(False)
             self.act_stop.setEnabled(False)
             self.act_stop_backup.setEnabled(False)
+            self.act_float_console.setEnabled(False)
             return
         running = self._key(e) in self.procs
         self.act_start.setEnabled(not running)
         self.act_stop.setEnabled(running)
         self.act_stop_backup.setEnabled(running)
+        self.act_float_console.setEnabled(running)
         # ★ V2.0.1：选中变化时同步窗口标题监测
         try:
             self._update_title_monitor()
@@ -4933,6 +5041,7 @@ class MainWindow(QMainWindow):
                 line_str = line_bytes.decode("utf-8", "replace") + "\n"
 
             c.append(line_str)
+            self._float_broadcast(c, line_str)
             
         # 如果进程关闭，缓冲区还有残留且没换行的内容，也要吐出来
         if state == QProcess.NotRunning and buf:
@@ -4949,6 +5058,7 @@ class MainWindow(QMainWindow):
                 line_str = buf.decode("utf-8", "replace") + "\n"
             # c 在主循环之前已经算过（proc 没变，_console_of 结果一样）
             c.append(line_str)
+            self._float_broadcast(c, line_str)
             self._proc_buffers.pop(proc, None)
 
     def _check_restart_time(self, k, e):
@@ -5217,6 +5327,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("正在停止 %s ..." % e.get("name"))
         self.act_stop.setEnabled(False)
         self.act_stop_backup.setEnabled(False)
+        self.act_float_console.setEnabled(False)
         try:
             proc.write(b"stop\n")
         except Exception:
@@ -5257,15 +5368,13 @@ class MainWindow(QMainWindow):
 
         # ★ 2. 再检查运行中的服务器（进程：MC 服务端）
         if self.procs:
-            r = QMessageBox.question(
-                self, "确认",
-                "还有 %d 个服务器在运行。\n\n"
-                "退出管理器后，服务器会继续在后台独立运行，\n"
+            # ★ V2.0.13：不再询问确认，直接弹提示告知服务器将在后台继续运行
+            QMessageBox.information(
+                self, "服务器将在后台运行",
+                "有 %d 个服务器仍在运行。\n\n"
+                "关闭管理器后，服务器会继续在后台独立运行，\n"
                 "不再受管理器控制（控制台 / 停止按钮 / 定时备份将失效）。\n\n"
-                "确定退出？" % len(self.procs))
-            if r != QMessageBox.Yes:
-                ev.ignore()
-                return
+                "如需停止服务器，请重新打开管理器。" % len(self.procs))
             # ★ V2.0.12：进程解耦 —— 退出时不再给服务器发 stop，也不强杀。
             #   java 服务器本就是独立进程，QProcess 只是控制通道；
             #   管理器退出后它继续运行（用户明确要求：

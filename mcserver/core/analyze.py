@@ -252,7 +252,11 @@ RULES = [
         "patterns": [
             r"java\.lang\.nosuchmethoderror",
             r"java\.lang\.noclassdeffounderror",
-            r"java\.lang\.classnotfoundexception",
+            # ★ v2.0.13：移除裸 ClassNotFoundException —— Fabric 里
+            #   'Error loading class: xxx (ClassNotFoundException)' 是模组
+            #   探测可选依赖/集成类的标准做法（如 c2me 探测 starlight），
+            #   与版本无关，会大量误报。真正版本不匹配必伴随
+            #   Mixin apply failed / NoSuchMethodError / NoClassDefFoundError。
             r"mixin apply failed",
             r"mixinapplyfailed",
         ],

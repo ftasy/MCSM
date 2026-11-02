@@ -1763,8 +1763,12 @@ def modrinth_pick(slug, mc_version, loader, on_retry=None):
     #   Mixin 注入失败（@Shadow collisionShape 在 target 类找不到字段）
     #   导致服务器启动即崩。官方为此发布了 hotfix 版（7.1.0-hotfix-fabric，
     #   仅支持 1.21.3+fabric），1.21.3 服强制优先挑 hotfix。
+    # ★ V2.0.13：核查 Modrinth 全部版本 —— 同款坑还存在于 1.21.1
+    #   （官方 7.0.2-hotfix-fabric，下载量远超 7.1.0-hotfix，说明 1.21.1
+    #   崩溃用户更多）。其余 MC 版本官方未提供 hotfix（未爆同类问题），
+    #   保持原样。1.21/1.21.4+ 均不受影响。
     prefer = None
-    if slug == "ferrite-core" and mc_version == "1.21.3" \
+    if slug == "ferrite-core" and mc_version in ("1.21.1", "1.21.3") \
             and loader in ("fabric", "quilt"):
         prefer = "hotfix"
 
