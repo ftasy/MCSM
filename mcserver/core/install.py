@@ -1759,6 +1759,15 @@ def modrinth_pick(slug, mc_version, loader, on_retry=None):
     """智能挑选版本：先精确匹配，失败后动态回退到最兼容的版本。"""
     import re as _re
 
+    # ★ V2.0.12：已知版本坑 —— FerriteCore 7.1.0 在 1.21.3 上
+    #   Mixin 注入失败（@Shadow collisionShape 在 target 类找不到字段）
+    #   导致服务器启动即崩。官方为此发布了 hotfix 版（7.1.0-hotfix-fabric，
+    #   仅支持 1.21.3+fabric），1.21.3 服强制优先挑 hotfix。
+    prefer = None
+    if slug == "ferrite-core" and mc_version == "1.21.3" \
+            and loader in ("fabric", "quilt"):
+        prefer = "hotfix"
+
     def _fetch_sources_order():
         """请求源顺序：auto 先 MCIM 后官方；手动锁死则只走所选源。"""
         from . import sources as _s
@@ -1804,7 +1813,7 @@ def modrinth_pick(slug, mc_version, loader, on_retry=None):
     # 1. 精确匹配
     vs = _fetch([mc_version])
     if vs:
-        return _pick_best(vs)
+        return _pick_best(vs, prefer)
 
     # 2. 精确匹配失败，获取该加载器下的所有版本
     all_vs = _fetch(None)
@@ -1837,12 +1846,23 @@ def modrinth_pick(slug, mc_version, loader, on_retry=None):
     # 3. 动态回退已移除（严禁跨小版本乱装，1.20.4 的 Forge 模组塞给 1.20.1 必崩）
     #   旧的“终极兜底”（不带过滤取任意最新版本）同步移除 —— 它会让
     #   recipeessentials 在 26.3 服被塞 1.21 jar 且显示“安装成功”。
-    return _pick_best(match)
+    return _pick_best(match, prefer)
 
 
-def _pick_best(versions):
-    """从版本列表中挑选第一个包含 jar 文件的（优先 release）。"""
+def _pick_best(versions, prefer=None):
+    """从版本列表中挑选第一个包含 jar 文件的（优先 release）。
+
+    prefer：★ V2.0.12 —— 版本名关键词优先。如 FerriteCore 在 1.21.3
+    上普通版 Mixin 注入崩溃（collisionShape @Shadow 找不到字段），
+    官方出了 hotfix 版。传 prefer="hotfix" 时只从版本名含该关键词的
+    版本里挑，避免挑回会崩的普通版。
+    """
     sorted_vs = sorted(versions, key=lambda v: 0 if v.get("version_type") == "release" else 1)
+    if prefer:
+        hit = [v for v in sorted_vs
+               if prefer in (v.get("version_number") or "")]
+        if hit:
+            sorted_vs = hit
     for v in sorted_vs:
         for f in v.get("files") or []:
             if f.get("url") and f.get("filename", "").endswith(".jar"):

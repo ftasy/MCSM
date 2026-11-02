@@ -2734,10 +2734,24 @@ class MainWindow(QMainWindow):
             return
         wd = worlds[0]
         self._log_console(f"[备份] 触发定时备份: {wd['rel']} ...")
-        
+
+        # ★ V2.0.12：服务器运行时直接复制会拿到写了一半的区块文件
+        #   （这就是"服务器运行时备份复制不了内容"的根因）。
+        #   先通过控制台发 save-all flush（原版 / Fabric / Paper 均支持），
+        #   把内存里的存档先刷进磁盘，再开始复制。
+        try:
+            proc = self.procs.get(k)
+            if proc is not None and proc.state() == QProcess.Running:
+                proc.write(b"save-all flush\n")
+                self._log_console("[备份] 已发送 save-all flush，等待写入磁盘 ...")
+        except Exception:
+            pass
+
         # 把备份放到后台，且使用 5 个循环覆盖的命名规则以防占满空间
         def job(on_log=None):
-            return backup.backup_world(wd["path"], sd, note="auto", 
+            import time as _t
+            _t.sleep(2.5)  # 给 save-all flush 落盘时间（后台线程，不卡界面）
+            return backup.backup_world(wd["path"], sd, note="auto",
                                        compress=True, on_log=on_log)
                                        
         w = _track(self, Worker(job, {}, self))
@@ -5244,59 +5258,22 @@ class MainWindow(QMainWindow):
         # ★ 2. 再检查运行中的服务器（进程：MC 服务端）
         if self.procs:
             r = QMessageBox.question(
-                self, "确认", "还有 %d 个服务器在运行，确定退出？"
-                % len(self.procs))
+                self, "确认",
+                "还有 %d 个服务器在运行。\n\n"
+                "退出管理器后，服务器会继续在后台独立运行，\n"
+                "不再受管理器控制（控制台 / 停止按钮 / 定时备份将失效）。\n\n"
+                "确定退出？" % len(self.procs))
             if r != QMessageBox.Yes:
                 ev.ignore()
                 return
-            # ★ 标记为主动停止，防止退出时触发自动重启
+            # ★ V2.0.12：进程解耦 —— 退出时不再给服务器发 stop，也不强杀。
+            #   java 服务器本就是独立进程，QProcess 只是控制通道；
+            #   管理器退出后它继续运行（用户明确要求：
+            #   "启动器无响应后结果服务器还在运行"要作为常态行为）。
+            #   这里只清掉引用、停掉自动重启标记，避免退出后定时器误触发。
             for k in list(self.procs.keys()):
                 self._is_stopping[k] = True
-                
-            # 发送 stop 命令（让服务器优雅关闭保存存档）
-            for p in list(self.procs.values()):
-                try:
-                    p.write(b"stop\n")
-                except Exception:
-                    pass
-
-            # ★ 用 QEventLoop 丝滑等待，不会卡死界面
-            from PySide6.QtCore import QEventLoop
-            loop = QEventLoop()
-
-            def check_procs():
-                if not self.procs:
-                    loop.quit()
-
-            # 轮询：进程退光了就退出
-            check_timer = QTimer(self)
-            check_timer.timeout.connect(check_procs)
-            check_timer.start(100)
-
-            # 超时守卫：用独立 QTimer 实例，而不是 singleShot 匿名定时器
-            # 因为 loop 提前 quit 后，匿名定时器还会在事件队列里活着，
-            # 5 秒后触发时 loop 已经销毁 -> RuntimeError: already deleted
-            timeout_timer = QTimer(self)
-            timeout_timer.setSingleShot(True)
-            timeout_timer.timeout.connect(loop.quit)
-            timeout_timer.start(5000)
-
-            loop.exec()  # 不会阻塞 UI
-
-            # ★ 退出后立刻停掉所有定时器，防止它们在 loop 销毁后触发
-            check_timer.stop()
-            timeout_timer.stop()
-
-            # 剩余没退出的，强杀
-            for p in list(self.procs.values()):
-                try:
-                    if p.state() != QProcess.NotRunning:
-                        p.kill()
-                        # 强杀是异步的，等最多 500ms 让 QProcess 走完 finished 信号
-                        # 否则主程序一关，java 进程可能变成孤儿进程
-                        p.waitForFinished(500)
-                except Exception:
-                    pass
+            self.procs.clear()
 
         # ★ 3. 停掉所有还在跑的后台线程
         try:
