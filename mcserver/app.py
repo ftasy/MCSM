@@ -642,6 +642,46 @@ def _on_bg(c):
     return t.on_bg(c) if t else c
 
 
+
+class ReattachedProcess:
+    """V2.1.0: Wrapper for a server process from a previous manager instance."""
+    def __init__(self, pid, server_dir, name=""):
+        self._pid = pid
+        self._server_dir = server_dir
+        self._name = name
+        self._alive = self._check_alive()
+
+    def _check_alive(self):
+        try:
+            import subprocess as _sp
+            r = _sp.run(["tasklist", "/FI", "PID eq %d" % self._pid, "/FO", "CSV", "/NH"],
+                       capture_output=True, text=True, timeout=5,
+                       creationflags=getattr(_sp, 'CREATE_NO_WINDOW', 0))
+            return str(self._pid) in (r.stdout or "")
+        except Exception:
+            return False
+
+    def write(self, data):
+        cmd = data.decode("utf-8", "replace").strip().lower()
+        if cmd == "stop":
+            import subprocess as _sp
+            _sp.Popen(["taskkill", "/PID", str(self._pid)],
+                      creationflags=getattr(_sp, 'CREATE_NO_WINDOW', 0))
+
+    def state(self):
+        if self._alive:
+            self._alive = self._check_alive()
+        return QProcess.Running if self._alive else QProcess.NotRunning
+
+    def processId(self):
+        return self._pid
+
+    def kill(self):
+        import subprocess as _sp
+        _sp.Popen(["taskkill", "/PID", str(self._pid), "/F"],
+                  creationflags=getattr(_sp, 'CREATE_NO_WINDOW', 0))
+        self._alive = False
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -657,6 +697,7 @@ class MainWindow(QMainWindow):
         # ★ 第一处修改：必须是空字典，不能有 k 和 e
         self.pending_backups = {}  
         self._is_stopping = {}  # 记录是否是用户主动停止
+        self._log_tailers = {}  # V2.1.0: reattached server log tail timers
         self.auto_restart_count = {}  # 记录自动重启次数
         self.auto_backup_timers = {}  # 定时备份定时器  
         self._size_cache = {}  # ★ 缓存文件夹大小，不要写进 servers.json  
@@ -695,6 +736,7 @@ class MainWindow(QMainWindow):
         self._ping_timer = QTimer(self)
         self._ping_timer.timeout.connect(self._ping_round)
         self._ping_timer.start(10000)
+        QTimer.singleShot(500, self._detect_running_servers)
 
     # ---------------- UI ----------------
     def _build_ui(self):
@@ -4239,6 +4281,118 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+
+    def _spawn_exit_console(self, key, proc):
+        """V2.1.0: Spawn standalone cmd window tailing server log on manager exit."""
+        import subprocess as _sp
+        e = None
+        for en in self.entries:
+            if self._key(en) == key:
+                e = en
+                break
+        if not e:
+            return
+        sd = e.get("server_dir") or e["folder"]
+        name = e.get("name") or e["folder"]
+        pid = proc.processId() if hasattr(proc, 'processId') else 0
+        log_file = os.path.join(sd, "logs", "latest.log")
+        bat_path = os.path.join(sd, ".mcsm_console.bat")
+        lines = [
+            "@echo off",
+            "chcp 65001 >nul 2>&1",
+            "title %s - server console (MCSM exited)" % name,
+            "echo ============================================",
+            "echo  Server: %s" % name,
+            "echo  PID: %d" % pid,
+            "echo  MCSM manager exited, server still running",
+            "echo  Reopen MCSM to restore full management",
+            "echo ============================================",
+            "echo.",
+        ]
+        if os.path.isfile(log_file):
+            lines.append("echo Tailing log (close window won't stop server):")
+            lines.append("echo.")
+            lines.append("powershell -NoProfile -Command " + chr(34) + "Get-Content -Path " + chr(39) + log_file + chr(39) + " -Wait -Tail 50" + chr(34))
+        else:
+            lines.append("echo (log not found, server may still be starting)")
+            lines.append("pause")
+        with open(bat_path, "w", encoding="utf-8") as f:
+            f.write(chr(10).join(lines) + chr(10))
+        _sp.Popen(["cmd", "/c", bat_path], creationflags=getattr(_sp, "CREATE_NEW_CONSOLE", 0))
+
+    def _detect_running_servers(self):
+        """V2.1.0: On startup, detect servers still running from previous session."""
+        import subprocess as _sp
+        for e in self.entries:
+            sd = e.get("server_dir") or e["folder"]
+            pid_file = os.path.join(sd, ".mcsm_pid")
+            if not os.path.isfile(pid_file):
+                continue
+            try:
+                with open(pid_file, "r") as f:
+                    pid = int(f.read().strip())
+            except Exception:
+                try: os.remove(pid_file)
+                except Exception: pass
+                continue
+            try:
+                r = _sp.run(["tasklist", "/FI", "PID eq %d" % pid, "/FO", "CSV", "/NH"],
+                           capture_output=True, text=True, timeout=5,
+                           creationflags=getattr(_sp, 'CREATE_NO_WINDOW', 0))
+                alive = str(pid) in (r.stdout or "")
+            except Exception:
+                alive = False
+            k = self._key(e)
+            if alive:
+                proc = ReattachedProcess(pid, sd, e.get("name", ""))
+                self.procs[k] = proc
+                self._is_stopping[k] = False
+                c = self._console_tab(k, e.get("name") or "server")
+                c.proc = proc
+                c.set_running(True)
+                c.append("=== detected running server (PID=%d) ===" % pid)
+                self._tail_log(k, sd, c)
+                self._refresh_actions()
+                self._refresh_status(e)
+            else:
+                try: os.remove(pid_file)
+                except Exception: pass
+        if self.procs:
+            self.statusBar().showMessage("detected %d running servers" % len(self.procs))
+
+    def _tail_log(self, key, server_dir, console):
+        """V2.1.0: Tail a reattached server log file."""
+        log_file = os.path.join(server_dir, "logs", "latest.log")
+        if not os.path.isfile(log_file):
+            return
+        try:
+            with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+                f.seek(0, 2)
+                pos = f.tell()
+        except Exception:
+            pos = 0
+        timer = QTimer(self)
+        def _poll():
+            nonlocal pos
+            try:
+                with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+                    f.seek(pos)
+                    new = f.read()
+                    if new:
+                        console.append(new)
+                        pos = f.tell()
+            except Exception:
+                pass
+            proc = self.procs.get(key)
+            if proc and hasattr(proc, '_check_alive'):
+                if not proc._check_alive():
+                    timer.stop()
+                    self._log_tailers.pop(key, None)
+                    self._finished(proc, 0)
+        timer.timeout.connect(_poll)
+        timer.start(1000)
+        self._log_tailers[key] = timer
+
     def _close_console_tab(self, idx):
         if idx <= 0:
             return  # 总输出页不关
@@ -4886,6 +5040,13 @@ class MainWindow(QMainWindow):
             pass
         self.procs[k] = proc
         self._is_stopping[k] = False
+        try:
+            _pid = proc.processId()
+            if _pid:
+                with open(os.path.join(sd, ".mcsm_pid"), "w") as _pf:
+                    _pf.write(str(_pid))
+        except Exception:
+            pass
         # ★ 只有手动启动才重置崩溃计数，自动重启不能重置，否则会无限循环
         if not auto_restart:
             self.auto_restart_count[k] = 0
@@ -5126,6 +5287,15 @@ class MainWindow(QMainWindow):
         #   防止残留的 _is_stopping 把崩溃误判成"主动停止"、
         #   残留的 _port_cache 让悬停显示旧端口。
         #   （is_stopping 提前取出来，供下面自动重启判断使用）
+        if key:
+            for en in self.entries:
+                if self._key(en) == key:
+                    _sd = en.get("server_dir") or en.get("folder", "")
+                    try: os.remove(os.path.join(_sd, ".mcsm_pid"))
+                    except Exception: pass
+                    break
+        _t = self._log_tailers.pop(key, None)
+        if _t: _t.stop()
         is_stopping = self._is_stopping.pop(key, None)
         self._port_cache.pop(key, None)
         # ★ V0.5.0：计划重启标记提前取出；顺带清掉监控/倒计时状态
@@ -5368,13 +5538,15 @@ class MainWindow(QMainWindow):
 
         # ★ 2. 再检查运行中的服务器（进程：MC 服务端）
         if self.procs:
-            # ★ V2.0.13：不再询问确认，直接弹提示告知服务器将在后台继续运行
+            for _k, _proc in list(self.procs.items()):
+                try: self._spawn_exit_console(_k, _proc)
+                except Exception: pass
             QMessageBox.information(
                 self, "服务器将在后台运行",
                 "有 %d 个服务器仍在运行。\n\n"
                 "关闭管理器后，服务器会继续在后台独立运行，\n"
-                "不再受管理器控制（控制台 / 停止按钮 / 定时备份将失效）。\n\n"
-                "如需停止服务器，请重新打开管理器。" % len(self.procs))
+                "已为每个服务器弹出独立控制台窗口。\n\n"
+                "重新打开管理器可自动恢复管理。" % len(self.procs))
             # ★ V2.0.12：进程解耦 —— 退出时不再给服务器发 stop，也不强杀。
             #   java 服务器本就是独立进程，QProcess 只是控制通道；
             #   管理器退出后它继续运行（用户明确要求：
