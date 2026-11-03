@@ -5,6 +5,7 @@ import os
 import re
 
 from . import versions
+from . import fsutil
 
 _RE_WHITESPACE_B = re.compile(r"\s+")
 
@@ -313,17 +314,14 @@ def write_eula(server_dir):
     txt = ("#By changing the setting below to TRUE you are indicating "
            "your agreement to our EULA (https://aka.ms/MinecraftEULA).\n"
            "eula=true\n")
-    with open(p, "w", encoding="utf-8", newline="\n") as f:
-        f.write(txt)
+    fsutil.atomic_write_text(p, txt, encoding="utf-8", newline="\n")
     return p
 
 
 def write_text(path, text, crlf=True):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    nl = "\r\n" if crlf else "\n"
-    with open(path, "w", encoding="utf-8", newline="") as f:
-        if crlf:
-            f.write(text.replace("\n", "\r\n"))
-        else:
-            f.write(text)
+    fsutil.atomic_write_text(
+        path,
+        text.replace("\n", "\r\n") if crlf else text,
+        encoding="utf-8", newline="")
     return path

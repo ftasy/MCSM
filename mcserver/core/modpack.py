@@ -25,6 +25,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import install
 from . import sources
+from . import fsutil
 
 
 _RE_CLEAN_NAME = re.compile(r"[\\/:*?\"<>|\s]+")
@@ -148,8 +149,9 @@ def _ensure_props(server_dir):
     p = os.path.join(server_dir, "server.properties")
     if os.path.isfile(p):
         return
-    with open(p, "w", encoding="utf-8", newline="") as f:
-        f.write("server-port=25565\nmotd=MCSM Modpack Server\n")
+    fsutil.atomic_write_text(
+        p, "server-port=25565\nmotd=MCSM Modpack Server\n",
+        encoding="utf-8", newline="")
 
 
 def _download_mods(server_dir, meta, log):

@@ -8,6 +8,7 @@
 
 import os
 import json
+from . import fsutil
 
 # 默认配色：浅色系（浅灰白底 + 近黑字 + 蓝色强调）。
 #   bg     #f4f6f8  浅灰白。不用纯白 #ffffff 是因为纯白在
@@ -225,8 +226,7 @@ def save(d=None):
         d0 = os.path.dirname(p)
         if d0:
             os.makedirs(d0, exist_ok=True)
-        with open(p, "w", encoding="utf-8") as f:
-            json.dump(_cfg, f, ensure_ascii=False, indent=2)
+        fsutil.atomic_write_json(p, _cfg)
         return (True, p)
     except Exception as e:
         return (False, "%s  (%s)" % (repr(e), p))

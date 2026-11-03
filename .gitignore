@@ -17,6 +17,11 @@ mc_versions_cache.json
 manager.log
 *.log
 
+# 原子写入产生的快照与临时文件（运行时数据，不进库）
+*.bak
+*.bak.[0-9]
+*.tmp
+
 # 系统/编辑器
 .DS_Store
 Thumbs.db

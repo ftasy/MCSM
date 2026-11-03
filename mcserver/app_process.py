@@ -10,7 +10,7 @@ import logging
 
 from PySide6.QtCore import QProcess, QTimer
 from PySide6.QtWidgets import QFileDialog, QMessageBox
-from .core import versions, java as javacore, builder, install
+from .core import versions, java as javacore, builder, install, fsutil
 from .dialogs import Worker
 from .const import _XMX_RE
 
@@ -224,10 +224,10 @@ class ProcessMixin:
             aikar_args = builder.AIKAR_FLAGS if use_aikar else []
             try:
                 if not os.path.isfile(uj):
-                    with open(uj, "w", encoding="utf-8") as f:
-                        f.write("-Xms%s\n-Xmx%s\n" % (xms, xmx))
-                        if aikar_args:
-                            f.write("\n".join(aikar_args) + "\n")
+                    body = "-Xms%s\n-Xmx%s\n" % (xms, xmx)
+                    if aikar_args:
+                        body += "\n".join(aikar_args) + "\n"
+                    fsutil.atomic_write_text(uj, body, encoding="utf-8")
                 elif aikar_args:
                     with open(uj, "r", encoding="utf-8") as f:
                         c = f.read()
@@ -240,8 +240,7 @@ class ProcessMixin:
                         c = _XMX_RE.sub("-Xmx%s" % xms, c)
                         need = True
                     if need:
-                        with open(uj, "w", encoding="utf-8") as f:
-                            f.write(c)
+                        fsutil.atomic_write_text(uj, c, encoding="utf-8")
             except Exception:
                 pass
             # ★ 绝对路径即可。QProcess 会自动为带空格的参数加双引号，
@@ -276,8 +275,9 @@ class ProcessMixin:
         try:
             _pid = proc.processId()
             if _pid:
-                with open(os.path.join(sd, ".mcsm_pid"), "w") as _pf:
-                    _pf.write(str(_pid))
+                fsutil.atomic_write_text(os.path.join(sd, ".mcsm_pid"),
+                                         str(_pid), encoding="utf-8",
+                                         newline="")
         except Exception:
             pass
         # ★ 只有手动启动才重置崩溃计数，自动重启不能重置，否则会无限循环

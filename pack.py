@@ -19,7 +19,9 @@ EXCLUDE_DIRS = {"__pycache__", ".git", ".idea", ".vscode",
 # ★ V1.6.3：用户解压安装包测试留下的 MCSM_vX.Y_安装包/ 目录
 #   绝不能递归打进新包（否则包里有包、体积膨胀）。
 EXCLUDE_PREFIX_DIRS = ("MCSM_v",)
-EXCLUDE_EXTS = {".pyc", ".pyo", ".zip", ".rar", ".7z", ".log"}
+EXCLUDE_EXTS = {".pyc", ".pyo", ".zip", ".rar", ".7z", ".log",
+                ".bak", ".tmp"}   # 快照/临时文件是运行时产物，不进包
+EXCLUDE_NAME_SUFFIXES = (".bak", ".tmp")  # 含 .bak.2 / .bak.3 这类
 EXCLUDE_FILES = {
     "servers.json",          # 用户服务器列表
     "theme.json",            # 用户主题
@@ -51,6 +53,10 @@ def pack():
                 if f in EXCLUDE_FILES:
                     continue
                 if any(f.endswith(ext) for ext in EXCLUDE_EXTS):
+                    continue
+                if any(f.endswith(sfx) for sfx in EXCLUDE_NAME_SUFFIXES):
+                    continue
+                if ".bak." in f:      # servers.json.bak.2 这类轮转快照
                     continue
 
                 fp = os.path.join(root, f)

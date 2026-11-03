@@ -15,6 +15,7 @@ import urllib.parse
 import urllib.error
 
 from . import net
+from . import fsutil
 
 # 统一使用 core/net 的 UA / 超时 / 重试参数
 UA = net.UA
@@ -1192,8 +1193,8 @@ def collect_diag(server_dir, out_dir=None, extra_log=None):
             src, content = cand
             fn = "控制台输出.txt"
             try:
-                open(os.path.join(folder, fn), "w",
-                     encoding="utf-8").write(content)
+                fsutil.atomic_write_text(os.path.join(folder, fn), content,
+                                         encoding="utf-8")
             except Exception:
                 pass
             # 只留最后 500 行进报告，避免过大
@@ -1258,8 +1259,8 @@ def collect_diag(server_dir, out_dir=None, extra_log=None):
             pass
 
     try:
-        open(os.path.join(folder, "诊断报告.txt"), "w",
-             encoding="utf-8").write("\n".join(rep))
+        fsutil.atomic_write_text(os.path.join(folder, "诊断报告.txt"),
+                                 "\n".join(rep), encoding="utf-8")
     except Exception:
         pass
 
@@ -2092,8 +2093,7 @@ def compat_cache_save(items):
     try:
         d = {"items": {k: {"ok": v[0], "why": v[1], "ts": time.time()}
                        for k, v in items.items()}}
-        with open(compat_cache_path(), "w", encoding="utf-8") as f:
-            json.dump(d, f, ensure_ascii=False)
+        fsutil.atomic_write_json(compat_cache_path(), d, indent=None)
     except Exception:
         pass
 

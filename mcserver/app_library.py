@@ -10,7 +10,7 @@ import json
 from PySide6.QtGui import QColor
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFileDialog, QMessageBox, QTableWidgetItem
-from .core import scanner, versions, builder
+from .core import scanner, versions, builder, fsutil
 from .dialogs import (
     ModDialog, DeleteServerDialog, DiagDialog, AnalyzeDialog, Worker, _track)
 from . import updater
@@ -78,8 +78,9 @@ class LibraryMixin:
                     out.append("level-name=%s" % fixed)
                 else:
                     out.append(line)
-            with open(p, "w", encoding="utf-8", newline="\n") as f:
-                f.write("\n".join(out) + "\n")
+            fsutil.atomic_write_text(p, "\n".join(out) + "\n",
+                                     encoding="utf-8", newline="\n",
+                                     keep_backup=True)
             self.console.append(
                 "[OK] level-name 已改为: %s" % fixed)
             self.do_scan()
@@ -212,8 +213,11 @@ class LibraryMixin:
         try:
             p = self._data_path()
             if os.path.isfile(p):
-                with open(p, "r", encoding="utf-8") as f:
-                    self.data = json.load(f)
+                # 主文件损坏（半截/空）时自动退回 .bak，别让用户白丢列表
+                d = fsutil.read_json_fallback(p)
+                if d is None:
+                    raise ValueError("servers.json 与 .bak 都无法解析")
+                self.data = d
                 if "display" in self.data:
                     self.disp.update(self.data["display"])
                 if "servers" not in self.data:
@@ -236,8 +240,8 @@ class LibraryMixin:
             d0 = os.path.dirname(p)
             if d0:
                 os.makedirs(d0, exist_ok=True)
-            with open(p, "w", encoding="utf-8") as f:
-                json.dump(self.data, f, ensure_ascii=False, indent=2)
+            # ★ 原子写 + .bak：服务器列表绝不能被写坏
+            fsutil.atomic_write_json(p, self.data, keep_backup=True)
             if getattr(self, "_save_failed", False):
                 self._save_failed = False
             return (True, p)

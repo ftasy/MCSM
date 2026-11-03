@@ -6,6 +6,7 @@ import json
 import re
 
 from . import net
+from . import fsutil
 
 _RE_VER_NUMBERS = re.compile(r"(\d+(?:\.\d+)*)")
 _RE_JAVA_MAJOR = re.compile(r'"(\d+)(?:\.(\d+))?')
@@ -422,8 +423,7 @@ def save_cache(data=None):
         d0 = os.path.dirname(_CACHE_PATH)
         if d0:
             os.makedirs(d0, exist_ok=True)
-        with open(_CACHE_PATH, "w", encoding="utf-8") as f:
-            json.dump(_extra_versions, f, ensure_ascii=False, indent=1)
+        fsutil.atomic_write_json(_CACHE_PATH, _extra_versions, indent=1)
         return (True, _CACHE_PATH)
     except Exception as e:
         # 缓存写不进去不算致命（下次还能重新拉），但要如实返回

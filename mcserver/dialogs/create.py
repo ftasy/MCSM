@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QComboBox, QPushButton, QCheckBox, QFileDialog, QMessageBox, QProgressBar,
     QDialogButtonBox, QGroupBox, QScrollArea, QDoubleSpinBox, QFrame, QWidget,
     QCompleter)
-from ..core import versions, java as javacore, install, builder, props
+from ..core import versions, java as javacore, install, builder, props, fsutil
 from ..dialog_workers import (
     _StopMixin, Worker, LoaderVerWorker, _track, _stop_threads)
 from .common import (
@@ -1234,8 +1234,7 @@ class CreateDialog(QDialog):
             xms="%dM" % info["xms"], xmx="%dM" % info["xmx"],
             launch=launcher, args_rel=args_rel)
         bp = os.path.join(sd, "run.bat")
-        with open(bp, "w", encoding="utf-8", newline="") as f:
-            f.write(bat)
+        fsutil.atomic_write_text(bp, bat, encoding="utf-8", newline="")
         log("[OK] run.bat")
 
         return {"server_dir": sd, "jar": jar_name, "java": info["java"],

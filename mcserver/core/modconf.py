@@ -22,6 +22,7 @@
 import os
 import re
 import shutil
+from . import fsutil
 
 # ★ 性能优化：预编译所有字面量正则（read_servercore / read_svc / apply_svc 使用）
 # ServerCore 配置读取
@@ -281,14 +282,13 @@ def apply_servercore(server_dir, opts):
             bk = cur + ".bak"
             with open(cur, "r", encoding="utf-8", errors="replace") as f:
                 old = f.read()
-            with open(bk, "w", encoding="utf-8") as f:
-                f.write(old)
+            fsutil.atomic_write_text(bk, old, encoding="utf-8")
             res["backup"] = bk
         except Exception:
             pass
     try:
-        with open(target, "w", encoding="utf-8") as f:
-            f.write(servercore_yaml(opts))
+        fsutil.atomic_write_text(target, servercore_yaml(opts),
+                                 encoding="utf-8")
     except Exception as e:
         res["err"] = "写入失败：%r" % e
         return res
@@ -557,8 +557,7 @@ def apply_svc(server_dir, opts):
                                    "config", "voicechat")
             p = os.path.join(cfg_dir, "voicechat-server.properties")
             os.makedirs(cfg_dir, exist_ok=True)
-        with open(p, "w", encoding="utf-8", newline="") as f:
-            f.write(body)
+        fsutil.atomic_write_text(p, body, encoding="utf-8", newline="")
         return {"ok": True, "rel": rel, "backup": backup}
     except Exception as e:
         return {"ok": False, "rel": rel,

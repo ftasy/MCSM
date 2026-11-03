@@ -9,7 +9,7 @@ import os
 from PySide6.QtGui import QColor
 from PySide6.QtCore import Qt, QProcess, QTimer, QSize
 from PySide6.QtWidgets import QLabel, QMessageBox, QTableWidgetItem
-from .core import monitor
+from .core import monitor, fsutil
 from .dialogs import Worker, _track
 from .widgets import Console, FloatConsole, ReattachedProcess, _fg, _on_bg
 
@@ -129,8 +129,8 @@ class ConsoleMixin:
         else:
             lines.append("echo (log not found, server may still be starting)")
             lines.append("pause")
-        with open(bat_path, "w", encoding="utf-8") as f:
-            f.write(chr(10).join(lines) + chr(10))
+        fsutil.atomic_write_text(bat_path, chr(10).join(lines) + chr(10),
+                                 encoding="utf-8")
         _sp.Popen(["cmd", "/c", bat_path], creationflags=getattr(_sp, "CREATE_NEW_CONSOLE", 0))
 
     def _detect_running_servers(self):
@@ -592,8 +592,9 @@ class ConsoleMixin:
                     out.append(ln)
             if not hit:
                 out.append("server-port=%d" % port)
-            with open(p, "w", encoding="utf-8", newline="\n") as f:
-                f.write("\n".join(out) + "\n")
+            fsutil.atomic_write_text(p, "\n".join(out) + "\n",
+                                     encoding="utf-8", newline="\n",
+                                     keep_backup=True)
             self._log_console("[端口] 已改为 %d" % port)
             QMessageBox.information(
                 self, "已改端口",

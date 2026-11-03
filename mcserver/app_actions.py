@@ -10,7 +10,8 @@ import traceback
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QMessageBox
-from .core import versions, java as javacore, builder, migrate, install, modman
+from .core import (versions, java as javacore, builder, migrate, install,
+                   modman, fsutil)
 from .dialogs import CreateDialog, MigrateDialog, Worker, _track
 
 
@@ -125,8 +126,7 @@ class ActionsMixin:
             pause=sv.get("pause", "error"),
             aikar=sv.get("aikar", False))
         p = os.path.join(sd, "run.bat")
-        with open(p, "w", encoding="utf-8", newline="") as f:
-            f.write(bat)
+        fsutil.atomic_write_text(p, bat, encoding="utf-8", newline="")
         self.statusBar().showMessage("已生成 %s" % p)
         QMessageBox.information(self, "完成", "已生成:\n%s" % p)
 
@@ -352,8 +352,8 @@ class ActionsMixin:
                     break
             if not hit:
                 lines.append("online-mode=%s\n" % val)
-            with open(p, "w", encoding="utf-8") as f:
-                f.writelines(lines)
+            fsutil.atomic_write_text(p, "".join(lines), encoding="utf-8",
+                                     keep_backup=True)
         except Exception:
             pass
 
@@ -400,8 +400,7 @@ class ActionsMixin:
                     "不同，为避免覆盖你的自定义配置，本次没有写入。\n\n"
                     "如需更换皮肤站，请手动修改该文件。")
                 return
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(body)
+            fsutil.atomic_write_text(path, body, encoding="utf-8")
             self._log_console("[登录] 已生成 multi-yggdrasil.ini")
         except Exception:
             pass

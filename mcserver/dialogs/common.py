@@ -11,7 +11,7 @@ import sys
 from PySide6.QtGui import QTextCursor
 from PySide6.QtCore import Qt, QThread
 from PySide6.QtWidgets import QMessageBox, QPlainTextEdit, QTextBrowser
-from ..core import modman, net
+from ..core import modman, net, fsutil
 from ..dialog_workers import (
     _LIVE_THREADS, _StopMixin, Worker, IconWorker, LoaderVerWorker, _track,
     _stop_threads, _stop_all_threads, _install_exit_hook, _fetch_icon_img,
@@ -318,8 +318,8 @@ def _yaml_patch_preserve(path, edits):
         changed = True
 
     if changed:
-        with open(path, "w", encoding="utf-8", newline="") as f:
-            f.writelines(lines)
+        fsutil.atomic_write_text(path, "".join(lines), encoding="utf-8",
+                                 newline="", keep_backup=True)
 
 
 def _esc_html(s):

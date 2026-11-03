@@ -2,6 +2,7 @@
 """server.properties 读写：保留注释与顺序，支持可视化编辑。"""
 
 import os
+from . import fsutil
 
 # 字段元信息：(键, 中文名, 类型, 选项/说明)
 # 类型: enum / bool / int / str
@@ -141,8 +142,9 @@ def save(path, values, lines=None):
     text = "\n".join(out)
     if not text.endswith("\n"):
         text += "\n"
-    with open(path, "w", encoding="utf-8", newline="\n") as f:
-        f.write(text)
+    # ★ 原子写 + 留 .bak：写到一半出事就是空文件，服务器直接起不来
+    fsutil.atomic_write_text(path, text, encoding="utf-8", newline="\n",
+                             keep_backup=True)
     return path
 
 

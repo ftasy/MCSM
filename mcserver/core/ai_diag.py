@@ -10,6 +10,7 @@ import os
 import re
 
 from . import net
+from . import fsutil
 
 # 服务商预设（OpenAI 兼容）
 PROVIDERS = [
@@ -59,8 +60,7 @@ def save_cfg(key, base, model, provider):
     try:
         d = {"key": key, "base": base, "model": model,
              "provider": provider}
-        with open(cfg_path(), "w", encoding="utf-8") as f:
-            json.dump(d, f, ensure_ascii=False, indent=2)
+        fsutil.atomic_write_json(cfg_path(), d)
         return True
     except Exception:
         return False

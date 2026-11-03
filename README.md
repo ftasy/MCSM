@@ -152,6 +152,7 @@ python -c "import pack; pack.pack()"
 ## 🏗 代码组织约定
 
 - **`core/` 不 import Qt**：所有网络、文件、版本、备份逻辑都在这里，可单独测试/复用。
+- **写文件一律走 `core/fsutil.py`**：`atomic_write_text` / `atomic_write_json` 会先写同目录临时文件再 `os.replace` 原子替换，用户数据（`servers.json`、`server.properties`、各种 YAML）必须用它们；`keep_backup=True` 还会顺带留 3 份 `.bak`。**不要再用 `open(path, "w")` 直接写**——中途断电/被杀/盘满会把原文件清成空。
 - **`app_*.py` 是 mixin**：每个文件一个 `XxxMixin`，方法里的 `self` 就是主窗口，新增功能按职责往对应文件里加即可，不要在 `app.py` 里继续堆代码。
 - **`dialogs/` 按功能分文件**：跨模块复用的助手放 `common.py`；新增对话框时优先 import `common` 里的助手，不要复制粘贴。
 - **`dialogs/__init__.py` 是门面**：外部统一 `from .dialogs import XxxDialog`，子模块之间的依赖保持 `common → server_ops → mods → create → backup → config` 的单向顺序，避免循环导入。

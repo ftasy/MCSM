@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QTimeEdit)
 from ..core import (
     versions, java as javacore, install, builder, props, backup, modman,
-    loaderup)
+    loaderup, fsutil)
 from ..dialog_workers import Worker, _track, _stop_threads
 from .common import (
     LogView, _on_bg, _muted, _preset_matches, _themed, _open_in_explorer,
@@ -1047,9 +1047,11 @@ class ServerConfigDialog(QDialog):
                     shutil.copy2(path, path + ".bak")
                 except Exception:
                     pass
-            with open(path, "w", encoding="utf-8", newline="") as f:
-                yaml.safe_dump(d, f, allow_unicode=True,
-                               default_flow_style=False, sort_keys=False)
+            fsutil.atomic_write_text(
+                path,
+                yaml.safe_dump(d, allow_unicode=True,
+                               default_flow_style=False, sort_keys=False),
+                encoding="utf-8", newline="", keep_backup=True)
             QMessageBox.information(
                 self, "已保存",
                 "已写入 LuckPerms 配置：\n%s\n\n"
@@ -1144,8 +1146,7 @@ class ServerConfigDialog(QDialog):
                 % (label, path))
             return
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(content)
+            fsutil.atomic_write_text(path, content, encoding="utf-8")
             QMessageBox.information(
                 self, "完成",
                 "已生成 %s 基础配置：\n%s\n\n"
@@ -2189,8 +2190,7 @@ class ServerConfigDialog(QDialog):
         def _save():
             try:
                 os.makedirs(os.path.dirname(self.white_path), exist_ok=True)
-                with open(self.white_path, "w", encoding="utf-8") as f:
-                    json.dump(self.white_data, f, ensure_ascii=False, indent=2)
+                fsutil.atomic_write_json(self.white_path, self.white_data)
                 QMessageBox.information(self, "完成", "白名单已保存。")
             except Exception as e:
                 QMessageBox.warning(self, "保存失败", repr(e))
@@ -2392,10 +2392,11 @@ class ServerConfigDialog(QDialog):
                 continue
             val = wd.isChecked() if typ == "bool" else wd.value()
             _yaml_set(data, path, val)
-        with open(self._yaml_path, "w", encoding="utf-8",
-                  newline="") as f:
-            yaml.safe_dump(data, f, allow_unicode=True,
-                           default_flow_style=False, sort_keys=False)
+        fsutil.atomic_write_text(
+            self._yaml_path,
+            yaml.safe_dump(data, allow_unicode=True,
+                           default_flow_style=False, sort_keys=False),
+            encoding="utf-8", newline="", keep_backup=True)
 
     def do_save(self):
         jpath = self.java_pick.path()
@@ -2473,8 +2474,8 @@ class ServerConfigDialog(QDialog):
             aikar=self.chk_aikar.isChecked())
         bp = os.path.join(sd, "run.bat")
         try:
-            with open(bp, "w", encoding="utf-8", newline="") as f:
-                f.write(bat)
+            fsutil.atomic_write_text(bp, bat, encoding="utf-8",
+                                     newline="")
         except Exception as e:
             QMessageBox.warning(self, "run.bat 失败", repr(e))
             bp = None

@@ -18,6 +18,7 @@ import urllib.request
 import urllib.parse
 
 from . import net
+from . import fsutil
 
 _RE_VERSION_ONLY_S = re.compile(r"^[\d.]+$")
 _RE_GITHUB_REPO = re.compile(r"^https?://github\.com/")
@@ -112,10 +113,8 @@ def save():
         d0 = os.path.dirname(p)
         if d0:
             os.makedirs(d0, exist_ok=True)
-        with open(p, "w", encoding="utf-8") as f:
-            json.dump({"mirror": _cfg["mirror"],
-                       "cf_key": _cfg["cf_key"]},
-                      f, ensure_ascii=False, indent=2)
+        fsutil.atomic_write_json(p, {"mirror": _cfg["mirror"],
+                                     "cf_key": _cfg["cf_key"]})
         return (True, p)
     except Exception as e:
         return (False, "%s  (%s)" % (repr(e), p))
