@@ -13,12 +13,13 @@ import os
 import re
 import sys
 
-from PySide6.QtCore import (Qt, QProcess, Signal, QEvent,
+from PySide6.QtCore import (Qt, QProcess, Signal, QEvent, QSize,
                             QEasingCurve, QVariantAnimation)
-from PySide6.QtGui import (QFont, QColor, QTextCursor,
+from PySide6.QtGui import (QFont, QColor, QTextCursor, QFontMetrics,
                            QPainter, QIcon)
 from PySide6.QtWidgets import (
     QWidget, QDialog, QTextEdit, QLineEdit, QPushButton,
+    QLabel, QSizePolicy,
     QVBoxLayout, QHBoxLayout)
 
 from .core import theme

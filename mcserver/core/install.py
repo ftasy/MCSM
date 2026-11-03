@@ -19,6 +19,7 @@ from . import net
 # 统一使用 core/net 的 UA / 超时 / 重试参数
 UA = net.UA
 TIMEOUT = net.TIMEOUT
+RETRY = net.RETRY    # ★ 修：_retry_log 里引用了 RETRY 但从未导入
 
 # 这些是"资源不存在"，重试一万次也没用，要立刻放弃
 # （否则会白白等十几秒才告诉用户"这个版本没有"）

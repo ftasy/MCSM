@@ -6,14 +6,14 @@ import zipfile
 import time
 
 # 版本号（用来给压缩包命名）
-VERSION = "v2.3.0"
+VERSION = "v2.3.1"
 # 产品名（MCSM = Minecraft Server Manager）
 APP_NAME = "MCSM"
 OUT_ZIP = f"{APP_NAME}_{VERSION}_安装包.zip"
 
 # 绝对不要打进包里的目录和文件
 EXCLUDE_DIRS = {"__pycache__", ".git", ".idea", ".vscode",
-                "build", "dist",
+                "build", "dist", "build_new", "dist_new",
                 "版本归档"}  # ★ V1.9.3：版本归档里全是历史 exe/dll，
                              #   绝不能递归打进安装包（否则包里有包、体积膨胀）
 # ★ V1.6.3：用户解压安装包测试留下的 MCSM_vX.Y_安装包/ 目录

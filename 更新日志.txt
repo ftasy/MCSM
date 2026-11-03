@@ -2,8 +2,51 @@
 MC 服务器管理器 —— 更新日志
 ================================================================
 
-当前版本：v2.3.0（2026-11-03）
-上一个正式版：v2.1.2
+当前版本：v2.3.1（2026-11-03）
+上一个正式版：v2.3.0
+
+----------------------------------------------------------------
+v2.3.1  界面层结构拆分 + 关键崩溃修复（2026-11-03）
+----------------------------------------------------------------
+
+【结构拆分：app.py 5168 行 → 主窗口 569 行】
+  - MainWindow 按职责拆成 7 个 mixin，主窗口只做组装：
+      app_views.py     图标卡片 / 表格 / 拖动排序 / 右键菜单
+      app_settings.py  显示设置、外观页签、主题、数据源
+      app_servers.py   单服操作：改名换图标、备份、导入
+      app_library.py   模组、核心、诊断、数据读写、扫描
+      app_actions.py   初始化、生成 run.bat、搬迁、登录准备
+      app_console.py   控制台页签 / 浮动窗 / 监控 / 端口 / 防火墙
+      app_process.py   启停、日志读取、退出处理
+  - 新增 const.py：DATA_FILE 与 -Xmx 正则等共享常量抽出，
+    避免 mixin 反过来 import app.py 造成循环导入。
+
+【结构拆分：dialogs.py 8762 行 → dialogs/ 包】
+  - common.py      LogView、主题助手、YAML / 内存单位读写、通用小函数
+  - create.py      初始化向导（JavaPick / CreateDialog）
+  - config.py      server.properties 配置窗
+  - server_ops.py  删除服务器 / 导出诊断 / 加载器更新 / 移除核心
+  - mods.py        模组选择 / 全库浏览 / Modrinth / 模组配置 / 分析
+  - backup.py      备份与搬迁
+  - __init__.py 做门面统一导出，旧的 from .dialogs import X 写法不受影响。
+  - 子模块依赖保持单向：common → server_ops → mods → create → backup → config。
+
+【构建脚本】
+  - build_exe.bat 的 Python 路径改为参数化，不再写死某台机器的路径：
+    命令行参数 / MCSM_PYTHON 环境变量 / py 启动器 / PATH / 常见安装目录
+    依次自动探测，缺 PySide6、PyInstaller 会自动安装；
+    新增 build_exe.bat clean 只清构建产物。
+
+【关键崩溃修复】
+  - 修复上一版提取 widgets.py 时漏导入 QSizePolicy / QLabel /
+    QFontMetrics / QSize，导致程序一启动就 NameError 直接闪退。
+  - 修复选模组对话框 KeyError: 'default'（清单早已不下发该字段），
+    点『选择模组』必崩。
+  - 修复停止服务器后自动备份回调里 k 未定义（NameError，备份静默失败）。
+  - 修复整合包导入完成后调用了不存在的 select_new（导入完成即报错）。
+  - 修复启动兜底分支里 bat 未定义（没有 run.bat 时启动报 NameError）。
+  - 修复下载重试日志引用未导入的 RETRY。
+  - 修复 LuckPerms 配置页签读了 yaml 却丢弃结果、永远显示默认值。
 
 ----------------------------------------------------------------
 v2.3.0  全面性能优化与架构重构（2026-11-03）
