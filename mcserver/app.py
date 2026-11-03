@@ -4322,7 +4322,8 @@ class MainWindow(QMainWindow):
 
     def _detect_running_servers(self):
         """V2.1.0: On startup, detect servers still running from previous session."""
-        import subprocess as _sp
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
         for e in self.entries:
             sd = e.get("server_dir") or e["folder"]
             pid_file = os.path.join(sd, ".mcsm_pid")
@@ -4335,14 +4336,16 @@ class MainWindow(QMainWindow):
                 try: os.remove(pid_file)
                 except Exception: pass
                 continue
+            k = self._key(e)
+            if k in self.procs:
+                continue
             try:
-                r = _sp.run(["tasklist", "/FI", "PID eq %d" % pid, "/FO", "CSV", "/NH"],
-                           capture_output=True, text=True, timeout=5,
-                           creationflags=getattr(_sp, 'CREATE_NO_WINDOW', 0))
-                alive = str(pid) in (r.stdout or "")
+                h = kernel32.OpenProcess(0x1000, False, pid)
+                alive = bool(h)
+                if h:
+                    kernel32.CloseHandle(h)
             except Exception:
                 alive = False
-            k = self._key(e)
             if alive:
                 proc = ReattachedProcess(pid, sd, e.get("name", ""))
                 self.procs[k] = proc
@@ -4390,7 +4393,7 @@ class MainWindow(QMainWindow):
                     self._log_tailers.pop(key, None)
                     self._finished(proc, 0)
         timer.timeout.connect(_poll)
-        timer.start(1000)
+        timer.start(3000)
         self._log_tailers[key] = timer
 
     def _close_console_tab(self, idx):
