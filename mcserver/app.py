@@ -653,20 +653,25 @@ class ReattachedProcess:
 
     def _check_alive(self):
         try:
-            import subprocess as _sp
-            r = _sp.run(["tasklist", "/FI", "PID eq %d" % self._pid, "/FO", "CSV", "/NH"],
-                       capture_output=True, text=True, timeout=5,
-                       creationflags=getattr(_sp, 'CREATE_NO_WINDOW', 0))
-            return str(self._pid) in (r.stdout or "")
+            import ctypes
+            h = ctypes.windll.kernel32.OpenProcess(0x1000, False, self._pid)
+            if h:
+                ctypes.windll.kernel32.CloseHandle(h)
+                return True
+            return False
         except Exception:
             return False
-
     def write(self, data):
         cmd = data.decode("utf-8", "replace").strip().lower()
         if cmd == "stop":
-            import subprocess as _sp
-            _sp.Popen(["taskkill", "/PID", str(self._pid)],
-                      creationflags=getattr(_sp, 'CREATE_NO_WINDOW', 0))
+            try:
+                import ctypes
+                h = ctypes.windll.kernel32.OpenProcess(0x0001, False, self._pid)
+                if h:
+                    ctypes.windll.kernel32.TerminateProcess(h, 0)
+                    ctypes.windll.kernel32.CloseHandle(h)
+            except Exception:
+                pass
 
     def state(self):
         if self._alive:
@@ -677,9 +682,14 @@ class ReattachedProcess:
         return self._pid
 
     def kill(self):
-        import subprocess as _sp
-        _sp.Popen(["taskkill", "/PID", str(self._pid), "/F"],
-                  creationflags=getattr(_sp, 'CREATE_NO_WINDOW', 0))
+        try:
+            import ctypes
+            h = ctypes.windll.kernel32.OpenProcess(0x0001, False, self._pid)
+            if h:
+                ctypes.windll.kernel32.TerminateProcess(h, 1)
+                ctypes.windll.kernel32.CloseHandle(h)
+        except Exception:
+            pass
         self._alive = False
 
 class MainWindow(QMainWindow):
@@ -4322,7 +4332,8 @@ class MainWindow(QMainWindow):
 
     def _detect_running_servers(self):
         """V2.1.0: On startup, detect servers still running from previous session."""
-        import subprocess as _sp
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
         for e in self.entries:
             sd = e.get("server_dir") or e["folder"]
             pid_file = os.path.join(sd, ".mcsm_pid")
@@ -4335,14 +4346,16 @@ class MainWindow(QMainWindow):
                 try: os.remove(pid_file)
                 except Exception: pass
                 continue
+            k = self._key(e)
+            if k in self.procs:
+                continue
             try:
-                r = _sp.run(["tasklist", "/FI", "PID eq %d" % pid, "/FO", "CSV", "/NH"],
-                           capture_output=True, text=True, timeout=5,
-                           creationflags=getattr(_sp, 'CREATE_NO_WINDOW', 0))
-                alive = str(pid) in (r.stdout or "")
+                h = kernel32.OpenProcess(0x1000, False, pid)
+                alive = bool(h)
+                if h:
+                    kernel32.CloseHandle(h)
             except Exception:
                 alive = False
-            k = self._key(e)
             if alive:
                 proc = ReattachedProcess(pid, sd, e.get("name", ""))
                 self.procs[k] = proc
@@ -4390,7 +4403,7 @@ class MainWindow(QMainWindow):
                     self._log_tailers.pop(key, None)
                     self._finished(proc, 0)
         timer.timeout.connect(_poll)
-        timer.start(1000)
+        timer.start(3000)
         self._log_tailers[key] = timer
 
     def _close_console_tab(self, idx):
