@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QLabel, QMessageBox, QTableWidgetItem
 from .core import monitor, fsutil
 from .dialogs import Worker, _track
 from .widgets import Console, FloatConsole, ReattachedProcess, _fg, _on_bg
+from .core.palette import PAL
 
 
 class ConsoleMixin:
@@ -433,11 +434,11 @@ class ConsoleMixin:
         if running:
             ping = self._ping_text.get(self._key(e))
             if ping:
-                txt, color = ping, "#2e7d32"
+                txt, color = ping, PAL.SUCCESS
             else:
-                txt, color = "运行中", "#2e7d32"
+                txt, color = "运行中", PAL.SUCCESS
         elif e.get("notes"):
-            txt, color = "未初始化", "#c62828"
+            txt, color = "未初始化", PAL.DANGER
         else:
             txt, color = "就绪", None
         it = self.table.item(row, 5)

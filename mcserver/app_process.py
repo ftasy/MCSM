@@ -20,11 +20,35 @@ class ProcessMixin:
 
     def do_start(self, auto_restart=False, entry=None):
         # ★ A2：自动重启时传 entry，不再靠 selectRow 抢用户当前选中的服
-        e = entry if entry is not None else self._cur()
+        # ★ V2.3.3：支持批量 —— 没传 entry 时按"当前选中"启动：
+        #   多选 = 批量启动；单选/没选 = 启动当前那个。
+        if entry is not None:
+            self._start_one(entry, auto_restart)
+            return
+        entries = self._selected_entries() or []
+        if not entries:
+            e = self._cur_entry()
+            if e:
+                entries = [e]
+        if not entries:
+            QMessageBox.information(self, "提示", "先选中一个服务器")
+            return
+        if len(entries) == 1:
+            self._start_one(entries[0], auto_restart)
+        else:
+            self._start_batch(entries, auto_restart)
+
+    def _start_one(self, e, auto_restart=False):
+        """启动单个服务器（原 do_start 的单服逻辑）。"""
         if not e:
             return
         k = self._key(e)
         if k in self.procs:
+            return
+        # ★ V2.3.3：启动前先确认磁盘空间 —— MC 启动后要写世界/日志，
+        #   盘满了写入失败会把世界存档写坏。空间不够直接跳过并提示。
+        if not self._check_disk_space(e):
+            self._restore_start_btn(e)
             return
         # ★ V1.6.0：点击启动立即给反馈并禁用按钮，防止狂点。
         #   真正启动成功后 _refresh_actions() 会重设按钮；
@@ -61,6 +85,70 @@ class ProcessMixin:
         # ★ V1.3.0：登录环境准备（正版/离线 即时处理；
         #   多源共存 需下载登录组件时先走 Worker，完成后自动继续启动）
         self._prepare_auth(e, lambda: self._finish_start(e, auto_restart))
+
+    def _start_batch(self, entries, auto_restart=False):
+        """★ V2.3.3：批量启动。逐个排队启动，跳过已在运行/磁盘空间不足。"""
+        started = skipped = 0
+        for e in entries:
+            if self._key(e) in self.procs:
+                skipped += 1
+                continue
+            if not self._check_disk_space(e):
+                skipped += 1
+                continue
+            self._start_one(e, auto_restart)
+            started += 1
+        self._log_console(
+            "[批量启动] 已在队列启动 %d 个，跳过 %d 个"
+            "（已在运行 / 磁盘空间不足）" % (started, skipped))
+        self.statusBar().showMessage(
+            "批量启动：启动 %d，跳过 %d" % (started, skipped), 4000)
+
+    def _disk_free_gb(self, e):
+        """服务器所在盘的剩余可用空间（GB），取不到返回 None。
+
+        ★ 健壮性：先用绝对路径并确认目录存在再查；否则在某些
+          虚拟化/相对路径环境下 shutil.disk_usage 可能异常或长时间阻塞。
+        """
+        try:
+            import os as _os
+            import shutil
+            sd = e.get("server_dir") or e.get("folder")
+            if not sd:
+                return None
+            sd = _os.path.abspath(sd)
+            if not _os.path.isdir(sd):
+                return None
+            return shutil.disk_usage(sd).free / (1024 ** 3)
+        except Exception:
+            return None
+
+    def _check_disk_space(self, e):
+        """★ V2.3.3：启动前磁盘预检。
+
+        需要：至少 max(2 GB, 内存上限 × 1.5) 的剩余空间
+        （内存镜像 + 世界/日志写入余量）。不够则提示并拒绝启动，
+        避免写入失败损坏世界存档。
+        """
+        try:
+            sv = self._saved(e)
+            xmx = sv.get("xmx", 4096) or 4096   # MB
+            need = max(2.0, xmx / 1024.0 * 1.5)
+            free = self._disk_free_gb(e)
+            if free is None:
+                return True   # 取不到就不拦，不挡正常启动
+            if free < need:
+                name = e.get("name") or e.get("folder")
+                msg = ("磁盘空间不足：「%s」所在盘只剩 %.1f GB 可用，"
+                       "低于建议的 %.1f GB（含内存镜像 + 世界存档）。\n\n"
+                       "强行启动可能因写入失败损坏世界存档，已跳过。"
+                       % (name, free, need))
+                self._log_console("[!] " + msg)
+                QMessageBox.warning(self, "磁盘空间不足", msg)
+                return False
+        except Exception:
+            return True
+        return True
 
     def _finish_start(self, e, auto_restart):
         """登录环境就绪后的启动延续（★ V1.9.11：无锁版本）。
@@ -699,7 +787,22 @@ class ProcessMixin:
                 "已停止自动重启。")
 
     def do_stop(self):
-        e = self._cur()
+        # ★ V2.3.3：支持批量 —— 多选 = 批量停止；单选/没选 = 停止当前。
+        entries = self._selected_entries() or []
+        if not entries:
+            e = self._cur_entry()
+            if e:
+                entries = [e]
+        if not entries:
+            QMessageBox.information(self, "提示", "先选中一个服务器")
+            return
+        if len(entries) == 1:
+            self._stop_one(entries[0])
+        else:
+            self._stop_batch(entries)
+
+    def _stop_one(self, e):
+        """停止单个服务器（原 do_stop 的单服逻辑）。"""
         if not e:
             return
         k = self._key(e)
@@ -737,6 +840,32 @@ class ProcessMixin:
             pass
         # 8 秒还没退出就强杀（防止卡死时永远不退出）
         QTimer.singleShot(8000, lambda: self._kill(proc, e))
+
+    def _stop_batch(self, entries):
+        """★ V2.3.3：批量停止。停止所有运行中的，跳过没运行的。
+
+        批量时不再逐个弹"停止后备份"——那是单服场景的精细操作，
+        批量属于"我明确要全停"，直接停（不备份）。
+        """
+        stopped = skipped = 0
+        for e in entries:
+            k = self._key(e)
+            proc = self.procs.get(k)
+            if not proc:
+                skipped += 1
+                continue
+            self._is_stopping[k] = True
+            self._log_console("=== 正在停止 %s，等待世界保存完毕 ==="
+                              % (e.get("name") or e.get("folder")))
+            try:
+                proc.write(b"stop\n")
+            except Exception:
+                pass
+            QTimer.singleShot(8000, lambda p=proc, ev=e: self._kill(p, ev))
+            stopped += 1
+        self.statusBar().showMessage(
+            "批量停止：停止 %d，跳过 %d" % (stopped, skipped), 4000)
+        self._refresh_actions()
 
     def _kill(self, proc, e=None):
         """强杀。走到这里说明 8 秒了还没自己退出。"""

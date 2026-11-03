@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 from .core import theme
 from .widgets import (
     Console, NavButton, _th, _CONSOLE_STALE_BG, _CONSOLE_STALE_INFO)
+from .core.palette import PAL
 
 
 class SettingsMixin:
@@ -68,7 +69,7 @@ class SettingsMixin:
             "报错堆栈（Exception / Caused by / at net.minecraft...）\n"
             "会使用『错误』的颜色并加粗。")
         tip.setWordWrap(True)
-        tip.setStyleSheet("color:#9aa4b2;")
+        tip.setStyleSheet("color:%s;" % PAL.MUTED)
         vv.addWidget(tip)
 
         f = QFormLayout()
@@ -87,9 +88,9 @@ class SettingsMixin:
             """色块上的文字色：按亮度自动黑/白，保证可读。"""
             try:
                 from .core import theme as _th
-                return _th.ensure_contrast("#ffffff", hx, 4.5)
+                return _th.ensure_contrast(PAL.WHITE, hx, 4.5)
             except Exception:
-                return "#ffffff"
+                return PAL.WHITE
 
         def _default(key):
             # ★ V2.0.3：默认背景/普通信息跟随主题（和信息面板一致）
@@ -97,7 +98,7 @@ class SettingsMixin:
                 return th_bg
             if key == "info":
                 return th_fg
-            return Console.DEFAULT_COLORS.get(key, "#d0d0d0")
+            return Console.DEFAULT_COLORS.get(key, PAL.TEXT_DIM)
 
         def _mk(key, label):
             default = _default(key)
@@ -336,10 +337,10 @@ class SettingsMixin:
         fp2.addRow("", cb_pcl)
 
         cb_tab_idle = QComboBox()
-        cb_tab_idle.addItem("白色", "#ffffff")
-        cb_tab_idle.addItem("黑色", "#000000")
+        cb_tab_idle.addItem("白色", PAL.WHITE)
+        cb_tab_idle.addItem("黑色", PAL.BLACK)
         cb_tab_idle.addItem("跟随主字体色", "fg")
-        ti = (cur.get("tab_idle") or "#ffffff")
+        ti = (cur.get("tab_idle") or PAL.WHITE)
         ix = cb_tab_idle.findData(ti)
         cb_tab_idle.setCurrentIndex(ix if ix >= 0 else 0)
         cb_tab_idle.setToolTip("页签【未选中】时的字色。\n"
@@ -422,7 +423,7 @@ class SettingsMixin:
                 "pcl": 1 if cb_pcl.isChecked() else 0,
                 "tab_idle": (cb_tab_idle.currentData()
                              if cb_tab_idle.currentData() != "fg"
-                             else (cur.get("fg") or "#ffffff")),
+                             else (cur.get("fg") or PAL.WHITE)),
                 "tab_sel_box": 1 if cb_tab_box.isChecked() else 0,
                 "item_idle_mode": cb_idle.currentData() or "dark",
                 "sel_bars": cb_bars.currentData() or 0,
@@ -500,8 +501,8 @@ class SettingsMixin:
                         _pal = _vp.palette()
                         _pal.setColor(_QP.Base, _QC(_bg))
                         _pal.setColor(_QP.Text, _QC(_info))
-                        _pal.setColor(_QP.Button, _QC("#1e1e1e"))
-                        _pal.setColor(_QP.Highlight, _QC("#4a4a4a"))
+                        _pal.setColor(_QP.Button, _QC(PAL.CONSOLE_BTN))
+                        _pal.setColor(_QP.Highlight, _QC(PAL.CONSOLE_HIGHLIGHT))
                         _vp.setPalette(_pal)
                         _vp.update()
                     _o.update()
@@ -525,16 +526,19 @@ class SettingsMixin:
         _th.apply_font()
         css = _th.stylesheet("QMainWindow")
         self.setStyleSheet(css)
+        # ★ 通用样式只算一次：以前在下面的对话框循环里每个窗口算一遍，
+        #   打开着的对话框越多越慢（stylesheet() 每次都要拼几百行 CSS）。
+        css_all = _th.stylesheet(None)
         # 同时刷新 app 级样式，让【之后】新建的窗口也用新主题
         try:
-            QApplication.instance().setStyleSheet(_th.stylesheet(None))
+            QApplication.instance().setStyleSheet(css_all)
         except Exception:
             pass
         _th.apply_palette(self)
         for w in QApplication.topLevelWidgets():
             if isinstance(w, QDialog) and w is not self:
                 try:
-                    w.setStyleSheet(_th.stylesheet(None))
+                    w.setStyleSheet(css_all)
                 except Exception:
                     pass
         # ★ 顶栏按钮是自绘的（悬停/按下动画），换主题后要重画
@@ -655,7 +659,7 @@ class SettingsMixin:
             vs.addWidget(cb)
         # 名称关掉的话图标就认不出了，给个提示
         lbl_warn = QLabel("")
-        lbl_warn.setStyleSheet("color:#c62828;")
+        lbl_warn.setStyleSheet("color:%s;" % PAL.DANGER)
         lbl_warn.setWordWrap(True)
         vs.addWidget(lbl_warn)
 

@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout)
 
 from .core import theme
+from .core.palette import PAL
 
 # 控制台配色默认跟随主题（和信息面板一致）。
 # 旧默认/历史测试值视为"未自定义"，自动迁移到当前主题色。
@@ -38,11 +39,11 @@ class Console(QWidget):
         """当前主题 (fg, bg)——控制台默认配色跟随它，和信息面板一致。"""
         try:
             t = theme.get()
-            fg = t.get("fg") or "#1a1a1a"
-            bg = t.get("bg") or "#f4f6f8"
+            fg = t.get("fg") or PAL.TEXT
+            bg = t.get("bg") or PAL.BG
             return fg, bg
         except Exception:
-            return "#1a1a1a", "#f4f6f8"
+            return PAL.TEXT, PAL.BG
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -169,7 +170,7 @@ class Console(QWidget):
         h.addWidget(self.ed_find, 1)
 
         self.lb_find = QLabel("")
-        self.lb_find.setStyleSheet("color:#9aa4b2; font-size:9pt;")
+        self.lb_find.setStyleSheet("color:%s; font-size:9pt;" % PAL.MUTED)
         self.lb_find.setMinimumWidth(52)
         h.addWidget(self.lb_find)
 
@@ -247,7 +248,7 @@ class Console(QWidget):
             dark = _th.is_dark_bg(self._bg)
         except Exception:
             dark = True
-        return "#7a5c00" if dark else "#ffe082"
+        return PAL.CONSOLE_WARN_DARK if dark else PAL.CONSOLE_WARN_TINT
 
     def _highlight_all(self, q):
         """把所有命中处标底色，返回命中数量（最多 500 处）。"""
@@ -329,17 +330,17 @@ class Console(QWidget):
         try:
             from PySide6.QtGui import QPalette as _QP
             from PySide6.QtGui import QColor as _QC
-            txt = self._fit(self._colors.get("info") or "#cfcfcf")
+            txt = self._fit(self._colors.get("info") or PAL.CONSOLE_INFO)
             self.out.setStyleSheet(
                 "QTextEdit#console_out{background:%s !important;"
                 "background-image:none !important;"
                 "color:%s !important;}" % (self._bg, txt))
             # ★ 滚动条亮色：直接设 palette（Button=轨道、Highlight=滑块）
             _pal = self.out.palette()
-            _pal.setColor(_QP.Button, _QC("#1e1e1e"))
+            _pal.setColor(_QP.Button, _QC(PAL.CONSOLE_BTN))
             _pal.setColor(_QP.Base, _QC(self._bg))
             _pal.setColor(_QP.Text, _QC(txt))
-            _pal.setColor(_QP.Highlight, _QC("#4a4a4a"))
+            _pal.setColor(_QP.Highlight, _QC(PAL.CONSOLE_HIGHLIGHT))
             self.out.setPalette(_pal)
         except Exception:
             pass
@@ -390,7 +391,7 @@ class Console(QWidget):
             try:
                 _, th_bg = Console._theme_colors()
             except Exception:
-                th_bg = "#f4f6f8"
+                th_bg = PAL.BG
             self._colors = dict(self.DEFAULT_COLORS)
             self._bg = th_bg
         self._fit_cache.clear()
@@ -444,12 +445,12 @@ class Console(QWidget):
     DEFAULT_COLORS = {
         # ★ V2.0.3：info/bg 默认跟随主题（和信息面板一致）——
         #   这里 info 仅是兜底；实际由 _theme_colors() 决定。
-        "info":       "#cfcfcf",  # 普通信息（未自定义时=主题前景色）
-        "warn":       "#ffd166",  # 警告（黄）
-        "error":      "#ff6b6b",  # 普通错误（红）
-        "error_bold": "#ff5252",  # 报错堆栈：亮红 + 加粗
-        "ok":         "#4caf50",  # 成功 / 启动完成（亮绿）
-        "chat":       "#4fc3f7",  # 玩家聊天（青蓝）
+        "info":       PAL.CONSOLE_INFO,  # 普通信息（未自定义时=主题前景色）
+        "warn":       PAL.WARN_LIGHT,  # 警告（黄）
+        "error":      PAL.DANGER_CONSOLE,  # 普通错误（红）
+        "error_bold": PAL.DANGER_BRIGHT,  # 报错堆栈：亮红 + 加粗
+        "ok":         PAL.SUCCESS_CONSOLE,  # 成功 / 启动完成（亮绿）
+        "chat":       PAL.CONSOLE_CHAT,  # 玩家聊天（青蓝）
     }
 
     # 报错堆栈特征：整行亮红加粗
@@ -670,7 +671,7 @@ class FloatConsole(QDialog):
         tip = QLabel(
             "提示：关闭此窗口仅关闭视图，服务器继续在后台运行；"
             "下方输入指令直接发给服务器。")
-        tip.setStyleSheet("color:#888888;")
+        tip.setStyleSheet("color:%s;" % PAL.GRAY)
         v.addWidget(tip)
 
     def append(self, text):
@@ -794,8 +795,8 @@ class NavButton(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         cfg = theme.get()
-        fg = QColor(cfg.get("fg") or "#1a1a1a")
-        ac = QColor(cfg.get("accent") or "#0b62d0")
+        fg = QColor(cfg.get("fg") or PAL.TEXT)
+        ac = QColor(cfg.get("accent") or PAL.ACCENT_DEFAULT)
         if not self.isEnabled():
             fg = QColor(theme.muted_color())
         hover = max(0.0, min(1.0, self._hover))
@@ -872,7 +873,7 @@ def _th():
 
 def _fg():
     t = _th()
-    return (t.get("fg") if t else None) or "#ffffff"
+    return (t.get("fg") if t else None) or PAL.WHITE
 
 
 def _on_bg(c):

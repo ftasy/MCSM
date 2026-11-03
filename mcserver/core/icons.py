@@ -23,16 +23,7 @@ from PySide6.QtWidgets import QStyledItemDelegate, QStyle, QToolTip
 #       Fatal Python error: none_dealloc: deallocating None
 #   （实测：把 import 挪到顶层后，同样的操作不再崩溃。）
 from . import theme as _thm
-
-# 加载器配色（用来画没图标时的字母块）
-LOADER_COLORS = {
-    "fabric":   "#4a9eff",
-    "forge":    "#e08a3c",
-    "neoforge": "#a96ce0",
-    "paper":    "#3ec46d",
-    "vanilla":  "#9a7b5a",
-    "unknown":  "#8a8a8a",
-}
+from .palette import PAL, LOADER_COLORS
 
 LOADER_LETTER = {
     "fabric": "F", "forge": "F", "neoforge": "N",
@@ -161,7 +152,7 @@ class IconDelegate(QStyledItemDelegate):
         # ★ PCL 风格选中：卡片整体一圈淡底，配合左右竖杠
         if selected:
             th0 = self._theme()
-            ac = QColor(th0.get("sel") or "#4a9eff")
+            ac = QColor(th0.get("sel") or PAL.ICON_ACCENT)
             sp = QPainterPath()
             sp.addRoundedRect(QRectF(rect).adjusted(3, 3, -3, -3), 8, 8)
             painter.fillPath(sp, QColor(ac.red(), ac.green(), ac.blue(),
@@ -242,7 +233,7 @@ class IconDelegate(QStyledItemDelegate):
             th0 = self._theme()
             mode = int(th0.get("bars") or 0)
             if mode:
-                ac = QColor(th0.get("sel") or "#4a9eff")
+                ac = QColor(th0.get("sel") or PAL.ICON_ACCENT)
                 painter.setPen(Qt.NoPen)
                 painter.setBrush(ac)
                 w = max(3, int(rect.height() * 0.055))
@@ -306,8 +297,8 @@ class IconDelegate(QStyledItemDelegate):
                 d["sel"] = _thm.item_sel_color()
                 d["bars"] = _thm.sel_bar_mode()
             except Exception:
-                d = {"font_bold": 0, "fg": "#f2f2f2",
-                     "idle": "#b0b0b0", "sel": "#4a9eff", "bars": 2}
+                d = {"font_bold": 0, "fg": PAL.ICON_FG,
+                     "idle": PAL.ICON_IDLE, "sel": PAL.ICON_ACCENT, "bars": 2}
             c["d"] = d
             c["t"] = now
             c["rev"] = r
@@ -322,7 +313,7 @@ class IconDelegate(QStyledItemDelegate):
 
     def _draw_letter(self, painter, ir, index):
         loader = (index.data(Qt.UserRole + 2) or "unknown").lower()
-        color = QColor(LOADER_COLORS.get(loader, "#8a8a8a"))
+        color = QColor(LOADER_COLORS.get(loader, PAL.GRAY))
         path = QPainterPath()
         path.addRoundedRect(ir, 10, 10)
         g = QLinearGradient(ir.topLeft(), ir.bottomRight())
@@ -337,7 +328,7 @@ class IconDelegate(QStyledItemDelegate):
         f.setBold(True)
         f.setPointSize(max(10, int(ir.width() * 0.42)))
         painter.setFont(f)
-        painter.setPen(QColor("#ffffff"))
+        painter.setPen(QColor(PAL.WHITE))
         painter.drawText(ir, Qt.AlignCenter, letter)
 
 
@@ -376,7 +367,7 @@ class RowDelegate(QStyledItemDelegate):
                 return
             ac = QColor(_thm.item_sel_color())
         except Exception:
-            mode, ac = 2, QColor("#4a9eff")
+            mode, ac = 2, QColor(PAL.ICON_ACCENT)
         last = self._cols(index)
         r = option.rect
         painter.save()

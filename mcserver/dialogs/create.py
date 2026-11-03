@@ -19,8 +19,9 @@ from ..dialog_workers import (
     _StopMixin, Worker, LoaderVerWorker, _track, _stop_threads)
 from .common import (
     LogView, _th, _on_bg, _muted, _themed, _mem_mb_of, _apply_mem_unit)
+from .base import BaseDialog
 from .mods import ModBrowseDialog
-from ..widgets import app_icon
+from ..core.palette import PAL
 
 
 class JavaPick(QGroupBox):
@@ -73,7 +74,7 @@ class JavaPick(QGroupBox):
         self.combo.addItem("正在扫描 Java...", None)
         self.combo.blockSignals(False)
         self.lbl.setText("正在扫描系统里的 Java ...")
-        self.lbl.setStyleSheet("color:%s;" % _on_bg("#9aa4b2"))
+        self.lbl.setStyleSheet("color:%s;" % _on_bg(PAL.MUTED))
         w = _track(self, Worker(self._scan_job, {}, self))
         w.done.connect(self._on_scan_done)
         w.start()
@@ -90,7 +91,7 @@ class JavaPick(QGroupBox):
             self.combo.addItem("(扫描失败：%s)" % (res,), None)
             self.combo.blockSignals(False)
             self.lbl.setText("Java 扫描失败：%r" % (res,))
-            self.lbl.setStyleSheet("color:%s;" % _on_bg("#c62828"))
+            self.lbl.setStyleSheet("color:%s;" % _on_bg(PAL.DANGER))
             return
         self.javas = res
         self.combo.blockSignals(True)
@@ -99,7 +100,7 @@ class JavaPick(QGroupBox):
             self.combo.addItem("(未找到 Java，请点『浏览』手动指定)", None)
             self.combo.blockSignals(False)
             self.lbl.setText("没扫描到 Java。")
-            self.lbl.setStyleSheet("color:%s;" % _on_bg("#c62828"))
+            self.lbl.setStyleSheet("color:%s;" % _on_bg(PAL.DANGER))
             return
         mx = versions.java_max_ok(self.mc_version) if self.mc_version else None
         for j in self.javas:
@@ -151,7 +152,7 @@ class JavaPick(QGroupBox):
         path = self.combo.currentData()
         if not path:
             self.lbl.setText("请选择 Java")
-            self.lbl.setStyleSheet("color:%s;" % _on_bg("#c62828"))
+            self.lbl.setStyleSheet("color:%s;" % _on_bg(PAL.DANGER))
             return
         ok, msg = javacore.validate(path, self.need,
                                     mc_version=self.mc_version)
@@ -159,14 +160,14 @@ class JavaPick(QGroupBox):
             if "偏高" in msg:
                 # 黄色警告：能用但有风险
                 self.lbl.setText("[!] %s" % msg)
-                self.lbl.setStyleSheet("color:%s;" % _on_bg("#ef6c00"))
+                self.lbl.setStyleSheet("color:%s;" % _on_bg(PAL.WARN_STRONG))
             else:
                 self.lbl.setText("[OK] %s" % msg)
-                self.lbl.setStyleSheet("color:%s;" % _on_bg("#2e7d32"))
+                self.lbl.setStyleSheet("color:%s;" % _on_bg(PAL.SUCCESS))
         else:
             tail = ("（本服需要 Java %d）" % self.need) if self.need else ""
             self.lbl.setText("[!] %s%s" % (msg, tail))
-            self.lbl.setStyleSheet("color:%s;" % _on_bg("#c62828"))
+            self.lbl.setStyleSheet("color:%s;" % _on_bg(PAL.DANGER))
 
     def path(self):
         return self.combo.currentData()
@@ -187,7 +188,7 @@ class JavaPick(QGroupBox):
         if r != QMessageBox.Yes:
             return
         self.btn_dl.setEnabled(False)
-        self.lbl.setStyleSheet("color:%s;" % _on_bg("#1565c0"))
+        self.lbl.setStyleSheet("color:%s;" % _on_bg(PAL.INFO))
         self.lbl.setText("正在下载 JRE %d ...（网络请求在后台）" % major)
         self.worker = _track(self, Worker(
             self._dl_job, {"major": major}, self))
@@ -207,7 +208,7 @@ class JavaPick(QGroupBox):
         self.btn_dl.setEnabled(True)
         if not ok:
             self.lbl.setText("[下载失败] %s" % str(res)[:120])
-            self.lbl.setStyleSheet("color:%s;" % _on_bg("#c62828"))
+            self.lbl.setStyleSheet("color:%s;" % _on_bg(PAL.DANGER))
             return
         exe = res.get("exe") or ""
         mj = res.get("major")
@@ -219,37 +220,14 @@ class JavaPick(QGroupBox):
         self._check()
 
 
-class CreateDialog(QDialog):
+class CreateDialog(BaseDialog):
     """创建/初始化服务端向导。"""
 
-    def closeEvent(self, e):
-        """关闭前先停掉后台线程。
-
-        ★ 不停的话：对话框销毁了、线程还在跑，
-          Qt 会直接 abort 整个程序 —— 也就是"点了就闪退"。
-        """
-        try:
-            _stop_threads(self)
-        except Exception:
-            pass
-        # ★ V1.6.4：JavaPick 的扫描线程挂在它自己身上，
-        #   窗口关闭时也要一起停掉，避免线程残留导致崩溃。
-        try:
-            _stop_threads(self.java_pick)
-        except Exception:
-            pass
-        try:
-            super().closeEvent(e)
-        except Exception:
-            pass
+    #: JavaPick 的扫描线程挂在它自己身上，关窗时一起停
+    _stop_children = ("java_pick",)
 
     def __init__(self, entry, javas=None, parent=None):
         super().__init__(parent)
-        # 窗口图标（跟主程序一致）
-        try:
-            self.setWindowIcon(app_icon())
-        except Exception:
-            pass
         self.entry = entry
         self.setWindowTitle("初始化服务端 - %s" % entry.get("name", ""))
         self.resize(760, 620)

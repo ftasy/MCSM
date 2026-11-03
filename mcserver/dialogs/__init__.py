@@ -15,6 +15,7 @@
 from ..dialog_workers import (Worker, IconWorker, LoaderVerWorker,
                               _track, _stop_threads, _stop_all_threads,
                               _LIVE_THREADS)
+from .base import BaseDialog
 from .common import (LogView, _th, _fg, _on_bg, _sec_bg, _muted,
                      _preset_matches, _themed, _esc_html, _inst_hit,
                      _fmt_num, _open_in_explorer, _fetch_icon_bytes)
@@ -30,6 +31,7 @@ __all__ = [
     # common
     "LogView", "_themed", "_esc_html", "_inst_hit", "_fmt_num",
     "_open_in_explorer", "_fetch_icon_bytes", "_th", "_fg", "_on_bg",
+    "BaseDialog",
     # 后台线程（dialog_workers 转发）
     "Worker", "IconWorker", "LoaderVerWorker", "_track",
     "_stop_threads", "_stop_all_threads", "_LIVE_THREADS",

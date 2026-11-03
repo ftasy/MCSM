@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QPushButton, QSplitter, QStatusBar, QTabBar, QTabWidget, QTableWidget,
     QTextEdit, QVBoxLayout, QWidget, QMainWindow)
 from .core import theme
+from .core.palette import PAL
 from .widgets import Console, FloatConsole, NavButton, app_icon, _th
 
 # ★ 重构：MainWindow 按职责拆成 7 个 mixin（见 app_*.py）
@@ -207,7 +208,7 @@ class MainWindow(
         self.icon_view.setWrapping(True)
         self.icon_view.setSpacing(10)
         self.icon_view.setSelectionMode(
-            QAbstractItemView.SingleSelection)
+            QAbstractItemView.ExtendedSelection)
         # ★ 拖动排序改成自己接管鼠标（见 _drag_* 系列）。
         # 以前用 Qt 内置的 InternalMove，实际拖不动，两个原因：
         #   1) 上面设了 setMovement(Static)，而 Static 的语义就是
@@ -309,7 +310,8 @@ class MainWindow(
         # 拖动排序是没有图标提示的隐藏操作，写一行说明，免得发现不了
         sh.addStretch(1)
         self.lb_draghint = QLabel("")
-        self.lb_draghint.setStyleSheet("color:#9aa4b2; font-size:9pt;")
+        self.lb_draghint.setStyleSheet("color:%s; font-size:9pt;"
+                                  % PAL.MUTED)
         sh.addWidget(self.lb_draghint)
         sh.addWidget(self.cb_sort, 1)
         lv.addLayout(sh)

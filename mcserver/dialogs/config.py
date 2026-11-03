@@ -22,15 +22,19 @@ from .common import (
     LogView, _on_bg, _muted, _preset_matches, _themed, _open_in_explorer,
     _yaml_path_for, _yaml_get, _yaml_set, _yaml_patch_preserve, _mem_mb_of,
     _set_mem_mb, _apply_mem_unit, YAML_ITEMS)
+from .base import BaseDialog
 from .create import JavaPick
 from .mods import ModBrowseDialog, ModDialog
 from .server_ops import LoaderUpdateDialog, RemoveCoreDialog
 from .backup import BackupDialog
-from ..widgets import app_icon
+from ..core.palette import PAL
 
 
-class ServerConfigDialog(QDialog):
+class ServerConfigDialog(BaseDialog):
     """可视化编辑 server.properties + 该服专属 Java/内存设置。"""
+
+    #: JavaPick 的扫描线程挂在它自己身上，关窗时一起停
+    _stop_children = ("java_pick",)
 
     # 分组：(标签, [字段键...])
     GROUPS = [
@@ -53,33 +57,8 @@ class ServerConfigDialog(QDialog):
                   "use-native-transport", "log-ips", "snooper-enabled"]),
     ]
 
-    def closeEvent(self, e):
-        """关闭前先停掉后台线程。
-
-        ★ 不停的话：对话框销毁了、线程还在跑，
-          Qt 会直接 abort 整个程序 —— 也就是"点了就闪退"。
-        """
-        try:
-            _stop_threads(self)
-        except Exception:
-            pass
-        # ★ V1.6.4：JavaPick 的扫描线程挂在它自己身上，同样要停。
-        try:
-            _stop_threads(self.java_pick)
-        except Exception:
-            pass
-        try:
-            super().closeEvent(e)
-        except Exception:
-            pass
-
     def __init__(self, entry, saved=None, parent=None):
         super().__init__(parent)
-        # 窗口图标（跟主程序一致）
-        try:
-            self.setWindowIcon(app_icon())
-        except Exception:
-            pass
         self.entry = entry
         self.saved = dict(saved or {})
         self.setWindowTitle("服务器配置 - %s" % entry.get("name", ""))
@@ -1344,11 +1323,11 @@ class ServerConfigDialog(QDialog):
             if r is not None:
                 if status == "update":
                     col = QTableWidgetItem("%s ←可更新" % latest)
-                    col.setForeground(QColor(_on_bg("#ffd166")))
+                    col.setForeground(QColor(_on_bg(PAL.WARN_LIGHT)))
                     self.mod_table.setItem(r, 3, col)
                 elif status == "latest":
                     col = QTableWidgetItem("%s [最新]" % latest)
-                    col.setForeground(QColor(_on_bg("#06d6a0")))
+                    col.setForeground(QColor(_on_bg(PAL.SUCCESS)))
                     self.mod_table.setItem(r, 3, col)
                 else:
                     self.mod_table.setItem(

@@ -14,21 +14,17 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QPlainTextEdit, QTextBrowser, QApplication,
     QTableWidget, QTableWidgetItem, QHeaderView, QInputDialog)
 from ..core import install, loaderup
+from ..core.palette import PAL
 from ..dialog_workers import Worker, _track, _stop_threads
 from .common import LogView, _on_bg, _open_in_explorer
-from ..widgets import app_icon
+from .base import BaseDialog
 
 
-class DeleteServerDialog(QDialog):
+class DeleteServerDialog(BaseDialog):
     """删除整个服务器文件夹。危险操作，多重确认。"""
 
     def __init__(self, entry, parent=None):
         super().__init__(parent)
-        # 窗口图标（跟主程序一致）
-        try:
-            self.setWindowIcon(app_icon())
-        except Exception:
-            pass
         self.entry = entry
         self.setWindowTitle("删除服务器 - %s" % entry.get("name", ""))
         self.resize(600, 460)
@@ -39,7 +35,7 @@ class DeleteServerDialog(QDialog):
         warn = QLabel(
             "⚠ 这会删掉整个服务器文件夹，包括存档、模组、配置。\n"
             "删除后无法恢复（除非你有备份）。")
-        warn.setStyleSheet("color:%s; font-weight:bold;" % _on_bg("#c0392b"))
+        warn.setStyleSheet("color:%s; font-weight:bold;" % _on_bg(PAL.DANGER))
         warn.setWordWrap(True)
         v.addWidget(warn)
 
@@ -79,7 +75,7 @@ class DeleteServerDialog(QDialog):
 
         hb = QHBoxLayout()
         self.btn = QPushButton("确认删除")
-        self.btn.setStyleSheet("color:%s; font-weight:bold;" % _on_bg("#c0392b"))
+        self.btn.setStyleSheet("color:%s; font-weight:bold;" % _on_bg(PAL.DANGER))
         self.btn.clicked.connect(self.do_delete)
         hb.addWidget(self.btn)
         b_kill = QPushButton("结束占用进程")
@@ -214,16 +210,11 @@ class DeleteServerDialog(QDialog):
                 "先点『结束占用进程』，再试一次。")
 
 
-class DiagDialog(QDialog):
+class DiagDialog(BaseDialog):
     """导出报错诊断包，方便发给别人排查。"""
 
     def __init__(self, entry, console_text=None, parent=None):
         super().__init__(parent)
-        # 窗口图标（跟主程序一致）
-        try:
-            self.setWindowIcon(app_icon())
-        except Exception:
-            pass
         self.entry = entry
         self.console_text = console_text or ""
         self.setWindowTitle("导出报错诊断 - %s" % entry.get("name", ""))
@@ -300,35 +291,15 @@ class DiagDialog(QDialog):
             self.log.appendPlainText("失败: %r" % e)
 
 
-class LoaderUpdateDialog(QDialog):
+class LoaderUpdateDialog(BaseDialog):
     """更新 Fabric / Forge / NeoForge / Paper。
 
     只换核心文件 —— 存档、模组、server.properties 全都不动。
     以前要更新只能"删核心重装"，那会把配置折腾一遍。
     """
 
-    def closeEvent(self, e):
-        """关闭前先停掉后台线程。
-
-        ★ 不停的话：对话框销毁了、线程还在跑，
-          Qt 会直接 abort 整个程序 —— 也就是"点了就闪退"。
-        """
-        try:
-            _stop_threads(self)
-        except Exception:
-            pass
-        try:
-            super().closeEvent(e)
-        except Exception:
-            pass
-
     def __init__(self, entry, parent=None):
         super().__init__(parent)
-        # 窗口图标（跟主程序一致）
-        try:
-            self.setWindowIcon(app_icon())
-        except Exception:
-            pass
         self.entry = entry
         self.server_dir = entry.get("server_dir") or entry["folder"]
         self.setWindowTitle("更新加载器 - %s"
@@ -496,23 +467,8 @@ class LoaderUpdateDialog(QDialog):
         self.accept()
 
 
-class RemoveCoreDialog(QDialog):
+class RemoveCoreDialog(BaseDialog):
     """删除装错的核心。绝不碰存档/模组/配置。"""
-
-    def closeEvent(self, e):
-        """关闭前先停掉后台线程。
-
-        ★ 不停的话：对话框销毁了、线程还在跑，
-          Qt 会直接 abort 整个程序 —— 也就是"点了就闪退"。
-        """
-        try:
-            _stop_threads(self)
-        except Exception:
-            pass
-        try:
-            super().closeEvent(e)
-        except Exception:
-            pass
 
     def _open_url(self, url):
         """在系统浏览器里打开链接。
@@ -527,11 +483,6 @@ class RemoveCoreDialog(QDialog):
 
     def __init__(self, entry, parent=None):
         super().__init__(parent)
-        # 窗口图标（跟主程序一致）
-        try:
-            self.setWindowIcon(app_icon())
-        except Exception:
-            pass
         self.entry = entry
         self.setWindowTitle("删除服务端核心 - %s" % entry.get("name", ""))
         self.resize(620, 480)

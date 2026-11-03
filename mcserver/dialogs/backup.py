@@ -16,35 +16,16 @@ from PySide6.QtWidgets import (
 from ..core import migrate, backup
 from ..dialog_workers import _stop_threads, _install_exit_hook
 from .common import LogView, _muted, _open_in_explorer
-from ..widgets import app_icon
+from .base import BaseDialog
+from ..core.palette import PAL
 
 
-class BackupDialog(QDialog):
+class BackupDialog(BaseDialog):
     """备份管理：列出该服的存档和已有备份，支持备份/恢复/删除。"""
-
-    def closeEvent(self, e):
-        """关闭前先停掉后台线程。
-
-        ★ 不停的话：对话框销毁了、线程还在跑，
-          Qt 会直接 abort 整个程序 —— 也就是"点了就闪退"。
-        """
-        try:
-            _stop_threads(self)
-        except Exception:
-            pass
-        try:
-            super().closeEvent(e)
-        except Exception:
-            pass
 
     def __init__(self, entry, parent=None, running_fn=None,
                  backup_format=None):
         super().__init__(parent)
-        # 窗口图标（跟主程序一致）
-        try:
-            self.setWindowIcon(app_icon())
-        except Exception:
-            pass
         self.entry = entry
         # 主窗口传进来的"这个服在不在跑"查询函数
         self.running_fn = running_fn
@@ -369,31 +350,11 @@ class BackupDialog(QDialog):
             self.refresh_backups()
 
 
-class MigrateDialog(QDialog):
+class MigrateDialog(BaseDialog):
     """搬迁设置。"""
-
-    def closeEvent(self, e):
-        """关闭前先停掉后台线程。
-
-        ★ 不停的话：对话框销毁了、线程还在跑，
-          Qt 会直接 abort 整个程序 —— 也就是"点了就闪退"。
-        """
-        try:
-            _stop_threads(self)
-        except Exception:
-            pass
-        try:
-            super().closeEvent(e)
-        except Exception:
-            pass
 
     def __init__(self, src_root, parent=None):
         super().__init__(parent)
-        # 窗口图标（跟主程序一致）
-        try:
-            self.setWindowIcon(app_icon())
-        except Exception:
-            pass
         self.setWindowTitle("统一搬迁")
         self.resize(700, 460)
         v = QVBoxLayout(self)
@@ -452,7 +413,7 @@ class MigrateDialog(QDialog):
                                  % (p["name"], p["dst"],
                                     "   [已存在,将跳过]" if p["exists"] else ""))
             if p["exists"]:
-                it.setForeground(QColor("#c62828"))
+                it.setForeground(QColor(PAL.DANGER))
             self.lst.addItem(it)
         if not plans:
             self.lst.addItem("(源目录下没有子文件夹)")

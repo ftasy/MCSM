@@ -16,6 +16,7 @@ from ..dialog_workers import (
     _LIVE_THREADS, _StopMixin, Worker, IconWorker, LoaderVerWorker, _track,
     _stop_threads, _stop_all_threads, _install_exit_hook, _fetch_icon_img,
     _make_letter_pixmap, _make_placeholder_pixmap, _global_show_icons)
+from ..core.palette import PAL
 
 
 # ★ 性能优化：预编译字面量正则
@@ -98,7 +99,7 @@ def _th():
 def _fg():
     """当前主题字体色（取不到就用白）。"""
     t = _th()
-    return (t.get("fg") if t else None) or "#ffffff"
+    return (t.get("fg") if t else None) or PAL.WHITE
 
 
 def _on_bg(c):
@@ -110,7 +111,7 @@ def _on_bg(c):
 def _sec_bg():
     """分组标题行底色。"""
     t = _th()
-    return t.section_bg() if t else "#e8e8e8"
+    return t.section_bg() if t else PAL.SECTION_BG
 
 
 def _preset_matches(p, rd, key):
@@ -142,7 +143,7 @@ def _muted():
         from ..core import theme as _th
         return _th.muted_css()
     except Exception:
-        return "color:#9aa4b2;"
+        return "color:%s;" % PAL.MUTED
 
 
 # =========================================================

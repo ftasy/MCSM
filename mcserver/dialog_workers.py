@@ -17,6 +17,7 @@ from PySide6.QtGui import (QImage, QPixmap, QPainter, QColor,
                            QFont, QBrush, QPen)
 
 from .core import net
+from .core.palette import PAL, PLACEHOLDER_PAIRS
 
 _LIVE_THREADS = set()
 
@@ -191,14 +192,8 @@ def _make_letter_pixmap(slug, size=64):
     """
     name = (slug or "?")
     letter = name[0].upper() if name else "?"
-    palette = [
-        ("#5b8def", "#e8f0ff"), ("#f59e0b", "#fff4e0"),
-        ("#4ade80", "#e6fbea"), ("#a78bfa", "#f2edff"),
-        ("#f87171", "#ffecec"), ("#22d3ee", "#e6fbff"),
-        ("#f472b6", "#ffeef6"), ("#facc15", "#fffbe6"),
-    ]
-    idx = sum(ord(c) for c in name) % len(palette)
-    bg, _fg = palette[idx]
+    idx = sum(ord(c) for c in name) % len(PLACEHOLDER_PAIRS)
+    bg, _fg = PLACEHOLDER_PAIRS[idx]
     pm = QPixmap(size, size)
     pm.fill(Qt.transparent)
     from PySide6.QtGui import QPainter, QColor, QFont, QBrush, QPen
@@ -224,7 +219,7 @@ def _make_placeholder_pixmap(size=64):
     from PySide6.QtGui import QPainter, QColor, QBrush
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing)
-    p.setBrush(QBrush(QColor("#3a3d47")))
+    p.setBrush(QBrush(QColor(PAL.ART_BG)))
     p.setPen(Qt.NoPen)
     p.drawRoundedRect(4, 4, size - 8, size - 8, 12, 12)
     p.end()

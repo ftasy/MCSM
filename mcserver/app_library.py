@@ -15,6 +15,7 @@ from .dialogs import (
     ModDialog, DeleteServerDialog, DiagDialog, AnalyzeDialog, Worker, _track)
 from . import updater
 from .const import DATA_FILE
+from .core.palette import PAL
 
 
 class LibraryMixin:
@@ -418,7 +419,7 @@ class LibraryMixin:
             for c, v in enumerate(vals):
                 it = QTableWidgetItem(v)
                 if c == 5 and v == "未初始化":
-                    it.setForeground(QColor("#c62828"))
+                    it.setForeground(QColor(PAL.DANGER))
                 if c == 0:
                     # 拖动排序后要按这个 key 存顺序
                     it.setData(Qt.UserRole, self._key(e))
@@ -510,8 +511,8 @@ class LibraryMixin:
             lines.append("难度: %s / 模式: %s" % (e["difficulty"],
                                                   e.get("gamemode")))
         if e.get("notes"):
-            lines.append("<font color='#c62828'>提示: %s</font>"
-                         % "；".join(e["notes"]))
+            lines.append("<font color='%s'>提示: %s</font>"
+                         % (PAL.DANGER, "；".join(e["notes"])))
         self.info.setHtml("<br>".join(lines))
 
     def _update_info_monitor(self):
@@ -532,7 +533,7 @@ class LibraryMixin:
             cpu, mem = getattr(self, "_mon_extra", {}).get(k, (None, None))
             name = e.get("world_name") or self._display_name(e)
             lines = ["<b>%s</b>" % name,
-                     "<font color='#2e7d32'>● 运行中</font>",
+                     "<font color='%s'>● 运行中</font>" % PAL.SUCCESS,
                      txt]
             if cpu is not None:
                 lines.append("CPU: <b>%.0f%%</b>" % cpu)

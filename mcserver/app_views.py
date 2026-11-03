@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel, QListWidget, QListWidgetItem, QTableWidgetItem)
 from .core import scanner, versions, install
 from .dialogs import Worker, _track
+from .core.palette import PAL, LOADER_DOT_COLORS
 
 
 class ViewsMixin:
@@ -57,10 +58,8 @@ class ViewsMixin:
                     return pm.scaled(px, px, Qt.KeepAspectRatio,
                                     Qt.SmoothTransformation)
         # 3) 画一个
-        col = {"fabric": "#1976d2", "forge": "#e67e22",
-               "neoforge": "#8e24aa", "paper": "#00897b",
-               "vanilla": "#5d4037"}.get(
-                   (e.get("loader") or "").lower(), "#607d8b")
+        col = LOADER_DOT_COLORS.get(
+            (e.get("loader") or "").lower(), "#607d8b")
         pm = QPixmap(px, px)
         pm.fill(Qt.transparent)
         from PySide6.QtGui import QColor
@@ -76,7 +75,7 @@ class ViewsMixin:
         #   夹在 4~16 之间，各尺寸视觉一致。
         rad = max(4, min(16, px // 8))
         ptr.drawRoundedRect(0, 0, px, px, rad, rad)
-        ptr.setPen(QColor("#ffffff"))
+        ptr.setPen(QColor(PAL.WHITE))
         f = QFont()
         f.setPointSize(max(9, int(px * 0.34)))
         f.setBold(True)
@@ -650,6 +649,30 @@ class ViewsMixin:
             if self._key(e) == k:
                 return e
         return None
+
+    def _selected_entries(self):
+        """当前选中的所有服务器（图标视图 / 表格视图都支持 Ctrl/Shift 多选）。
+
+        ★ V2.3.3：批量启停用。返回 [] 表示没选中任何项，
+          调用方再回退到 _cur_entry()（单选上下文）。
+        """
+        out, seen = [], set()
+        if getattr(self, "view_mode", "table") == "icon":
+            for it in (self.icon_view.selectedItems() or []):
+                e = self._icon_entry(it)
+                if e and self._key(e) not in seen:
+                    seen.add(self._key(e))
+                    out.append(e)
+        else:
+            sorted_e = self._view_entries()
+            for r in self.table.selectionModel().selectedRows():
+                i = r.row()
+                if 0 <= i < len(sorted_e):
+                    e = sorted_e[i]
+                    if self._key(e) not in seen:
+                        seen.add(self._key(e))
+                        out.append(e)
+        return out
 
     def _save_order(self, *a):
         """拖动后保存自定义顺序，并自动切到『自定义顺序』。
