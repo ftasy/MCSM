@@ -25,18 +25,18 @@
 
 | 方式 | 说明 |
 |---|---|
-| **EXE 免安装版（推荐）** | 解压即用，含运行库，首次启动略慢 |
-| **ZIP 源码包** | 解压后双击 `安装.bat` 一键安装（自动装 Python / PySide6、建快捷方式）；或直接运行 `start_manager.bat` |
+| **EXE 免安装版（推荐）** | `MCSM_vX.Y.Z_portable.zip`，解压即用，含运行库，首次启动略慢 |
 | **在线更新** | 软件顶栏「检查更新」自动提示最新 Release |
 
 所有发布包统一托管在 **GitHub Releases**：
 👉 https://github.com/ftasy/MCSM/releases/latest
 
 > 自 v2.3.0 起只发布免安装版（EXE 便携包），不再维护安装器产物。
+> 想从源码跑：`pip install PySide6` 后 `python -m mcserver` 即可。
 
 ## 🚀 快速开始
 
-1. **安装**：解压 ZIP → 运行 `MCSM\MCSM.exe`（源码方式则双击 `安装.bat`）。
+1. **安装**：解压 `MCSM_vX.Y.Z_portable.zip` → 运行 `MCSM\MCSM.exe`。
 2. **扫描**：顶部『选择目录』，选存放服务器的总文件夹（如 `D:\MCServers`）。
 3. **初始化新服**：选中目录 → 『初始化服务端』→ 选核心 / 版本 / 模组 → 开始。
 4. **启动**：点『启动』，控制台实时显示日志；『停止』安全关服。
