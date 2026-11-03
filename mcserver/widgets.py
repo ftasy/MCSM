@@ -51,7 +51,9 @@ class Console(QWidget):
         self.out = QTextEdit()
         self.out.setReadOnly(True)
         # QTextEdit 没有 setMaximumBlockCount，用文档上限代替
-        self.out.document().setMaximumBlockCount(5000)
+        # ★ v2.3.2：+1 是为了给"最后那个空块"留位 —— 重建 5000 行时
+        #   会插入 5000 个块 + 1 个空块，上限正好 5000 会把第一行挤掉。
+        self.out.document().setMaximumBlockCount(self.MAX_BUF + 1)
         f = QFont("Consolas", 10)
         self.out.setFont(f)
         # ★ V2.0.1.1：用 objectName 精确选择器 —— 主窗口主题样式表
@@ -66,6 +68,9 @@ class Console(QWidget):
         # ★ V2.0.2：背景/文字色由 _apply_console_bg() 按 self._bg 统一设置
         #   （不再硬编码 #101010；颜色相近时文字自动调整）
         self.out.setLineWrapMode(QTextEdit.NoWrap)
+        # ★ 日志搜索 / 过滤条：默认隐藏，Ctrl+F 唤出
+        self._search = self._build_search_bar()
+        v.addWidget(self._search)
         v.addWidget(self.out, 1)
 
         h = QHBoxLayout()
@@ -76,6 +81,12 @@ class Console(QWidget):
         self.btn_send = QPushButton("发送")
         self.btn_send.clicked.connect(self.send)
         h.addWidget(self.btn_send)
+        # ★ v2.3.2：日志搜索入口（Ctrl+F 的可见版，不然没人知道能搜）
+        self.btn_find = QPushButton("查找")
+        self.btn_find.setToolTip("搜索日志 / 只看错误（Ctrl+F）")
+        self.btn_find.setAutoDefault(False)
+        self.btn_find.clicked.connect(self.show_search)
+        h.addWidget(self.btn_find)
         v.addLayout(h)
 
         self.proc = None
@@ -90,6 +101,223 @@ class Console(QWidget):
         self._colors = dict(self.DEFAULT_COLORS)
         self._colors["info"] = th_fg
         self._apply_console_bg()
+
+        # ★ v2.3.2：原始行缓冲。
+        #   过滤（只看警告/错误）要能"关掉过滤后把之前的行补回来"，
+        #   只靠 QTextEdit 里已渲染的富文本做不到（级别信息已经丢了），
+        #   所以额外留一份 (级别, 原文) 的滚动缓冲。
+        self._buf = []
+        self._filter_issue = False
+        self._hits = 0
+
+        # ★ 指令历史与补全
+        #   （以前这段被误缩进进了 set_colors()，于是只有调过配色的
+        #    Console 才有 history —— FloatConsole 造出来的控制台
+        #    一按发送就 AttributeError: 'Console' object has no attribute
+        #    'history'。现在放回 __init__，同时改配色也不会再清空历史。）
+        self.history = []
+        self.history_idx = -1
+
+        from PySide6.QtWidgets import QCompleter
+        common_cmds = [
+            "stop", "save-all", "reload", "restart",
+            "op", "deop", "whitelist", "ban", "ban-ip", "pardon", "kick", "list",
+            "spark tps", "spark profiler", "spark health",
+            "time set day", "time set night", "weather clear", "weather rain",
+            "gamemode survival", "gamemode creative", "gamemode spectator",
+            "difficulty peaceful", "difficulty hard",
+            "tp", "give", "clear", "effect", "enchant",
+            "gamerule keepInventory true", "gamerule mobGriefing false",
+            "difficulty", "seed", "forge tps", "fabric tps"
+        ]
+        self.completer = QCompleter(common_cmds, self)
+        self.completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self.completer.setFilterMode(Qt.MatchContains)
+        self.ed.setCompleter(self.completer)
+        self.ed.installEventFilter(self)
+
+        # ★ Ctrl+F 搜索日志（仅在控制台及其子控件有焦点时生效，
+        #   不影响主窗口里的 Ctrl+F —— 那是列表筛选）
+        try:
+            from PySide6.QtGui import QShortcut, QKeySequence
+            self._sc_find = QShortcut(QKeySequence.Find, self)
+            self._sc_find.setContext(Qt.WidgetWithChildrenShortcut)
+            self._sc_find.activated.connect(self.show_search)
+        except Exception:
+            self._sc_find = None
+
+    # ---------------- 搜索 / 过滤 ----------------
+    MAX_BUF = 5000
+
+    def _build_search_bar(self):
+        """输出区上方的搜索条（默认隐藏）。"""
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 2)
+        h.setSpacing(4)
+        self.ed_find = QLineEdit()
+        self.ed_find.setPlaceholderText(
+            "搜索日志（回车下一个 / Shift+回车上一个 / Esc 关闭）")
+        self.ed_find.setClearButtonEnabled(True)
+        try:
+            self.ed_find.setMaximumHeight(24)
+        except Exception:
+            pass
+        self.ed_find.textChanged.connect(self._on_find_text)
+        self.ed_find.returnPressed.connect(self.find_next)
+        self.ed_find.installEventFilter(self)
+        h.addWidget(self.ed_find, 1)
+
+        self.lb_find = QLabel("")
+        self.lb_find.setStyleSheet("color:#9aa4b2; font-size:9pt;")
+        self.lb_find.setMinimumWidth(52)
+        h.addWidget(self.lb_find)
+
+        def mk(text, tip, fn):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.setMaximumHeight(24)
+            b.setFixedWidth(28 if text in ("↑", "↓") else 54)
+            b.setAutoDefault(False)   # 别抢回车的默认按钮
+            b.clicked.connect(fn)
+            h.addWidget(b)
+            return b
+
+        self.btn_prev = mk("↑", "上一个匹配（Shift+回车）", self.find_prev)
+        self.btn_next = mk("↓", "下一个匹配（回车）", self.find_next)
+        self.btn_issue = QPushButton("只看问题")
+        self.btn_issue.setToolTip(
+            "只显示 WARN / ERROR 级别的日志（含报错堆栈）\n"
+            "排查崩溃时不用在几千行信息里翻")
+        self.btn_issue.setCheckable(True)
+        self.btn_issue.setMaximumHeight(24)
+        self.btn_issue.setFixedWidth(74)
+        self.btn_issue.setAutoDefault(False)
+        self.btn_issue.toggled.connect(self.set_issue_only)
+        h.addWidget(self.btn_issue)
+        self.btn_close = mk("关闭", "关闭搜索并恢复全部日志（Esc）",
+                            self.hide_search)
+        w.setVisible(False)
+        return w
+
+    def show_search(self):
+        """显示搜索条并聚焦输入框（Ctrl+F）。"""
+        try:
+            self._search.setVisible(True)
+            self.ed_find.setFocus()
+            self.ed_find.selectAll()
+            q = self.ed_find.text().strip()
+            if q:
+                self._on_find_text(q)
+        except Exception:
+            pass
+
+    def hide_search(self):
+        """关闭搜索条：清高亮、关过滤、恢复全部日志。"""
+        try:
+            self._search.setVisible(False)
+            if self.ed_find.text():
+                self.ed_find.clear()
+            self.out.setExtraSelections([])
+            self.lb_find.setText("")
+            self._hits = 0
+            if self._filter_issue:
+                self.btn_issue.blockSignals(True)
+                self.btn_issue.setChecked(False)
+                self.btn_issue.blockSignals(False)
+                self.set_issue_only(False)
+        except Exception:
+            pass
+
+    def set_issue_only(self, on):
+        """只看 WARN / ERROR。"""
+        on = bool(on)
+        if on == self._filter_issue:
+            return
+        self._filter_issue = on
+        self._rebuild_view()
+
+    def _pass_filter(self, lv):
+        return (not self._filter_issue) or lv in ("warn", "error")
+
+    def _hl_color(self):
+        """搜索命中高亮色：跟着控制台背景深浅走。"""
+        try:
+            from .core import theme as _th
+            dark = _th.is_dark_bg(self._bg)
+        except Exception:
+            dark = True
+        return "#7a5c00" if dark else "#ffe082"
+
+    def _highlight_all(self, q):
+        """把所有命中处标底色，返回命中数量（最多 500 处）。"""
+        from PySide6.QtGui import QTextCharFormat
+        sels = []
+        try:
+            if q:
+                doc = self.out.document()
+                color = QColor(self._hl_color())
+                cur = QTextCursor(doc)
+                cur.movePosition(QTextCursor.Start)
+                while len(sels) < 500:
+                    cur = doc.find(q, cur)
+                    if cur.isNull():
+                        break
+                    sel = QTextEdit.ExtraSelection()
+                    fmt = QTextCharFormat()
+                    fmt.setBackground(color)
+                    sel.format = fmt
+                    sel.cursor = cur
+                    sels.append(sel)
+        except Exception:
+            pass
+        try:
+            self.out.setExtraSelections(sels)
+        except Exception:
+            pass
+        return len(sels)
+
+    def _on_find_text(self, text):
+        q = (text or "").strip()
+        if not q:
+            self._hits = 0
+            self.lb_find.setText("")
+            try:
+                self.out.setExtraSelections([])
+            except Exception:
+                pass
+            return
+        self._hits = self._highlight_all(q)
+        self.lb_find.setText(("%d 处" % self._hits) if self._hits else "无匹配")
+
+    def _find(self, backward=False):
+        q = self.ed_find.text().strip()
+        if not q:
+            return
+        from PySide6.QtGui import QTextDocument
+        flags = QTextDocument.FindBackward if backward else \
+            QTextDocument.FindFlags()
+        if not self.out.find(q, flags):
+            # 到头了：绕回另一端再找一次
+            cur = self.out.textCursor()
+            cur.movePosition(QTextCursor.End if backward
+                             else QTextCursor.Start)
+            self.out.setTextCursor(cur)
+            if not self.out.find(q, flags):
+                self.lb_find.setText("无匹配")
+                return
+        self.lb_find.setText(
+            ("%d 处" % self._hits) if self._hits else "1 处")
+        try:
+            self.ed_find.setFocus()
+        except Exception:
+            pass
+
+    def find_next(self):
+        self._find(False)
+
+    def find_prev(self):
+        self._find(True)
 
     def _apply_console_bg(self):
         """按 self._bg 刷新输出区背景与默认文字色（viewport 锁）。
@@ -167,31 +395,12 @@ class Console(QWidget):
             self._bg = th_bg
         self._fit_cache.clear()
         self._apply_console_bg()
-        
-        # ★ 指令历史与补全
-        self.history = []
-        self.history_idx = -1
-        
-        # 给输入框加补全（大幅扩充常用词库，贴合实际开服习惯）
-        from PySide6.QtWidgets import QCompleter
-        common_cmds = [
-            "stop", "save-all", "reload", "restart",
-            "op", "deop", "whitelist", "ban", "ban-ip", "pardon", "kick", "list",
-            "spark tps", "spark profiler", "spark health",
-            "time set day", "time set night", "weather clear", "weather rain",
-            "gamemode survival", "gamemode creative", "gamemode spectator",
-            "difficulty peaceful", "difficulty hard",
-            "tp", "give", "clear", "effect", "enchant",
-            "gamerule keepInventory true", "gamerule mobGriefing false",
-            "difficulty", "seed", "forge tps", "fabric tps"
-        ]
-        self.completer = QCompleter(common_cmds, self)
-        self.completer.setCaseSensitivity(Qt.CaseInsensitive)
-        self.completer.setFilterMode(Qt.MatchContains)
-        self.ed.setCompleter(self.completer)
-        
-        # 绑定键盘事件
-        self.ed.installEventFilter(self)
+        # 背景变了，搜索高亮的对比色也要跟着重算
+        try:
+            if self._search.isVisible() and self.ed_find.text().strip():
+                self._on_find_text(self.ed_find.text())
+        except Exception:
+            pass
 
     def eventFilter(self, obj, event):
         """拦截输入框的上下键，实现历史记录。
@@ -199,7 +408,19 @@ class Console(QWidget):
         ★ V2.0.1.1：Tab 补全已按用户要求移除（会和 Tab 本身行为冲突）。
           补全仍由 QCompleter 自动弹出，上下键选择、回车确认。
         """
-        if obj is self.ed and event.type() == QEvent.KeyPress:
+        if obj is getattr(self, "ed_find", None) and \
+                event.type() == QEvent.KeyPress:
+            # ★ 搜索框：Esc 关闭、回车下一个、Shift+回车上一个
+            if event.key() == Qt.Key_Escape:
+                self.hide_search()
+                return True
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                if event.modifiers() & Qt.ShiftModifier:
+                    self.find_prev()
+                else:
+                    self.find_next()
+                return True
+        if obj is getattr(self, "ed", None) and event.type() == QEvent.KeyPress:
             # ★ 如果补全弹窗正在显示，把上下键交给 QCompleter 处理
             if self.completer and self.completer.popup() and self.completer.popup().isVisible():
                 return super().eventFilter(obj, event)
@@ -262,6 +483,10 @@ class Console(QWidget):
           而界面完全没有任何提示。
         """
         try:
+            # ★ v2.3.2：优先返回原始缓冲 —— 开了"只看问题"时输出区
+            #   只有警告/错误，诊断/分析需要的是完整现场，不能被过滤掉。
+            if self._buf:
+                return "\n".join(t for _, t in self._buf)
             return self.out.toPlainText()
         except Exception:
             return ""
@@ -269,6 +494,9 @@ class Console(QWidget):
     def clear(self):
         try:
             self.out.clear()
+            self._buf = []
+            if self._search.isVisible():
+                self._on_find_text(self.ed_find.text())
         except Exception:
             pass
 
@@ -317,33 +545,83 @@ class Console(QWidget):
         #   正在往上翻崩溃日志时，新日志不该把他拽走。
         sb = self.out.verticalScrollBar()
         was_at_bottom = (sb.value() >= sb.maximum() - 4)
+        old = sb.value()
         cur = self.out.textCursor()
         cur.movePosition(QTextCursor.End)
         for line in text.split("\n"):
             if not line.strip():
                 continue
             lv = self._level(line)
-            color = self._colors.get(lv) or self._colors["info"]
-            bold = False
-            # ★ 报错堆栈整行亮红加粗
-            if lv == "error" and self.ERR_STACK_RE.search(line):
-                color = self._colors.get("error_bold") or self._colors["error"]
-                bold = True
-            # ★ V2.0.2：与背景太相近的颜色自动调整（保证可读）
-            color = self._fit(color)
-            safe = (line.replace("&", "&amp;")
-                        .replace("<", "&lt;").replace(">", "&gt;"))
-            if bold:
-                cur.insertHtml(
-                    '<span style="color:%s;font-weight:bold;">'
-                    '%s</span><br>' % (color, safe))
-            else:
-                cur.insertHtml(
-                    '<span style="color:%s;">%s</span><br>'
-                    % (color, safe))
+            self._buf.append((lv, line))
+            if len(self._buf) > self.MAX_BUF:
+                del self._buf[:len(self._buf) - self.MAX_BUF]
+            # 只看问题时，非警告/错误只进缓冲、不上屏
+            if not self._pass_filter(lv):
+                continue
+            self._insert_line(cur, lv, line)
         self.out.setTextCursor(cur)
-        if was_at_bottom:
-            sb.setValue(sb.maximum())
+        # ★ 以前这里只在"本来就在底部"时滚到底，其余情况会因为
+        #   setTextCursor(末尾) 被 Qt 自动 ensureCursorVisible 拽到底，
+        #   注释写的"不打断上翻"其实一直没生效。现在显式还原位置。
+        sb.setValue(sb.maximum() if was_at_bottom else old)
+
+    def _insert_line(self, cur, lv, line):
+        """把一行按级别配色插进输出区（不负责滚动）。
+
+        ★ v2.3.2：从 insertHtml 改成 insertText + QTextCharFormat。
+          原因：`<br>` 在 Qt 里只是行分隔符（U+2028），不产生新块，
+          于是 document().setMaximumBlockCount(5000) 从来没生效过 ——
+          挂机一整天，控制台里几万行文本全在内存里。改成真正的
+          insertBlock 之后上限才真的起作用；顺带也不用再做 HTML 转义，
+          每行少一次字符串解析，日志刷屏更快。
+        """
+        cur.insertText(line, self._line_fmt(lv, line))
+        cur.insertBlock()
+
+    def _line_fmt(self, lv, line):
+        """一行 -> 字符格式（颜色 + 报错堆栈加粗）。"""
+        from PySide6.QtGui import QTextCharFormat
+        color = self._colors.get(lv) or self._colors["info"]
+        bold = False
+        # ★ 报错堆栈整行亮红加粗
+        if lv == "error" and self.ERR_STACK_RE.search(line):
+            color = self._colors.get("error_bold") or self._colors["error"]
+            bold = True
+        # ★ V2.0.2：与背景太相近的颜色自动调整（保证可读）
+        fmt = QTextCharFormat()
+        fmt.setForeground(QColor(self._fit(color)))
+        if bold:
+            fmt.setFontWeight(QFont.Bold)
+        return fmt
+
+    def _rebuild_view(self):
+        """按当前过滤条件重画整个输出区（数据来自 self._buf）。
+
+        切换"只看问题"时调用：过滤关掉要能把之前跳过的行补回来，
+        所以只能从原始缓冲重建。
+        """
+        try:
+            sb = self.out.verticalScrollBar()
+            was_at_bottom = (sb.value() >= sb.maximum() - 4)
+            old = sb.value()
+            self.out.setUpdatesEnabled(False)
+            try:
+                cur = QTextCursor(self.out.document())
+                cur.select(QTextCursor.Document)
+                cur.removeSelectedText()
+                cur.movePosition(QTextCursor.End)
+                for lv, line in self._buf:
+                    if not self._pass_filter(lv):
+                        continue
+                    self._insert_line(cur, lv, line)
+                self.out.setTextCursor(cur)
+            finally:
+                self.out.setUpdatesEnabled(True)
+            sb.setValue(sb.maximum() if was_at_bottom else min(old, sb.maximum()))
+            if self._search.isVisible() and self.ed_find.text().strip():
+                self._on_find_text(self.ed_find.text())
+        except Exception:
+            pass
 
     def set_running(self, running):
         self.ed.setEnabled(running)

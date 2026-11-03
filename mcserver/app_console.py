@@ -372,7 +372,7 @@ class ConsoleMixin:
                 break
         if en is None:
             return
-        for i, e2 in enumerate(self._sorted_entries()):
+        for i, e2 in enumerate(self._view_entries()):
             if self._key(e2) == key:
                 self._set_row_status(i, e2)
                 break
@@ -395,12 +395,12 @@ class ConsoleMixin:
     def _refresh_status(self, e=None):
         """刷新"状态"显示：表格刷新那一列，图标视图重画文字。
 
-        ★ 必须按 _sorted_entries() 的视图顺序定位行：
-          _fill_table 是按排序后的顺序填的，如果这里用 self.entries
-          的原始顺序，排序非 custom 时"运行中/未初始化"会标到
-          别的服务器那一行上。
+        ★ 必须按 _view_entries() 的视图顺序定位行：
+          _fill_table 是按排序 + 筛选后的顺序填的，如果这里用
+          self.entries 的原始顺序，排序非 custom 或开着筛选时
+          "运行中/未初始化"会标到别的服务器那一行上。
         """
-        sorted_entries = self._sorted_entries()
+        sorted_entries = self._view_entries()
         if e is None:
             for i, en in enumerate(sorted_entries):
                 self._set_row_status(i, en)

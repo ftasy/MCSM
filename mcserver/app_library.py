@@ -398,7 +398,7 @@ class LibraryMixin:
 
     def _fill_table(self):
         self.table.setRowCount(0)
-        for i, e in enumerate(self._sorted_entries()):
+        for i, e in enumerate(self._view_entries()):
             r = self.table.rowCount()
             self.table.insertRow(r)
             # ★ 一次性算好这一行的悬停注释，所有 6 个单元格共享同一个
@@ -457,8 +457,8 @@ class LibraryMixin:
                         break
         else:
             rows = self.table.selectionModel().selectedRows()
-            # ★ 同样按 _sorted_entries() 取，与 _fill_table 的填充顺序一致
-            sorted_e = self._sorted_entries()
+            # ★ 同样按 _view_entries() 取，与 _fill_table 的填充顺序一致
+            sorted_e = self._view_entries()
             if rows and rows[0].row() < len(sorted_e):
                 e = sorted_e[rows[0].row()]
         if not e:
@@ -570,10 +570,10 @@ class LibraryMixin:
         rows = self.table.selectionModel().selectedRows()
         if not rows:
             return None
-        # ★ 必须按 _sorted_entries() 取：表格行号是排序后填的，
-        #   直接用 self.entries 会在排序非 custom 时拿错服务器 ——
-        #   启动/停止/配置/删除都会作用到别的服。
-        sorted_e = self._sorted_entries()
+        # ★ 必须按 _view_entries() 取：表格行号是排序 + 筛选后填的，
+        #   直接用 self.entries 会在排序非 custom 或开着筛选时
+        #   拿错服务器 —— 启动/停止/配置/删除都会作用到别的服。
+        sorted_e = self._view_entries()
         if rows[0].row() < len(sorted_e):
             return sorted_e[rows[0].row()]
         return None

@@ -238,6 +238,54 @@ class ViewsMixin:
         return sorted(self.entries,
                       key=lambda e: str(self._display_name(e) or "").lower())
 
+    def _view_entries(self):
+        """当前真正显示在列表里的条目 = 排序结果 + 搜索框筛选。
+
+        ★ 表格行号 / 图标序号都是"按这个顺序填的"，所以任何
+          "第 N 行是哪台服"的映射都必须走这里。以前全部直接用
+          _sorted_entries()，一旦加了筛选，行号就会对不上 ——
+          选中的是一台服、操作的却是另一台。
+        """
+        items = self._sorted_entries()
+        q = (getattr(self, "filter_text", "") or "").strip().lower()
+        if not q:
+            return items
+        words = q.split()
+        out = []
+        for e in items:
+            hay = " ".join(str(x or "") for x in (
+                self._display_name(e), e.get("name"), e.get("version"),
+                e.get("loader"),
+                versions.LOADER_LABEL.get(e.get("loader"), ""),
+                e.get("world_name"), e.get("notes"),
+            )).lower()
+            if all(w in hay for w in words):
+                out.append(e)
+        return out
+
+    def _focus_filter(self):
+        """Ctrl+F：聚焦服务器搜索框。"""
+        try:
+            self.ed_filter.setFocus()
+            self.ed_filter.selectAll()
+        except Exception:
+            pass
+
+    def _on_filter_changed(self, text):
+        """搜索框内容变化 -> 重建两个视图。"""
+        self.filter_text = (text or "").strip()
+        self._fill_views()
+        n = self.icon_view.count() if self.view_mode == "icon" \
+            else self.table.rowCount()
+        total = len(self.entries)
+        if self.filter_text:
+            self.statusBar().showMessage(
+                "筛选『%s』：%d / %d 台" % (self.filter_text, n, total), 4000)
+            if n == 0:
+                self.statusBar().showMessage(
+                    "没有匹配『%s』的服务器（按 Esc 清空筛选）"
+                    % self.filter_text, 6000)
+
     def _fill_icons(self):
         """填充图标视图。
 
@@ -251,7 +299,7 @@ class ViewsMixin:
         # 于是调大小只把卡片撑大、文字变多，图没跟着长）
         px = max(24, int(sz * 0.62))
         self.icon_view._icon_px = px
-        for e in self._sorted_entries():
+        for e in self._view_entries():
             it = QListWidgetItem()
             pm = self._icon_for(e, px)
             if isinstance(pm, QPixmap) and not pm.isNull():
@@ -300,6 +348,12 @@ class ViewsMixin:
             except Exception:
                 vp_tab = None
             t = event.type()
+            # ★ v2.3.2：搜索框里按 Esc = 清空筛选
+            if obj is getattr(self, "ed_filter", None) \
+                    and t == QEvent.KeyPress:
+                if event.key() == Qt.Key_Escape:
+                    self.ed_filter.clear()
+                    return True
             # ★ 这里以前写的是 QEvent.MouseButtonMove —— 那是 Qt3 的
             #   老名字，PySide6 里根本没有，一取就 AttributeError，
             #   而下面又有 try/except 把异常吞了，于是拖动逻辑
@@ -361,6 +415,11 @@ class ViewsMixin:
 
     def _drag_begin(self, pos):
         self._drag = None
+        # ★ 筛选状态下只显示了一部分，拖动后存下来的 order 会
+        #   把隐藏的服务器挤到错误的相对位置（可见项只拿到 0..N）。
+        #   直接不允许拖，比悄悄弄乱顺序好。
+        if (getattr(self, "filter_text", "") or "").strip():
+            return
         it = self.icon_view.itemAt(pos)
         if it is None:
             return
@@ -417,6 +476,8 @@ class ViewsMixin:
     # ---- 表格视图：拖动行排序 ----
     def _tdrag_begin(self, pos):
         self._tdrag = None
+        if (getattr(self, "filter_text", "") or "").strip():
+            return
         idx = self.table.indexAt(pos)
         if not idx.isValid():
             return
@@ -501,8 +562,8 @@ class ViewsMixin:
                 return
             view.selectRow(idx.row())
             # ★ B2：selectRow 之后 selectionModel 已经更新，不必再查一遍；
-            #   而且 _sorted_entries() 的顺序就是 _fill_table 的填充顺序。
-            sorted_e = self._sorted_entries()
+            #   顺序必须和 _fill_table 一致 -> 走 _view_entries()（含筛选）。
+            sorted_e = self._view_entries()
             e = (sorted_e[idx.row()]
                  if idx.row() < len(sorted_e) else None)
         if e is None:
@@ -571,11 +632,11 @@ class ViewsMixin:
                     if entry:
                         break
         else:
-            # ★ 表格行号是"按 _sorted_entries() 填的"，
-            #   这里必须同样按排序后的顺序取，否则排序非 custom
-            #   时会拿到错的服务器。
+            # ★ 表格行号是"按 _view_entries() 填的"，
+            #   这里必须同样按排序 + 筛选后的顺序取，否则排序非 custom
+            #   或开着筛选时会拿到错的服务器。
             rows = self.table.selectionModel().selectedRows()
-            sorted_e = self._sorted_entries()
+            sorted_e = self._view_entries()
             if rows and rows[0].row() < len(sorted_e):
                 entry = sorted_e[rows[0].row()]
         return entry

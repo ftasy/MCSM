@@ -63,14 +63,9 @@ class ActionsMixin:
 
             # ★ 扫描完成后自动重新选中该服务器，刷新右侧信息面板
             target = os.path.abspath(e.get("folder") or "")
+
             def select_me():
-                for i, en in enumerate(self._sorted_entries()):
-                    if os.path.abspath(en.get("folder") or "") == target:
-                        self.table.selectRow(i)
-                        if self.view_mode == "icon" and self.icon_view.count() > i:
-                            self.icon_view.setCurrentRow(i)
-                        self.on_sel()  # 强制刷新信息面板
-                        break
+                self._select_entry_by_dir({"folder": target})
 
             self.do_scan(then=select_me)
             try:

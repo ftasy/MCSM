@@ -133,7 +133,7 @@ class ServerOpsMixin:
     def _double_click_row(self, idx):
         try:
             row = idx.row()
-            en = self._sorted_entries()[row]
+            en = self._view_entries()[row]
         except Exception:
             return
         self._toggle_run(en)
@@ -225,20 +225,37 @@ class ServerOpsMixin:
         """★ V1.7.0-2：按服务器绝对路径在刷新后的列表里精准定位并选中。
 
         兼容图标视图和表格视图；找不到就保持现状（不强制跳到第一行）。
+        ★ v2.3.2：目标被搜索框筛掉时自动清空筛选再找一次 ——
+          否则导入/初始化完成后"列表里什么都没选中"，
+          用户会以为操作失败了。
         """
-        try:
-            target = os.path.abspath(
-                e.get("server_dir") or e.get("folder") or "")
-            for i, en in enumerate(self._sorted_entries()):
-                if os.path.abspath(en.get("folder") or "") == target:
+        target = os.path.abspath(
+            e.get("server_dir") or e.get("folder") or "")
+        for attempt in (0, 1):
+            try:
+                for i, en in enumerate(self._view_entries()):
+                    d = os.path.abspath(
+                        en.get("server_dir") or en.get("folder") or "")
+                    if d != target:
+                        continue
                     self.table.selectRow(i)
                     if self.view_mode == "icon" \
                             and self.icon_view.count() > i:
                         self.icon_view.setCurrentRow(i)
                     self.on_sel()
-                    return
-        except Exception:
-            pass
+                    return True
+            except Exception:
+                return False
+            if attempt == 0 and (getattr(self, "filter_text", "") or "").strip():
+                ed = getattr(self, "ed_filter", None)
+                if ed is not None:
+                    ed.clear()          # 触发 _on_filter_changed 重填视图
+                else:
+                    self.filter_text = ""
+                    self._fill_views()
+                continue
+            return False
+        return False
 
 
     # ---------------- 备份 ----------------
@@ -665,18 +682,9 @@ class ServerOpsMixin:
 
         def select_new():
             # 选中新导入的那个（兼容图标视图和表格视图）
-            # ★ 必须按视图实际顺序（_sorted_entries）定位行，
-            #   否则排序不是"自定义顺序"时 self.entries 的索引
-            #   和视图行号对不上，会选中错的服务器。
-            target = os.path.abspath(plan["server_dir"])
-            for i, e in enumerate(self._sorted_entries()):
-                if os.path.abspath(e.get("folder") or "") == target:
-                    self.table.selectRow(i)
-                    if self.view_mode == "icon" and self.icon_view.count() > i:
-                        self.icon_view.setCurrentRow(i)
-                    # ★ 强制刷新右侧信息面板，防止导入完了但面板不更新
-                    self.on_sel()
-                    break
+            # ★ 统一走 _select_entry_by_dir：它按视图实际顺序
+            #   （_view_entries）定位行，被筛选挡住时会自动清空筛选。
+            self._select_entry_by_dir({"server_dir": plan["server_dir"]})
             QMessageBox.information(
                 self, "完成",
                 "已导入为：%s\n\n"
@@ -743,17 +751,8 @@ class ServerOpsMixin:
         QMessageBox.information(self, "整合包导入完成", msg)
         self.statusBar().showMessage("整合包导入完成")
 
-        target = os.path.abspath(sd)
-
         def select_me():
-            for i, e in enumerate(self._sorted_entries()):
-                if os.path.abspath(e.get("folder") or "") == target:
-                    self.table.selectRow(i)
-                    if self.view_mode == "icon" \
-                            and self.icon_view.count() > i:
-                        self.icon_view.setCurrentRow(i)
-                    self.on_sel()
-                    break
+            self._select_entry_by_dir({"server_dir": sd})
 
         self.do_scan(then=select_me)
 

@@ -283,8 +283,17 @@ class MainWindow(
         self.left = QWidget()
         lv = QVBoxLayout(self.left)
         lv.setContentsMargins(0, 0, 0, 0)
-        # 排序栏
+        # 排序栏（★ v2.3.2：左边加了服务器搜索框）
         sh = QHBoxLayout()
+        self.filter_text = ""
+        sh.addWidget(QLabel("搜索:"))
+        self.ed_filter = QLineEdit()
+        self.ed_filter.setPlaceholderText("名称 / 版本 / 加载器（Ctrl+F）")
+        self.ed_filter.setClearButtonEnabled(True)
+        self.ed_filter.setMaximumWidth(230)
+        self.ed_filter.textChanged.connect(self._on_filter_changed)
+        self.ed_filter.installEventFilter(self)
+        sh.addWidget(self.ed_filter)
         sh.addWidget(QLabel("排序:"))
         self.cb_sort = QComboBox()
         for t, d in (("自定义顺序（可拖动）", "custom"),
@@ -304,6 +313,16 @@ class MainWindow(
         sh.addWidget(self.lb_draghint)
         sh.addWidget(self.cb_sort, 1)
         lv.addLayout(sh)
+        # ★ Ctrl+F 聚焦搜索框（控制台里按 Ctrl+F 是搜日志，见 Console）
+        try:
+            from PySide6.QtGui import QShortcut, QKeySequence
+            self._sc_filter = QShortcut(QKeySequence.Find, self)
+            self._sc_filter.activated.connect(self._focus_filter)
+            # ★ F5 = 重新扫描（刷新列表的习惯键）
+            self._sc_rescan = QShortcut(QKeySequence.Refresh, self)
+            self._sc_rescan.activated.connect(self.do_scan)
+        except Exception:
+            pass
         lv.addWidget(self.icon_view, 1)
         lv.addWidget(self.table, 1)
         self.icon_view.setVisible(self.view_mode == "icon")
