@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""模组相关：ModPickDialog / ModBrowseDialog / ModrinthDialog / ModDialog / 分析。
+"""ModPickDialog：初始化前手动勾选要装的模组。
 
-从 dialogs.py 拆分而来，只保留本模块用到的导入。
+从 dialogs.py 拆分而来。
 """
 
 import os
@@ -25,15 +25,12 @@ from .common import (
     _RE_URL)
 from .base import BaseDialog
 from .server_ops import DiagDialog
-from ..widgets import app_icon
 from ..core.palette import PAL
 
 
 def _link_btn_css():
     """卡片上的"查百科"小按钮样式（深色卡片上的链接蓝 + 悬停提亮）。"""
     return ("QPushButton{border:none;color:%s;font-size:11px;}"
-
-"""ModPickDialog：初始化前手动勾选要装的模组（含 _link_btn_css 辅助）。"""
 
             "QPushButton:hover{color:%s;}" % (PAL.ACCENT, PAL.ACCENT_HOVER))
 

@@ -786,8 +786,12 @@ class ProcessMixin:
                 "[!] 自动重启失败：java 找不到 / 权限不足 / 被拦截。"
                 "已停止自动重启。")
 
-    def do_stop(self):
+    def do_stop(self, entry=None):
         # ★ V2.3.3：支持批量 —— 多选 = 批量停止；单选/没选 = 停止当前。
+        #   传了 entry（双击 / 右键菜单）就只停这一台，不看当前多选。
+        if entry is not None:
+            self._stop_one(entry)
+            return
         entries = self._selected_entries() or []
         if not entries:
             e = self._cur_entry()

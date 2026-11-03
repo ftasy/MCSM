@@ -480,9 +480,14 @@ class LibraryMixin:
         self._fill_info_detail(e, need, fmt, newmeta)
 
         running = self._key(e) in self.procs
-        self.act_stop.setEnabled(running)
-        self.act_start.setEnabled(not running)
-        self.act_float_console.setEnabled(running)
+        # ★ V2.3.3：多选时按钮可用性按"选中集合"整体判断，
+        #   交给 _refresh_actions 统一处理（这里不再按单个覆盖）。
+        try:
+            self._refresh_actions()
+        except Exception:
+            self.act_stop.setEnabled(running)
+            self.act_start.setEnabled(not running)
+            self.act_float_console.setEnabled(running)
 
     def _fill_info_detail(self, e, need=None, fmt=None, newmeta=None):
         """信息面板：服务器详情视图（未运行时显示）。

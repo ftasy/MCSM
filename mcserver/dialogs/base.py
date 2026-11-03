@@ -2,7 +2,7 @@
 """对话框基类：统一的窗口图标 + 关闭时兜底停线程。
 
 ★ 为什么要有这个基类
-  拆分前 dialogs.py 里 12 个对话框各自抄了一份完全相同的 closeEvent：
+  拆分前 dialogs.py 里 11 个对话框各自抄了一份完全相同的 closeEvent：
 
       try: _stop_threads(self)
       except Exception: pass
@@ -10,7 +10,7 @@
       except Exception: pass
 
   这段代码删掉一行就是"点关闭闪退"（对话框销毁了后台线程还在跑，
-  Qt 直接 abort），属于必须一字不差的关键逻辑，抄 12 份就迟早会漏。
+  Qt 直接 abort），属于必须一字不差的关键逻辑，抄 11 份就迟早会漏。
   现在统一收在 BaseDialog.closeEvent 里，子类不用再写；
   个别子控件自己挂了线程的（如 JavaPick 的扫描线程），
   只需声明 `_stop_children = ("java_pick",)`。

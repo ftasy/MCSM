@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""模组相关：ModPickDialog / ModBrowseDialog / ModrinthDialog / ModDialog / 分析。
+"""AnalyzeDialog：服务器日志 / 配置健康诊断。
 
-从 dialogs.py 拆分而来，只保留本模块用到的导入。
+从 dialogs.py 拆分而来。
 """
 
 import os
@@ -24,14 +24,9 @@ from .common import (
     _open_in_explorer, _fetch_icon_bytes, _RE_BRACKET_TAG, _RE_BRACKET_STRIP,
     _RE_URL)
 from .base import BaseDialog
-from .mod_pick import _link_btn_css
 from .server_ops import DiagDialog
-from ..widgets import app_icon
 from ..core.palette import PAL
 
-
-
-"""AnalyzeDialog：服务器日志/配置健康诊断。"""
 
 class AnalyzeDialog(BaseDialog):
     """离线日志诊断 —— 不联网、不需要 AI，靠规则库匹配。"""

@@ -230,19 +230,26 @@ class ConsoleMixin:
 
         以前启动后直接 act_start.setEnabled(False)，
         那是全局的 -> 一旦开了任何一个服，就再也开不了第二个。
+
+        ★ V2.3.3：多选时按"选中集合"整体判断 ——
+          只要有一个在跑，"停止"就该可点；只要有一个没跑，"启动"就该可点。
         """
-        e = self._cur()
+        sel = self._selected_entries() or []
+        e = sel[0] if sel else self._cur()
         if not e:
             self.act_start.setEnabled(False)
             self.act_stop.setEnabled(False)
             self.act_stop_backup.setEnabled(False)
             self.act_float_console.setEnabled(False)
             return
-        running = self._key(e) in self.procs
-        self.act_start.setEnabled(not running)
-        self.act_stop.setEnabled(running)
-        self.act_stop_backup.setEnabled(running)
-        self.act_float_console.setEnabled(running)
+        keys = [self._key(x) for x in (sel or [e])]
+        states = [k in self.procs for k in keys]
+        any_running = any(states)
+        any_stopped = not all(states)
+        self.act_start.setEnabled(any_stopped)
+        self.act_stop.setEnabled(any_running)
+        self.act_stop_backup.setEnabled(any_running)
+        self.act_float_console.setEnabled(any_running)
         # ★ V2.0.1：选中变化时同步窗口标题监测
         try:
             self._update_title_monitor()

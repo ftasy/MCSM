@@ -139,11 +139,14 @@ class ServerOpsMixin:
         self._toggle_run(en)
 
     def _toggle_run(self, e):
+        # ★ V2.3.3：双击 = 只操作这一台。
+        #   传 entry 明确目标，否则多选状态下会把选中的全部一起启停
+        #   （Ctrl + 双击时很容易误触发）。
         k = self._key(e)
         if k in self.procs:
-            self.do_stop()
+            self.do_stop(entry=e)
         else:
-            self.do_start()
+            self.do_start(entry=e)
 
     # ★ V1.6.0：崩溃/启动失败后的非模态智能引导
     def _ask_crash_diag(self, key=None):

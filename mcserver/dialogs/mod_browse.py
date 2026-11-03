@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""模组相关：ModPickDialog / ModBrowseDialog / ModrinthDialog / ModDialog / 分析。
+"""ModBrowseDialog + ModDialog：PCL2 风格卡片浏览 / 已装模组管理。
 
-从 dialogs.py 拆分而来，只保留本模块用到的导入。
+从 dialogs.py 拆分而来。
 """
 
 import os
@@ -25,15 +25,12 @@ from .common import (
     _RE_URL)
 from .base import BaseDialog
 from .server_ops import DiagDialog
-from ..widgets import app_icon
-from ..core.palette import PAL
-
-
-
-"""ModBrowseDialog + ModDialog：PCL2 风格卡片浏览 / 已装模组管理。"""
-from .mod_search import ModrinthDialog
+from ..core.palette import PAL, TAG_COLORS
 from .mod_source import SourceDialog
+from .mod_search import ModrinthDialog
 from .mod_pick import _link_btn_css
+
+
 class ModBrowseDialog(BaseDialog):
     """PCL2 风格模组浏览：卡片视图 + 勾选安装。
 
@@ -57,10 +54,6 @@ class ModBrowseDialog(BaseDialog):
     def __init__(self, entry, parent=None, select_only=False,
                  mode="mods"):
         super().__init__(parent)
-        try:
-            self.setWindowIcon(app_icon())
-        except Exception:
-            pass
         self.entry = entry
         self.select_only = bool(select_only)
         # ★ V1.2.0：mode="plugins" 时数据源切到 Modrinth
@@ -949,15 +942,8 @@ class ModBrowseDialog(BaseDialog):
 
     # ---------- PCL2 风格卡片 ----------
     # ★ V1.8.2：desc 末尾 [标签] → 彩色小标签（第三行渲染）。
-    _TAG_COLORS = {
-        "第三方登录": PAL.ACCENT, "前置库": PAL.WARN_SOFT,
-        "Cupboard生态": PAL.WARN_SOFT, "Cupboard附属": PAL.WARN_SOFT,
-        "优化": PAL.SUCCESS_LIGHT, "语音": PAL.SUCCESS_LIGHT,
-        "监控": PAL.PURPLE_SOFT, "崩溃分析": PAL.DANGER_LIGHT, "工具": PAL.CYAN,
-        "权限": PAL.YELLOW, "聊天": PAL.PINK, "聊天扩展": PAL.PINK,
-        "基础指令": PAL.BLUE_SOFT, "防熊": PAL.DANGER_LIGHT, "建筑": PAL.CYAN,
-        "区域保护": PAL.SUCCESS_LIGHT, "基础前置": PAL.WARN_SOFT,
-    }
+    #   配色统一放在 core/palette.py 的 TAG_COLORS（避免两处维护）。
+    _TAG_COLORS = TAG_COLORS
 
     def _make_card(self, h, icon_pm, builtin):
         """一行卡片：左侧勾选框 +（可选）48x48 图标，右侧名称/简介/标签/百科按钮。

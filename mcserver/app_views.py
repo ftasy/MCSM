@@ -592,9 +592,11 @@ class ViewsMixin:
         if not act:
             return
         if act is a_start:
-            self.do_start()
+            # ★ 右键菜单是"针对被右键的这一台"的上下文菜单，
+            #   传 entry 明确目标 —— 否则多选时会把选中的全部一起启动。
+            self.do_start(entry=e)
         elif act is a_stop:
-            self.do_stop()
+            self.do_stop(entry=e)
         elif act is a_cfg:
             self.do_config()
         elif act is a_init:
@@ -658,7 +660,11 @@ class ViewsMixin:
         """
         out, seen = [], set()
         if getattr(self, "view_mode", "table") == "icon":
-            for it in (self.icon_view.selectedItems() or []):
+            # 按行号排序：selectedItems() 返回的是"选中顺序"，
+            # 批量启停按界面从上到下的顺序更符合直觉。
+            items = sorted(self.icon_view.selectedItems() or [],
+                           key=lambda it: self.icon_view.row(it))
+            for it in items:
                 e = self._icon_entry(it)
                 if e and self._key(e) not in seen:
                     seen.add(self._key(e))
