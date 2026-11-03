@@ -3,6 +3,13 @@
 
 import os
 import json
+import re
+
+from . import net
+
+_RE_VER_NUMBERS = re.compile(r"(\d+(?:\.\d+)*)")
+_RE_JAVA_MAJOR = re.compile(r'"(\d+)(?:\.(\d+))?')
+_RE_JAVA_MINOR = re.compile(r'1\.(\d+)\.')
 
 # (版本前缀, 需要Java, 数据包格式号)
 # 说明：数据包格式号 82 是分界线
@@ -115,9 +122,8 @@ def mc_version_key(ver, newest_first=True):
       · 预发布排在正式版之后（更旧）
       · 解析不出就排最后
     """
-    import re as _re
     s = str(ver or "").strip()
-    m = _re.match(r"(\d+(?:\.\d+)*)", s)
+    m = _RE_VER_NUMBERS.match(s)
     if not m:
         return (9999, 9999, 9999, 9999, 9)
     nums = [int(x) for x in m.group(1).split(".")]
@@ -254,14 +260,13 @@ def parse_java_major(text):
         return None
     t = str(text)
     # openjdk version "21.0.1" / java version "1.8.0_382"
-    import re
-    m = re.search(r'"(\d+)(?:\.(\d+))?', t)
+    m = _RE_JAVA_MAJOR.search(t)
     if not m:
         return None
     major = int(m.group(1))
     if major == 1:
         # 1.8.0_xxx -> 8
-        m2 = re.search(r'1\.(\d+)\.', t)
+        m2 = _RE_JAVA_MINOR.search(t)
         return int(m2.group(1)) if m2 else None
     return major
 
@@ -378,14 +383,10 @@ def fetch_release_versions(timeout=8, log=None):
     先试 BMCLAPI（国内快），不通再试 Mojang 官方。
     全都失败返回 []（调用方应当接着用硬编码表）。
     """
-    import urllib.request
     last = None
     for name, url in MANIFEST_URLS:
         try:
-            req = urllib.request.Request(
-                url, headers={"User-Agent": "mcservermgr/1.0"})
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                data = json.loads(r.read().decode("utf-8", "replace"))
+            data = net.get_json(url, timeout=timeout)
             vs = [x.get("id") for x in (data.get("versions") or [])
                   if x.get("type") == "release" and x.get("id")]
             if vs:

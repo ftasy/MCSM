@@ -8,8 +8,8 @@ OpenAI 兼容接口（OpenAI / DeepSeek / Kimi / 自定义），
 import json
 import os
 import re
-import urllib.request
-import urllib.error
+
+from . import net
 
 # 服务商预设（OpenAI 兼容）
 PROVIDERS = [
@@ -156,16 +156,12 @@ def call_llm(api_key, base_url, model, log_text, timeout=120,
         "temperature": 0.2,
     }
     data = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=data,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": "Bearer %s" % api_key,
-            "User-Agent": "MCServerManager/1.0 (ai-diag)",
-        })
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer %s" % api_key,
+    }
     _log("正在请求 %s ..." % base)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw = resp.read()
+    raw = net.request(url, data=data, headers=headers, timeout=timeout)
     try:
         obj = json.loads(raw.decode("utf-8"))
     except Exception:

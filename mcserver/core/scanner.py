@@ -17,6 +17,8 @@ MC_VER_RE = re.compile(
 _MC_VER_ANY_RE = re.compile(
     r"(?:1\.\d+(?:\.\d+)?|2[5-9]\.\d+(?:\.\d+)?|3[0-9]\.\d+(?:\.\d+)?)")
 
+_RE_MC_COLOR = re.compile(r"\u00a7[0-9a-fk-orA-FK-OR]")
+
 
 def clean_mc_version(v):
     """净化版本串：返回像 MC 版本的 token，不像就返回 None。
@@ -325,8 +327,8 @@ def count_region(world_dir, dim="overworld"):
     total = 0
     for rd in _region_dirs(world_dir, dim):
         try:
-            total += len([f for f in os.listdir(rd)
-                          if f.endswith(".mca")])
+            total += sum(1 for f in os.scandir(rd)
+                         if f.name.endswith(".mca"))
         except Exception:
             pass
     return total
@@ -367,8 +369,7 @@ def read_world_info(world_dir):
     lv = d.get("LevelName")
     if isinstance(lv, str):
         # ★ 去除 MC 颜色代码（§b 等），防止界面显示乱码
-        import re
-        lv_clean = re.sub(r"\u00a7[0-9a-fk-orA-FK-OR]", "", lv)
+        lv_clean = _RE_MC_COLOR.sub("", lv)
         info["name"] = lv_clean.strip()
     
     # ★ 版本读取增强：兼容新版结构
@@ -509,11 +510,12 @@ def scan_entry(folder):
     if os.path.isfile(p):
         try:
             d = {}
-            for line in open(p, "r", encoding="utf-8", errors="replace"):
-                line = line.strip()
-                if "=" in line and not line.startswith("#"):
-                    k, v = line.split("=", 1)
-                    d[k] = v
+            with open(p, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line and not line.startswith("#"):
+                        k, v = line.split("=", 1)
+                        d[k] = v
             e["props"] = d
         except Exception:
             pass
@@ -522,8 +524,8 @@ def scan_entry(folder):
         full = os.path.join(server_dir, subd)
         if os.path.isdir(full):
             try:
-                e[cnt] = len([f for f in os.listdir(full)
-                              if f.lower().endswith(".jar")])
+                e[cnt] = sum(1 for f in os.scandir(full)
+                             if f.name.lower().endswith(".jar"))
             except Exception:
                 pass
 

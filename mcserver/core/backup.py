@@ -7,6 +7,8 @@ import shutil
 import time
 import zipfile
 
+_RE_ILLEGAL_B = re.compile(r'[\\/:*?"<>|]+')
+
 BACKUP_DIRNAME = "backups"
 
 
@@ -69,8 +71,8 @@ def _count_region(d):
                               "overworld", "region")):
         if os.path.isdir(cand):
             try:
-                return len([f for f in os.listdir(cand)
-                            if f.endswith(".mca")])
+                return sum(1 for f in os.scandir(cand)
+                           if f.name.endswith(".mca"))
             except Exception:
                 pass
     return 0
@@ -93,7 +95,7 @@ def safe_stamp():
 
 def _safe(s):
     """清洗成安全文件名。"""
-    s = re.sub(r'[\\/:*?"<>|]+', "_", str(s)).strip()
+    s = _RE_ILLEGAL_B.sub("_", str(s)).strip()
     return s or "world"
 
 

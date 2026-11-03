@@ -23,6 +23,36 @@ import os
 import re
 import shutil
 
+# ★ 性能优化：预编译所有字面量正则（read_servercore / read_svc / apply_svc 使用）
+# ServerCore 配置读取
+_RE_SC_DYNAMIC = re.compile(r"^dynamic:\s*\n\s*enabled:\s*(true|false)", re.M)
+_RE_SC_SIM_DIST = re.compile(r"SIMULATION_DISTANCE:\s*(-?\d+)")
+_RE_SC_CHUNK_TICK = re.compile(r"CHUNK_TICK_DISTANCE:\s*(-?\d+)")
+_RE_SC_MOBCAP = re.compile(r"MOBCAP_PERCENTAGE:\s*(-?\d+)")
+_RE_SC_SIM_MIN = re.compile(
+    r"SIMULATION_DISTANCE'\s*\n\s*max:\s*\d+\s*\n\s*min:\s*(-?\d+)")
+_RE_SC_CHUNK_TICK_MIN = re.compile(
+    r"CHUNK_TICK_DISTANCE'\s*\n\s*max:\s*\d+\s*\n\s*min:\s*(-?\d+)")
+_RE_SC_MOBCAP_MIN = re.compile(
+    r"MOBCAP_PERCENTAGE'\s*\n\s*max:\s*\d+\s*\n\s*min:\s*(-?\d+)")
+_RE_SC_XP_RADIUS = re.compile(r"xp-merge-radius:\s*([\d.]+)")
+_RE_SC_ITEM_RADIUS = re.compile(r"item-merge-radius:\s*([\d.]+)")
+_RE_SC_TICK_INTERVAL = re.compile(r"tick-interval:\s*(\d+)")
+_RE_SC_VIEW_DIST = re.compile(
+    r"VIEW_DISTANCE'\s*\n\s*max:\s*(\d+)\s*\n\s*min:\s*(\d+)")
+# SVC 配置读取
+_RE_SVC_PORT = re.compile(r"^\s*port\s*=\s*(\d+)", re.M)
+_RE_SVC_VOICE_DIST = re.compile(r"^\s*voice_distance\s*=\s*(\d+)", re.M)
+_RE_SVC_BROADCAST = re.compile(r"^\s*broadcast_range\s*=\s*(\d+)", re.M)
+_RE_SVC_HOST = re.compile(r"^[ \t]*voice_host[ \t]*=[ \t]*(.+)", re.M)
+_RE_SVC_ENABLE = re.compile(r"^\s*enable_voice_chat\s*=\s*(\w+)", re.M)
+_RE_SVC_GROUPS = re.compile(r"^\s*disable_groups\s*=\s*(\w+)", re.M)
+# SVC 配置写入（apply_svc 替换 key=value 行）
+_RE_SVC_KV_LINE = re.compile(
+    r"^[ \t]*(port|voice_distance|broadcast_range|"
+    r"voice_host|enable_voice_chat|disable_groups)"
+    r"[ \t]*=[ \t]*\S+.*$", re.M)
+
 # ServerCore 配置文件可能的位置，按顺序找
 SERVERCORE_PATHS = [
     os.path.join("config", "servercore", "config.yml"),
@@ -295,40 +325,37 @@ def read_servercore(server_dir):
     #   否则 _b("enabled") 先匹配到 features 里 lobotomize-villagers 的
     #   enabled（4 空格缩进），dynamic 开关读错（lobotomize 关了
     #   却显示动态调整也关了）。
-    m = re.search(r"^dynamic:\s*\n\s*enabled:\s*(true|false)", t, re.M)
+    m = _RE_SC_DYNAMIC.search(t)
     out["dynamic"] = (m.group(1) == "true") if m else True
     out["target_mspt"] = _i("target-mspt", 40)
     out["autosave"] = _i("autosave-interval-seconds", 600)
     out["xp_merge"] = _i("xp-merge-fraction", 20)
     out["lobotomize"] = _b("enabled", True)
     out["prevent_unloaded"] = _b("prevent-moving-into-unloaded-chunks", True)
-    m = re.search(r"SIMULATION_DISTANCE:\s*(-?\d+)", t)
+    m = _RE_SC_SIM_DIST.search(t)
     out["sim_default"] = int(m.group(1)) if m else 8
-    m = re.search(r"CHUNK_TICK_DISTANCE:\s*(-?\d+)", t)
+    m = _RE_SC_CHUNK_TICK.search(t)
     out["chunk_tick_default"] = int(m.group(1)) if m else 8
-    m = re.search(r"MOBCAP_PERCENTAGE:\s*(-?\d+)", t)
+    m = _RE_SC_MOBCAP.search(t)
     out["mobcap_max"] = int(m.group(1)) if m else 100
     # min 取 dynamic-settings 里最后一个同名项
-    mins = re.findall(r"SIMULATION_DISTANCE'\s*\n\s*max:\s*\d+\s*\n"
-                      r"\s*min:\s*(-?\d+)", t)
+    mins = _RE_SC_SIM_MIN.findall(t)
     out["sim_min"] = int(mins[-1]) if mins else max(4, out["sim_default"] - 2)
-    mins = re.findall(r"CHUNK_TICK_DISTANCE'\s*\n\s*max:\s*\d+\s*\n"
-                      r"\s*min:\s*(-?\d+)", t)
+    mins = _RE_SC_CHUNK_TICK_MIN.findall(t)
     out["chunk_tick_min"] = int(mins[-1]) if mins else max(
         3, out["chunk_tick_default"] - 3)
-    mins = re.findall(r"MOBCAP_PERCENTAGE'\s*\n\s*max:\s*\d+\s*\n"
-                      r"\s*min:\s*(-?\d+)", t)
+    mins = _RE_SC_MOBCAP_MIN.findall(t)
     out["mobcap_min"] = int(mins[-1]) if mins else 70
     
     # ★ 新增字段读取
-    m = re.search(r"xp-merge-radius:\s*([\d.]+)", t)
+    m = _RE_SC_XP_RADIUS.search(t)
     out["xp_radius"] = float(m.group(1)) if m else 1.0
-    m = re.search(r"item-merge-radius:\s*([\d.]+)", t)
+    m = _RE_SC_ITEM_RADIUS.search(t)
     out["item_radius"] = float(m.group(1)) if m else 1.0
-    m = re.search(r"tick-interval:\s*(\d+)", t)
+    m = _RE_SC_TICK_INTERVAL.search(t)
     out["lobotomize_interval"] = int(m.group(1)) if m else 20
     
-    m = re.search(r"VIEW_DISTANCE'\s*\n\s*max:\s*(\d+)\s*\n\s*min:\s*(\d+)", t)
+    m = _RE_SC_VIEW_DIST.search(t)
     if m:
         out["allow_dynamic_view"] = True
         out["view_default"] = int(m.group(1))
@@ -446,22 +473,22 @@ def read_svc(server_dir):
             return out
         with open(p, "r", encoding="utf-8", errors="replace") as f:
             t = f.read()
-        m = re.search(r"^\s*port\s*=\s*(\d+)", t, re.M)
+        m = _RE_SVC_PORT.search(t)
         if m:
             out["port"] = int(m.group(1))
-        m = re.search(r"^\s*voice_distance\s*=\s*(\d+)", t, re.M)
+        m = _RE_SVC_VOICE_DIST.search(t)
         if m:
             out["voice_distance"] = int(m.group(1))
-        m = re.search(r"^\s*broadcast_range\s*=\s*(\d+)", t, re.M)
+        m = _RE_SVC_BROADCAST.search(t)
         if m:
             out["broadcast_range"] = int(m.group(1))
-        m = re.search(r"^[ \t]*voice_host[ \t]*=[ \t]*(.+)", t, re.M)
+        m = _RE_SVC_HOST.search(t)
         if m:
             out["voice_host"] = m.group(1).strip()
-        m = re.search(r"^\s*enable_voice_chat\s*=\s*(\w+)", t, re.M)
+        m = _RE_SVC_ENABLE.search(t)
         if m:
             out["enable"] = m.group(1).lower() in ("true", "1", "yes")
-        m = re.search(r"^\s*disable_groups\s*=\s*(\w+)", t, re.M)
+        m = _RE_SVC_GROUPS.search(t)
         if m:
             out["enable_groups"] = \
                 m.group(1).lower() not in ("true", "1", "yes")
@@ -507,10 +534,7 @@ def apply_svc(server_dir, opts):
                 }.get(key)
                 return ("%s = %s" % (key, val)) if val is not None \
                     else m.group(0)
-            body = re.sub(r"^[ \t]*(port|voice_distance|broadcast_range|"
-                          r"voice_host|enable_voice_chat|disable_groups)"
-                          r"[ 	]*=[ 	]*\S+.*$",
-                          _sub, old, flags=re.M)
+            body = _RE_SVC_KV_LINE.sub(_sub, old)
             if body == old:
                 return {"ok": True, "rel": rel, "backup": False}
             try:

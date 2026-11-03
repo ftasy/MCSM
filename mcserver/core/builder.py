@@ -6,6 +6,8 @@ import re
 
 from . import versions
 
+_RE_WHITESPACE_B = re.compile(r"\s+")
+
 DIFF_KEY = {"和平": "peaceful", "简单": "easy", "普通": "normal",
             "困难": "hard"}
 GM_KEY = {"生存": "survival", "创造": "creative", "冒险": "adventure",
@@ -77,7 +79,7 @@ def strip_mc_codes(s):
 def clean_display(name):
     """用于显示的干净名字（去颜色码，但保留空格和冒号）。"""
     s = strip_mc_codes(name or "")
-    s = re.sub(r"\s+", " ", s).strip()
+    s = _RE_WHITESPACE_B.sub(" ", s).strip()
     return s
 
 
@@ -94,7 +96,7 @@ def safe_level_name(name, fallback="world"):
         s = s.replace(ch, " ")
     # 控制字符
     s = "".join(ch for ch in s if ord(ch) >= 32)
-    s = re.sub(r"\s+", " ", s).strip()
+    s = _RE_WHITESPACE_B.sub(" ", s).strip()
     # 不能以点结尾（Windows 会吃掉）
     s = s.rstrip(". ")
     if not s:

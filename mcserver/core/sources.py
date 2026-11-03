@@ -17,6 +17,12 @@ import json
 import urllib.request
 import urllib.parse
 
+from . import net
+
+_RE_VERSION_ONLY_S = re.compile(r"^[\d.]+$")
+_RE_GITHUB_REPO = re.compile(r"^https?://github\.com/")
+_RE_GIT_SUFFIX = re.compile(r"\.git$")
+
 # ---- 源地址 ----
 MODRINTH_OFFICIAL = "https://api.modrinth.com/v2"
 MODRINTH_CDN = "https://cdn.modrinth.com"
@@ -278,14 +284,9 @@ def probe_all_latency(timeout=8):
 #  统一 HTTP
 # =========================================================
 def _get_json(base, path, timeout=30, headers=None):
-    req = urllib.request.Request(
-        base + path,
-        headers=headers or {
-            "User-Agent": "MCServerManager/0.1",
-            "Accept": "application/json",
-        })
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8"))
+    h = headers or {"Accept": "application/json"}
+    raw = net.request(base + path, headers=h, timeout=timeout)
+    return json.loads(raw.decode("utf-8"))
 
 
 def _get_json_auto(path, timeout=30, headers=None, log=None):
@@ -319,7 +320,8 @@ def _get_json_auto(path, timeout=30, headers=None, log=None):
 #  CurseForge（经 MCIM 镜像，免 key）
 # =========================================================
 def _cf_headers():
-    h = {"User-Agent": "MCServerManager/0.1",         "Accept": "application/json"}
+    h = dict(net.UA)
+    h["Accept"] = "application/json"
     k = get_cf_key()
     if k:
         h["x-api-key"] = k
@@ -509,13 +511,12 @@ def cf_download_url(cf_id, mc_version=None, loader=None):
 
     cand = [f for f in files if match(f)]
     if not cand:
-        import re as _re
         # ★ V2.0.5：只取"纯数字点分"的版本标签做提示
         #   （CF gameVersions 里还混有 Fabric/Forge/Server 等非版本标签）
         tops = sorted({g for f in files
                        for g in (f.get("gameVersions") or [])
                        if g.lower() not in (loader or "").lower()
-                       and _re.match(r"^[\d.]+$", g)})
+                       and _RE_VERSION_ONLY_S.match(g)})
         hint = "（该模组当前最新文件支持 %s）" % " / ".join(tops[-4:]) if tops else ""
         return {"err": "CurseForge 暂无 %s + %s 的适配文件%s，请更换服务器版本或换模组"
                 % (mc_version or "任意版本", loader or "任意加载器", hint)}
@@ -587,8 +588,8 @@ def github_releases(repo):
     返回 {"ok":True,"releases":[...]} 或 {"ok":False,"err":...}
     """
     repo = (repo or "").strip().strip("/")
-    repo = re.sub(r"^https?://github\.com/", "", repo)
-    repo = re.sub(r"\.git$", "", repo)
+    repo = _RE_GITHUB_REPO.sub("", repo)
+    repo = _RE_GIT_SUFFIX.sub("", repo)
     parts = [p for p in repo.split("/") if p]
     if len(parts) < 2:
         return {"ok": False, "err": "格式应是 owner/name 或完整链接"}

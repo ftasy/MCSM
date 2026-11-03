@@ -10,6 +10,8 @@ import re
 import json
 import zipfile
 
+from . import net
+
 DISABLED_SUFFIX = ".disabled"
 
 # jar 内的元数据文件（按优先级）
@@ -20,6 +22,18 @@ META_FILES = [
     "mcmod.info",           # 老 Forge
     "quilt.mod.json",       # Quilt
 ]
+
+# ★ 性能优化：预编译字面量正则
+_VER_SUFFIX_RE = re.compile(r"-(\d+\.\d+(?:\.\d+)?)$")
+_MC_VER_SUFFIX_RE = re.compile(r"-mc\d+\.\d+(\.\d+)?$")
+_VER_SUFFIX2_RE = re.compile(r"-\d+\.\d+(\.\d+)?$")
+_NORM_RE = re.compile(r"[^a-z0-9]")
+_DIGITS_RE = re.compile(r"\d+")
+_NORM_LOADER_RE = re.compile(
+    r"\bfabric\b|\bforge\b|\bneoforge\b|"
+    r"\bquilt\b|\bmc\b|\+built\b")
+_NORM_SPACE_RE = re.compile(r"\s+")
+_NORM_DOTS_RE = re.compile(r"\.{2,}")
 
 
 def _read_jar_meta(jar_path):
@@ -101,14 +115,14 @@ def _guess_from_filename(fn):
     # ★ V1.7.3-1：先剥尾部加载器段（name-loader-version 格式，
     #   ferritecore-6.0.1-fabric 的版本段被 fabric 挡住剥不掉）
     base = _strip_loader_seg(base)
-    m = re.search(r"-(\d+\.\d+(?:\.\d+)?)$", base)
+    m = _VER_SUFFIX_RE.search(base)
     ver = None
     if m:
         ver = m.group(1)
         base = base[: m.start()]
     # 去掉 mc1.21.10 这类游戏版本段
-    base = re.sub(r"-mc\d+\.\d+(\.\d+)?$", "", base)
-    base = re.sub(r"-\d+\.\d+(\.\d+)?$", "", base)
+    base = _MC_VER_SUFFIX_RE.sub("", base)
+    base = _VER_SUFFIX2_RE.sub("", base)
     # 再剥一次 loader 段（name-loader-mc-version 格式，
     #   lithium-fabric-mc1.20.1-0.11.2 -> lithium）
     base = _strip_loader_seg(base)
@@ -208,7 +222,7 @@ MODRINTH = "https://api.modrinth.com/v2"
 
 def _norm(s):
     """归一化用于比对：去空格、连字符、下划线、小写。"""
-    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+    return _NORM_RE.sub("", (s or "").lower())
 
 
 # =========================================================
@@ -243,20 +257,15 @@ def _api_post(path, body, timeout=30):
       auto / mcim 模式下先走 MCIM 镜像（实测同样支持 POST），
       镜像抛异常时自动回退官方源；手动锁定官方源则只走官方。
     """
-    import urllib.request
     import json as _j
     from . import sources
     data = _j.dumps(body).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
 
     def _post(base):
-        req = urllib.request.Request(
-            base + path, data=data, method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": "MCServerManager/0.1",
-            })
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return _j.loads(r.read().decode("utf-8"))
+        raw = net.request(
+            base + path, data=data, headers=headers, timeout=timeout)
+        return _j.loads(raw.decode("utf-8"))
 
     if sources.get_mirror() == "official":
         return _post(MODRINTH)
@@ -267,23 +276,18 @@ def _api_post(path, body, timeout=30):
 
 
 def _api_get(path, timeout=30, on_log=None):
-    import urllib.request
-    import json as _j
     from . import sources
     # auto 模式：交给 sources 挑源，挂了自动换另一个
     if sources.get_mirror() == "auto":
         return sources._get_json_auto(
             path, timeout,
-            headers={"User-Agent": "MCServerManager/0.1"},
+            headers=net.UA,
             log=on_log)
     # ★ 这里以前写的是 _base() —— 那是个不存在的名字，
     #   非 auto 模式（手动锁定官方源/镜像）下会 NameError 直接崩。
     #   sources.modrinth_base() 才是正确入口（会按当前镜像设置换域名）。
-    req = urllib.request.Request(
-        sources.modrinth_base() + path,
-        headers={"User-Agent": "MCServerManager/0.1"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return _j.loads(r.read().decode("utf-8"))
+    return net.get_json(
+        sources.modrinth_base() + path, timeout=timeout)
 
 
 
@@ -307,11 +311,10 @@ def _ver_eq(a, b):
     def norm(x):
         x = x.lower()
         # 去掉 loader / mc 版本前缀尾缀，只留主版本号的样子
-        x = _re.sub(r"\bfabric\b|\bforge\b|\bneoforge\b|"
-                    r"\bquilt\b|\bmc\b|\+built\b", " ", x)
+        x = _NORM_LOADER_RE.sub(" ", x)
         x = x.replace("-", ".").replace("_", ".").replace("+", ".")
-        x = _re.sub(r"\s+", ".", x)
-        x = _re.sub(r"\.{2,}", ".", x).strip(".")
+        x = _NORM_SPACE_RE.sub(".", x)
+        x = _NORM_DOTS_RE.sub(".", x).strip(".")
         return x
     na, nb = norm(a), norm(b)
     if na and na == nb:
@@ -833,7 +836,7 @@ def check_update(m, mc_version, loader, on_log=None):
 def _ver_newer(a, b):
     """粗判版本号 a 是否比 b 新。"""
     def parts(s):
-        return [int(x) for x in re.findall(r"\d+", str(s))][:4]
+        return [int(x) for x in _DIGITS_RE.findall(str(s))][:4]
     pa, pb = parts(a), parts(b)
     if not pa or not pb:
         return False

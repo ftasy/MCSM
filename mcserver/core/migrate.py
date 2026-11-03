@@ -2,19 +2,25 @@
 """把分散的地图文件夹统一搬迁到新总目录。"""
 
 import os
+import re
 import shutil
+
+# ★ 性能优化：预编译字面量正则
+_RE_ILLEGAL_CHARS = re.compile(r'[\\/:*?"<>|]+')
+_RE_WHITESPACE = re.compile(r"\s+")
+_RE_VER_CHARS = re.compile(r"[^0-9A-Za-z._-]")
+_RE_COLOR_CODE = re.compile(r"\u00a7.")
 
 
 def safe_name(name):
     """清洗成安全的文件夹名（保留中文，只剔除 Windows 非法字符）。"""
-    import re
     s = str(name or "")
     # 只过滤 Windows 不支持的字符
-    s = re.sub(r'[\\/:*?"<>|]+', "", s)
+    s = _RE_ILLEGAL_CHARS.sub("", s)
     # 首尾的空格和点去掉（Windows 文件夹名不能以点结尾）
     s = s.strip(". ")
     # 连续空格合并
-    s = re.sub(r"\s+", " ", s)
+    s = _RE_WHITESPACE.sub(" ", s)
     return s or "map"
 
 
@@ -148,9 +154,8 @@ def probe_world(src):
 
 def safe_ver_name(ver):
     """版本名保留点号：1.21.3 而不是 1-21-3。"""
-    import re
     v = (ver or "").strip()
-    v = re.sub(r"[^0-9A-Za-z._-]", "", v)
+    v = _RE_VER_CHARS.sub("", v)
     if not v:
         return "unknown"
     return v
@@ -201,8 +206,7 @@ def clean_display_name(name):
     try:
         return builder.clean_display(name)
     except Exception:
-        import re
-        return re.sub(r"\u00a7.", "", name or "")
+        return _RE_COLOR_CODE.sub("", name or "")
 
 
 def do_import(plan, copy=True, on_log=None):

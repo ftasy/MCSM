@@ -14,55 +14,25 @@ import urllib.request
 import urllib.parse
 import urllib.error
 
-# 全局统一 User-Agent：所有下载与 API 请求共用同一个标识（与 modman 一致）。
-UA = {"User-Agent": "MCServerManager/0.1"}
-TIMEOUT = 60
+from . import net
 
-# 网络瞬时故障很常见（尤其是 WinError 10061 "目标计算机积极拒绝"、
-# ConnectionReset、代理抽风），以前一次失败就整个模组跳过，
-# 导致"全军覆没，重开一次又好了"。
-RETRY = 3           # 最多试几次
-RETRY_WAIT = 1.2    # 首次退避秒数，之后按 1.2 / 2.4 / 4.8 递增
+# 统一使用 core/net 的 UA / 超时 / 重试参数
+UA = net.UA
+TIMEOUT = net.TIMEOUT
 
 # 这些是"资源不存在"，重试一万次也没用，要立刻放弃
 # （否则会白白等十几秒才告诉用户"这个版本没有"）
-NO_RETRY_CODES = {400, 401, 403, 404, 410, 422}
+NO_RETRY_CODES = net.NO_RETRY_CODES
+
+# ★ 性能优化：预编译字面量正则
+_RE_DIGITS = re.compile(r"\d+")
+_RE_XML_VERSION = re.compile(r"<version>([^<]+)</version>")
+_RE_VERSION_ONLY = re.compile(r"^[\d.]+$")
 
 
-def _is_retryable(e):
-    """这个异常值得重试吗？"""
-    if isinstance(e, urllib.error.HTTPError):
-        # 5xx 是服务端出错，值得重试；4xx 多半是请求本身有问题
-        return e.code not in NO_RETRY_CODES
-    if isinstance(e, urllib.error.URLError):
-        # 含 WinError 10061 / 10060 / 连接重置 / DNS 失败
-        return True
-    if isinstance(e, TimeoutError) or isinstance(e, OSError):
-        # socket.timeout 在 3.10 里就是 TimeoutError
-        return True
-    return False
-
-
-def _retry(fn, *args, on_retry=None, **kwargs):
-    """带退避的重试包装。
-
-    fn(*args, **kwargs) 抛异常时，若值得重试就等一会儿再来，
-    最后一次仍失败则抛出原异常。
-    """
-    wait = RETRY_WAIT
-    last = None
-    for attempt in range(1, RETRY + 1):
-        try:
-            return fn(*args, **kwargs)
-        except Exception as e:
-            last = e
-            if attempt >= RETRY or not _is_retryable(e):
-                raise
-            if on_retry:
-                on_retry(attempt, e, wait)
-            time.sleep(wait)
-            wait *= 2
-    raise last
+# 网络底层函数委托给 core/net（统一 UA、重试、超时）
+_is_retryable = net.is_retryable
+_retry = net.retry
 
 MODRINTH = "https://api.modrinth.com/v2"
 
@@ -86,19 +56,15 @@ class InstallError(Exception):
     pass
 
 
-def _open(url, timeout):
-    req = urllib.request.Request(url, headers=UA)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read()
-
-
 def _get(url, binary=False, timeout=TIMEOUT, on_retry=None):
-    data = _retry(_open, url, timeout, on_retry=on_retry)
-    return data if binary else data.decode("utf-8", "replace")
+    """GET 请求（带重试）。binary=True 返回 bytes，否则返回文本。"""
+    if binary:
+        return net.get(url, timeout=timeout, on_retry=on_retry)
+    return net.get_text(url, timeout=timeout, on_retry=on_retry)
 
 
 def _get_json(url, timeout=TIMEOUT):
-    return json.loads(_get(url, timeout=timeout))
+    return net.get_json(url, timeout=timeout)
 
 
 def _get_meta_fallback(primary, fallback, timeout=15):
@@ -201,8 +167,7 @@ def fill_version_status(mc_version):
 
 def _vkey(v):
     """把 "1.21.4" 变成可比较的元组。带字母的排后面。"""
-    import re as _re
-    parts = _re.findall(r"\d+", str(v))
+    parts = _RE_DIGITS.findall(str(v))
     return tuple(int(x) for x in parts) if parts else (0,)
 
 
@@ -428,7 +393,7 @@ def fabric_loader_candidates(mc_version):
 
     # ★ V1.8.2：稳定版排前 + 版本号倒序（新的在前）
     def _nums(v):
-        return [int(x) for x in re.findall(r"\d+", v)] or [0]
+        return [int(x) for x in _RE_DIGITS.findall(v)] or [0]
 
     out.sort(key=lambda c: (
         0 if c["stable"] else 1,
@@ -522,7 +487,7 @@ def neoforge_versions(force_official=False):
     try:
         xml = (_get(NEO_META_OFFICIAL, timeout=15) if force_official
                else _get_meta_fallback(NEO_META, NEO_META_OFFICIAL))
-        return re.findall(r"<version>([^<]+)</version>", xml)
+        return _RE_XML_VERSION.findall(xml)
     except Exception as e:
         # ★ 以前 return []，导致网络断了误报"没有版本"。
         #   抛出异常，让上层准确提示"网络问题"。
@@ -605,7 +570,7 @@ def forge_versions(mc_version):
         # ★ 以前 return []，导致网络断了也会报"没有版本"。
         #   抛出异常，让上层能正确显示"网络超时"或"连不上"。
         raise InstallError("获取 Forge 版本列表失败（网络问题）：%s" % _brief(e))
-    vs = re.findall(r"<version>([^<]+)</version>", xml)
+    vs = _RE_XML_VERSION.findall(xml)
     prefix = "%s-" % mc_version
     return sorted([v for v in vs if v.startswith(prefix)])
 
@@ -1205,8 +1170,9 @@ def collect_diag(server_dir, out_dir=None, extra_log=None):
     sp = os.path.join(server_dir, "server.properties")
     if os.path.isfile(sp):
         try:
-            body = open(sp, "r", encoding="utf-8",
-                         errors="replace").read()
+            with open(sp, "r", encoding="utf-8",
+                         errors="replace") as f:
+                body = f.read()
             w("server.properties", body)
         except Exception as e:
             w("server.properties", "读取失败: %r" % e)
@@ -1246,8 +1212,9 @@ def collect_diag(server_dir, out_dir=None, extra_log=None):
                     txt = _gz.open(cand, "rt", encoding="utf-8",
                                    errors="replace").read()
                 else:
-                    txt = open(cand, "r", encoding="utf-8",
-                               errors="replace").read()
+                    with open(cand, "r", encoding="utf-8",
+                               errors="replace") as f:
+                        txt = f.read()
                 lines = txt.splitlines()
                 tail = "\n".join(lines[-500:])
                 w("日志 %s（最后 %d 行）"
@@ -1757,7 +1724,6 @@ def mod_list_for(loader, mc_version=None):
 
 def modrinth_pick(slug, mc_version, loader, on_retry=None):
     """智能挑选版本：先精确匹配，失败后动态回退到最兼容的版本。"""
-    import re as _re
 
     # ★ V2.0.12：已知版本坑 —— FerriteCore 7.1.0 在 1.21.3 上
     #   Mixin 注入失败（@Shadow collisionShape 在 target 类找不到字段）
@@ -1997,7 +1963,7 @@ def _cf_compat(cf_id, mc_version, loader):
     for f in files:
         for g in (f.get("gameVersions") or []):
             s = str(g).strip()
-            if not re.match(r"^[\d.]+$", s):
+            if not _RE_VERSION_ONLY.match(s):
                 continue
             mc_sets.add(s)
     tops = sorted(mc_sets, key=lambda s: [int(x) if x.isdigit()

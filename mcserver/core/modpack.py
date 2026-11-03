@@ -27,9 +27,12 @@ from . import install
 from . import sources
 
 
+_RE_CLEAN_NAME = re.compile(r"[\\/:*?\"<>|\s]+")
+
+
 def _clean_name(name):
     """文件名 -> 安全目录名。"""
-    name = re.sub(r"[\\/:*?\"<>|\s]+", "_", str(name or "")).strip("_")
+    name = _RE_CLEAN_NAME.sub("_", str(name or "")).strip("_")
     return name or "Modpack"
 
 

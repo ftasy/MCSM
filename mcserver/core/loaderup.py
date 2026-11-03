@@ -23,6 +23,20 @@ _FABRIC_MARKERS = [
     "fabric.properties",
 ]
 
+# ★ 性能优化：预编译字面量正则
+_RE_FABRIC_LOADER = re.compile(r"loader\s*=\s*(\S+)")
+_RE_FABRIC_LOADER_ALT = re.compile(r"fabric\.loader\.version\s*=\s*(\S+)")
+_RE_FABRIC_INSTALL_VER = re.compile(r"fabric-loader-version\s*=\s*(\S+)")
+_RE_FABRIC_JAR_VER = re.compile(r"loader[.-](\d+\.\d+\.\d+)", re.I)
+_RE_FORGE_JAR = re.compile(
+    r"^forge-(\d[\w.\-]+?)-(\d[\w.\-]+?)"
+    r"(?:-shim|-server|-installer)?\.jar$", re.I)
+_RE_NEOFORGE_JAR = re.compile(
+    r"^neoforge-(\d[\w.\-]+?)"
+    r"(?:-shim|-server|-installer)?\.jar$", re.I)
+_RE_WINARGS_FORGE = re.compile(r"forge[\\\\/](\d[\w.\-]+?)[\\\\/]")
+_RE_DIGITS = re.compile(r"\d+")
+
 
 def detect(server_dir):
     """猜这个服当前用的是什么加载器 + 版本。
@@ -38,11 +52,11 @@ def detect(server_dir):
         p = os.path.join(server_dir, name)
         if os.path.isfile(p):
             try:
-                txt = open(p, "r", encoding="utf-8",
-                           errors="ignore").read()
-                m = re.search(r"loader\s*=\s*(\S+)", txt) \
-                    or re.search(r"fabric\.loader\.version\s*=\s*(\S+)",
-                                 txt)
+                with open(p, "r", encoding="utf-8",
+                           errors="ignore") as f:
+                    txt = f.read()
+                m = _RE_FABRIC_LOADER.search(txt) \
+                    or _RE_FABRIC_LOADER_ALT.search(txt)
                 if m:
                     return {"loader": "fabric",
                             "version": m.group(1),
@@ -64,8 +78,7 @@ def detect(server_dir):
                 if "install.properties" in names:
                     txt = z.read("install.properties").decode(
                         "utf-8", "ignore")
-                    m = re.search(
-                        r"fabric-loader-version\s*=\s*(\S+)", txt)
+                    m = _RE_FABRIC_INSTALL_VER.search(txt)
                     if m:
                         return {"loader": "fabric",
                                 "version": m.group(1), "source": f}
@@ -74,7 +87,7 @@ def detect(server_dir):
     # jar 名里常带版本：fabric-server-mc.1.20.1-loader.0.19.5-launcher.x.jar
     for f in os.listdir(server_dir):
         if f.lower().endswith(".jar"):
-            m = re.search(r"loader[.-](\d+\.\d+\.\d+)", f, re.I)
+            m = _RE_FABRIC_JAR_VER.search(f)
             if m and "fabric" in f.lower():
                 return {"loader": "fabric", "version": m.group(1),
                         "source": f}
@@ -85,21 +98,19 @@ def detect(server_dir):
         if not low.endswith(".jar"):
             continue
         # 匹配 Forge: forge-1.20.1-47.2.0.jar
-        m = re.search(r"^forge-(\d[\w.\-]+?)-(\d[\w.\-]+?)"
-                      r"(?:-shim|-server|-installer)?\.jar$", low)
+        m = _RE_FORGE_JAR.search(low)
         if m:
             return {"loader": "forge", "version": m.group(2),
                     "mc_version": m.group(1), "source": f}
         # 匹配 NeoForge: neoforge-21.1.1.jar (只有一段版本号)
-        m = re.search(r"^neoforge-(\d[\w.\-]+?)"
-                      r"(?:-shim|-server|-installer)?\.jar$", low)
+        m = _RE_NEOFORGE_JAR.search(low)
         if m:
             return {"loader": "neoforge", "version": m.group(1),
                     "source": f}
     # 有 win_args.txt 但没 jar -> 新版 Forge（bootstrap 启动）
     win = _find_win_args(server_dir)
     if win:
-        m = re.search(r"forge[\\\\/](\d[\w.\-]+?)[\\\\/]", win)
+        m = _RE_WINARGS_FORGE.search(win)
         ver = m.group(1) if m else ""
         loader = "neoforge" if "neoforge" in win.lower() else "forge"
         return {"loader": loader, "version": ver, "source": "win_args"}
@@ -151,8 +162,7 @@ def _find_win_args(server_dir):
 # =========================================================
 def _vtuple(s):
     """把版本号变成可比较的元组（0.20.1 > 0.19.5）。"""
-    import re as _re
-    return tuple(int(x) for x in _re.findall(r"\d+", str(s)))
+    return tuple(int(x) for x in _RE_DIGITS.findall(str(s)))
 
 
 def update_fabric(server_dir, mc_version, want=None, on_log=None):

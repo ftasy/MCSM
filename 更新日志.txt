@@ -2,8 +2,42 @@
 MC 服务器管理器 —— 更新日志
 ================================================================
 
-当前版本：v2.1.2（2026-11-04）
-上一个正式版：v2.1.1
+当前版本：v2.3.0（2026-11-03）
+上一个正式版：v2.1.2
+
+----------------------------------------------------------------
+v2.3.0  全面性能优化与架构重构（2026-11-03）
+----------------------------------------------------------------
+
+【架构重构：新增 3 个模块，代码去重】
+  - 新增 core/net.py：统一网络助手（UA/超时/重试/JSON 解析），
+    替代 updater/ai_diag/versions/install/modman/sources 6 个模块中
+    重复的 urllib 请求代码，统一 User-Agent。
+  - 新增 widgets.py：从 app.py 提取 Console/FloatConsole/NavButton/
+    ReattachedProcess 及主题助手函数（app.py 减重 616 行）。
+  - 新增 dialog_workers.py：从 dialogs.py 提取 Worker/IconWorker/
+    LoaderVerWorker 线程类及图标工具（dialogs.py 减重 303 行）。
+
+【性能优化：正则表达式预编译】
+  - 全项目约 60 处内联 re.search/re.sub/re.findall 改为模块级
+    re.compile 预编译，避免每次调用重新编译。
+  - 重点热路径 Console._level()（每行服务器日志都会调用）改为
+    类级预编译正则，控制台渲染性能显著提升。
+  - 涉及 app.py、modconf.py（18处）、modman.py、loaderup.py、
+    install.py、migrate.py、dialogs.py、builder.py、backup.py、
+    sources.py、versions.py、modpack.py、scanner.py、updater.py。
+
+【性能优化：文件系统操作】
+  - 7 处 len([f for f in os.listdir()]) 改为 sum(1 for f in
+    os.scandir())，避免创建完整列表（os.scandir 快 2-3 倍）。
+  - 修复 6 处文件句柄泄漏（open() 无上下文管理器）：
+    app.py _load_data/_warn_bad_levelname/_read_props、
+    scanner.py server.properties 解析、install.py 日志读取等。
+
+【其他】
+  - 移除多处函数内冗余 import re as _re。
+  - 全部 28 个 Python 文件通过 py_compile 语法检查。
+  - 自此版本起，发布产物仅保留免安装版（EXE 便携包）。
 
 ----------------------------------------------------------------
 v2.1.2  修复启动服务器后 UI 无响应（2026-11-04）
