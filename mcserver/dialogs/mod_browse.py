@@ -54,6 +54,7 @@ class ModBrowseDialog(BaseDialog):
     def __init__(self, entry, parent=None, select_only=False,
                  mode="mods"):
         super().__init__(parent)
+        self._hide_stale_source_dlg()
         self.entry = entry
         self.select_only = bool(select_only)
         # ★ V1.2.0：mode="plugins" 时数据源切到 Modrinth
@@ -408,6 +409,29 @@ class ModBrowseDialog(BaseDialog):
             else self.list_builtin
 
     # ---- 推荐安装 Tab：纯本地、零网络、内存分页 ----
+    def _hide_stale_source_dlg(self):
+        """★ V2.3.4：进来先把可能残留的『下载源设置』窗收掉。
+
+        老版本（v2.0.3 之前）那个窗是非模态 show() —— 点开一次就
+        一直挂在屏幕上不消失，之后每次搜索/翻页都能看见它，
+        看着就像"每次搜索都弹镜像源选择"。
+        现在它是模态 + 单例，这里再兜一层：进模组浏览时如果还有
+        可见的残留（老版本行为、或用户手动开着忘了关），直接藏掉，
+        绝不挡着界面。
+        """
+        try:
+            from .common import _SOURCE_DLG
+            d = _SOURCE_DLG.get("dlg")
+            if d is None:
+                return
+            try:
+                if d.isVisible():
+                    d.hide()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def _icon_url_for(self, slug, source="modrinth"):
         """内置清单条目的图标地址。
 
@@ -1680,17 +1704,20 @@ class ModBrowseDialog(BaseDialog):
                     self._log("[探测] %s 不可用（%s）" % (lab, why))
             if not good:
                 QMessageBox.warning(
-                    self, "都不通",
-                    "镜像和官方源都请求失败了。\n\n已自动保持在官方源。")
+                    self, "都不通（测速结果）",
+                    "『测一下哪个能用』的测速结果："
+                    "镜像和官方源都请求失败了。\n\n"
+                    "这跟搜索无关 —— 已自动保持在官方源。")
                 self._log("[探测] 全部不可用")
                 return
             # ★ V1.9.0：镜像 503/不可用 → UI 提示已自动切换官方源
             mci = next((o for n, o, _, _ in res if n == "mcim"), True)
             if not mci and _src.get_mirror() != "mcim":
                 QMessageBox.information(
-                    self, "镜像不可用",
-                    "MCIM 镜像不可用，已自动切换官方源。\n"
-                    "可在『镜像源设置』里手动改回，或检查网络。")
+                    self, "镜像不可用（测速结果）",
+                    "『测一下哪个能用』的测速结果：MCIM 镜像不可用，"
+                    "已自动切换官方源。\n"
+                    "这跟搜索无关。可在『镜像源设置』里手动改回，或检查网络。")
                 self._log("[探测] MCIM 镜像不可用，已自动切换官方源")
             self._log("[探测] 完成，当前源：%s" % _src.describe())
         except Exception as e:
