@@ -18,6 +18,14 @@ from .const import _XMX_RE
 class ProcessMixin:
     """进程生命周期：启动、日志读取、退出处理、停止与强制结束。"""
 
+    # ★ V2.3.6：退出时"要留给后台继续跑"的 QProcess 放这里。
+    #   QProcess 是主窗口的子对象，主窗口销毁会连带销毁它 ——
+    #   Qt 会打印 "QProcess: Destroyed while process is still running"，
+    #   子进程的 stdin/stdout 管道也会被关掉，服务器可能莫名其妙挂掉。
+    #   退出时把要保留的进程 setParent(None) + 断开信号 + 存进这里，
+    #   保证 java 进程完完整整活下来（这正是"关掉管理器、服务器照跑"的前提）。
+    _LIVE_PROCS = []
+
     def do_start(self, auto_restart=False, entry=None):
         # ★ A2：自动重启时传 entry，不再靠 selectRow 抢用户当前选中的服
         # ★ V2.3.3：支持批量 —— 没传 entry 时按"当前选中"启动：
@@ -818,6 +826,25 @@ class ProcessMixin:
         # ★ V2.0.1：是否弹「停止后备份？」由显示设置勾选决定
         #   （disp["stop_ask_backup"]，默认 True；关闭则直接停止）
         ask = self.disp.get("stop_ask_backup", True)
+        # ★ V2.3.6：接管回来的服务器没有控制通道（上个管理器的管道
+        #   已经随它一起没了），"停止"只能直接结束进程 —— 不会保存世界。
+        #   必须先说清楚，否则用户以为存盘了就把服关了，世界直接损坏。
+        try:
+            from ..widgets import ReattachedProcess as _RA
+            if isinstance(proc, _RA):
+                r = QMessageBox.question(
+                    self, "强制停止（接管状态）",
+                    "「%s」是上次管理器退出后接管回来的，"
+                    "控制通道已经断了 —— 停止会**直接结束进程，不保存世界**。\n\n"
+                    "建议先在游戏里执行 save-all 再停。\n\n"
+                    "确定要强制结束它吗？"
+                    % (e.get("name") or e.get("folder")),
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if r != QMessageBox.Yes:
+                    return
+                ask = False
+        except Exception:
+            pass
         if ask:
             r = QMessageBox.question(
                 self, "停止服务器",
@@ -883,6 +910,12 @@ class ProcessMixin:
             pass
 
     def closeEvent(self, ev):
+        # ★ V2.3.6：已经决定退出（等服务器停完再退出的那条路径），
+        #   直接清理放行，别再弹询问框。
+        if getattr(self, "_exiting", False):
+            self._exiting = False
+            self._cleanup_and_exit(ev)
+            return
         # ★ 1. 先检查后台任务（线程：搬迁/导入/扫描）
         busy = []
         for attr, label in (("_migrate_worker", "统一搬迁"),
@@ -903,32 +936,120 @@ class ProcessMixin:
                 return
 
         # ★ 2. 再检查运行中的服务器（进程：MC 服务端）
+        #   ★ V2.3.6：以前这里直接弹一个信息框 + 给每个服务器开一个
+        #     cmd 窗口 tail 日志 —— 那些 cmd 是独立进程，主窗口关了
+        #     它们还在跑（用户看到的"程序还在跑"），而且关不掉。
+        #     现在改成让用户明确选：保留服务器退出 / 全部停止并退出，
+        #     cmd 日志窗改为可选（默认不开）。
         if self.procs:
-            for _k, _proc in list(self.procs.items()):
-                try: self._spawn_exit_console(_k, _proc)
-                except Exception: pass
-            QMessageBox.information(
-                self, "服务器将在后台运行",
-                "有 %d 个服务器仍在运行。\n\n"
-                "关闭管理器后，服务器会继续在后台独立运行，\n"
-                "已为每个服务器弹出独立控制台窗口。\n\n"
-                "重新打开管理器可自动恢复管理。" % len(self.procs))
-            # ★ V2.0.12：进程解耦 —— 退出时不再给服务器发 stop，也不强杀。
-            #   java 服务器本就是独立进程，QProcess 只是控制通道；
-            #   管理器退出后它继续运行（用户明确要求：
-            #   "启动器无响应后结果服务器还在运行"要作为常态行为）。
-            #   这里只清掉引用、停掉自动重启标记，避免退出后定时器误触发。
-            for k in list(self.procs.keys()):
-                self._is_stopping[k] = True
-            self.procs.clear()
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Question)
+            box.setWindowTitle("服务器还在运行")
+            box.setText("有 %d 个服务器仍在运行。" % len(self.procs))
+            box.setInformativeText(
+                "· 退出并保留服务器：服务器继续在后台跑，\n"
+                "  重新打开管理器会自动接管它们"
+                "（运行状态、日志、停止按钮都恢复）\n"
+                "· 全部停止并退出：先给服务器发 stop，"
+                "等它保存完世界再退出\n\n"
+                "选哪个都不会让服务器'跟着管理器一起消失' —— "
+                "关掉管理器后它们仍是独立进程。")
+            try:
+                chk = box.setCheckBox(
+                    "为每个服务器开一个独立日志窗口（cmd，退出后仍开着）")
+                chk.setChecked(False)
+            except Exception:
+                chk = None
+            btn_keep = box.addButton("退出并保留服务器",
+                                     QMessageBox.AcceptRole)
+            btn_stop = box.addButton("全部停止并退出",
+                                     QMessageBox.DestructiveRole)
+            btn_cancel = box.addButton("取消", QMessageBox.RejectRole)
+            box.setDefaultButton(btn_keep)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is btn_cancel:
+                ev.ignore()
+                return
+            if clicked is btn_stop:
+                # 给每个服务器发 stop（优雅停止：服务器会保存世界）
+                for _k, _proc in list(self.procs.items()):
+                    try:
+                        _proc.write(b"stop\n")
+                    except Exception:
+                        pass
+                self._log_console(
+                    "[退出] 已向 %d 个服务器发送停止指令，"
+                    "等它们保存完世界后自动退出。" % len(self.procs))
+                self.statusBar().showMessage(
+                    "正在停止服务器，保存完世界后自动退出 ...", 5000)
+                # ★ 等服务器真的停下再退出 —— 直接退出会销毁 QProcess，
+                #   管道一关，java 可能来不及存盘。
+                self._exit_wait_left = 15.0
+                self._exiting = True
+                ev.ignore()
+                QTimer.singleShot(500, self._wait_stop_then_exit)
+                return
+            else:
+                # 保留服务器：可选给每个开一个独立 cmd 日志窗
+                if chk is not None and chk.isChecked():
+                    for _k, _proc in list(self.procs.items()):
+                        try:
+                            self._spawn_exit_console(_k, _proc)
+                        except Exception:
+                            pass
+                # ★ V2.0.12：进程解耦 —— 退出时不再给服务器发 stop，也不强杀。
+                #   java 服务器本就是独立进程，QProcess 只是控制通道；
+                #   管理器退出后它继续运行（用户明确要求：
+                #   "启动器无响应后结果服务器还在运行"要作为常态行为）。
+                #   这里只清掉引用、停掉自动重启标记，避免退出后定时器误触发。
+                for k in list(self.procs.keys()):
+                    self._is_stopping[k] = True
+                # ★ V2.3.6：把要保留的 QProcess 脱离主窗口 + 断开信号，
+                #   存进全局存活集合 —— 免得主窗口销毁时连带把 java 进程带走。
+                for _k, _proc in list(self.procs.items()):
+                    try:
+                        _proc.setParent(None)
+                    except Exception:
+                        pass
+                    for _sig in ("finished", "readyRead", "errorOccurred",
+                                 "started"):
+                        try:
+                            getattr(_proc, _sig).disconnect()
+                        except Exception:
+                            pass
+                    try:
+                        ProcessMixin._LIVE_PROCS.append(_proc)
+                    except Exception:
+                        pass
+                self.procs.clear()
 
-        # ★ 3. 停掉所有还在跑的后台线程
+        self._cleanup_and_exit(ev)
+
+    def _cleanup_and_exit(self, ev):
+        """★ V2.3.6：真正的收尾（两条退出路径共用）。
+
+        关掉独立控制台窗口 —— 它们是顶层窗口，只要还有一个可见，
+        QApplication 就不会退出，表现就是"点了关闭，程序还在跑"。
+        """
+        # ★ 关掉所有"调出控制台"的独立窗口
+        try:
+            for _w in list((getattr(self, "float_consoles", {}) or {}).values()):
+                try:
+                    _w.close()
+                except Exception:
+                    pass
+            self.float_consoles.clear()
+        except Exception:
+            pass
+
+        # ★ 停掉所有还在跑的后台线程
         try:
             from .dialogs import _stop_all_threads
             _stop_all_threads()
         except Exception:
             pass
-            
+
         # ★ 停掉所有的定时备份定时器
         for timer in self.auto_backup_timers.values():
             try:
@@ -936,6 +1057,42 @@ class ProcessMixin:
             except Exception:
                 pass
         self.auto_backup_timers.clear()
-        
-        self._save_data()
+
+        try:
+            self._save_data()
+        except Exception:
+            pass
         ev.accept()
+
+    def _wait_stop_then_exit(self):
+        """等服务器都停下再退出（最多等 _exit_wait_left 秒）。"""
+        try:
+            alive = []
+            for _k, _p in list(self.procs.items()):
+                try:
+                    if _p.state() != QProcess.NotRunning:
+                        alive.append(_k)
+                except Exception:
+                    pass
+            if alive:
+                left = getattr(self, "_exit_wait_left", 15.0) - 0.5
+                self._exit_wait_left = max(0.0, left)
+                if left <= 0:
+                    # 超时：强制结束剩下的（至少别卡住不退）
+                    for _k in alive:
+                        try:
+                            self.procs[_k].kill()
+                        except Exception:
+                            pass
+                    self._log_console(
+                        "[退出] 等待超时，已强制结束 %d 个服务器进程。" % len(alive))
+                else:
+                    QTimer.singleShot(500, self._wait_stop_then_exit)
+                    return
+        except Exception:
+            pass
+        # 全停 / 出错 → 真正退出
+        try:
+            self.close()
+        except Exception:
+            pass

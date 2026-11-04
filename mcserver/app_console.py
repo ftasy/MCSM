@@ -135,9 +135,26 @@ class ConsoleMixin:
         _sp.Popen(["cmd", "/c", bat_path], creationflags=getattr(_sp, "CREATE_NEW_CONSOLE", 0))
 
     def _detect_running_servers(self):
-        """V2.1.0: On startup, detect servers still running from previous session."""
+        """V2.1.0: On startup, detect servers still running from previous session.
+
+        ★ V2.3.6：两处加固
+          1. 调用时机：以前固定在启动后 500ms，那会儿目录扫描（异步）
+             还没跑完、entries 是空的 → 一个服都接管不了。
+             现在由 _on_scan_done（扫描完成）调用，这里再兜底重试。
+          2. 接管到的进程只能"看日志 + 强杀"（控制通道已经随上个
+             管理器一起没了），所以控制台里要写清楚，别让用户以为
+             接管了就能发指令。
+        """
+        # 列表还没扫出来 → 稍后重试（最多 6 次，约 9 秒）
+        if not self.entries:
+            n = getattr(self, "_detect_retry", 0) + 1
+            self._detect_retry = n
+            if n <= 6:
+                QTimer.singleShot(1500, self._detect_running_servers)
+            return
         import ctypes
         kernel32 = ctypes.windll.kernel32
+        found = 0
         for e in self.entries:
             sd = e.get("server_dir") or e["folder"]
             pid_file = os.path.join(sd, ".mcsm_pid")
@@ -167,15 +184,24 @@ class ConsoleMixin:
                 c = self._console_tab(k, e.get("name") or "server")
                 c.proc = proc
                 c.set_running(True)
-                c.append("=== detected running server (PID=%d) ===" % pid)
+                c.append(
+                    "=== 已接管上次仍在运行的服务器（PID=%d）===\n"
+                    "· 日志实时显示中\n"
+                    "· 原启动器已退出，控制通道断开：发指令不可用\n"
+                    "· 点『停止』会直接结束进程（不保存世界），"
+                    "建议先在游戏里执行 save-all\n"
+                    "· 想优雅停止请关掉这个管理器后用 run.bat 所在目录"
+                    "里的控制台操作" % pid)
                 self._tail_log(k, sd, c)
                 self._refresh_actions()
                 self._refresh_status(e)
+                found += 1
             else:
                 try: os.remove(pid_file)
                 except Exception: pass
         if self.procs:
-            self.statusBar().showMessage("detected %d running servers" % len(self.procs))
+            self.statusBar().showMessage(
+                "已接管 %d 个上次仍在运行的服务器" % found)
 
     def _tail_log(self, key, server_dir, console):
         """V2.1.0: Tail a reattached server log file."""

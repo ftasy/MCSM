@@ -92,6 +92,13 @@ class MainWindow(
             pass
         self._build_ui()
         self._load_data()
+        # ★ V2.3.6：清一下上次退出时留下的"存活 QProcess"引用 ——
+        #   那些进程早就没了，只是别让旧对象一直占着内存。
+        try:
+            from .app_process import ProcessMixin
+            del ProcessMixin._LIVE_PROCS[:]
+        except Exception:
+            pass
         if self.data.get("root"):
             self.root = self.data["root"]
             self.ed_root.setText(self.root)
@@ -102,7 +109,12 @@ class MainWindow(
         self._ping_timer = QTimer(self)
         self._ping_timer.timeout.connect(self._ping_round)
         self._ping_timer.start(10000)
-        QTimer.singleShot(500, self._detect_running_servers)
+        # ★ V2.3.6：自动接管上次仍在运行的服务器。
+        #   以前固定在启动后 500ms 调 —— 那时目录扫描（异步线程）
+        #   往往还没跑完，self.entries 还是空的，一个服都接管不了。
+        #   现在主路径改成"扫描完成后再接管"（见 _on_scan_done），
+        #   这里只留一个兜底定时器。
+        QTimer.singleShot(2500, self._detect_running_servers)
 
     # ---------------- UI ----------------
     def _build_ui(self):

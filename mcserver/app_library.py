@@ -352,6 +352,13 @@ class LibraryMixin:
             "扫描完成，共 %d 个" % len(self.entries))
         if self.sort_mode == "size":
             self._prefetch_sizes()  # ★ 扫描完若在按大小排序，后台补算
+        # ★ V2.3.6：扫描完成后再做"接管上次仍在运行的服务器"。
+        #   以前是在启动后固定 500ms 调接管，那会儿扫描还没完，
+        #   entries 空着 → 什么服都接管不了（用户反馈"没自动接管"）。
+        try:
+            self._detect_running_servers()
+        except Exception:
+            pass
         cb, self._scan_then = getattr(self, "_scan_then", None), None
         if cb:
             try:
