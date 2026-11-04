@@ -10,7 +10,8 @@ import sys
 
 from PySide6.QtGui import QTextCursor
 from PySide6.QtCore import Qt, QThread
-from PySide6.QtWidgets import QMessageBox, QPlainTextEdit, QTextBrowser
+from PySide6.QtWidgets import (QMessageBox, QPlainTextEdit, QTextBrowser,
+                               QDialog)
 from ..core import modman, net, fsutil
 from ..dialog_workers import (
     _LIVE_THREADS, _StopMixin, Worker, IconWorker, LoaderVerWorker, _track,
@@ -396,6 +397,40 @@ def _fetch_icon_bytes(url, timeout=15):
         return net.request(url, timeout=timeout)
     except Exception:
         return None
+
+
+# ★ V2.3.4：『下载源设置』单例
+#   以前主界面、模组浏览、高级搜索三处各自 new 一个 SourceDialog，
+#   连着点几下就叠出好几个"下载源设置"窗口 —— 看着就像
+#   "每次操作都弹一次镜像源选择"。这里保证全局同时只有一个：
+#   重复调用只把已有窗口顶到前面，不新建。
+_SOURCE_DLG = {"dlg": None}
+
+
+def show_source_dialog(parent=None):
+    """打开『下载源设置』（单例）。返回 (dialog, values)。
+
+    values = (mirror, cf_key)；用户取消时为 None。
+    ★ 实例常驻：整个进程只创建过一个 SourceDialog，重复点按钮
+      只把它顶到前面；万一它被销毁了（Qt 回收），下次自动重建。
+    ★ 延迟导入 SourceDialog，避免 common ↔ mod_source 循环依赖。
+    """
+    from .mod_source import SourceDialog
+    dlg = _SOURCE_DLG.get("dlg")
+    if dlg is not None:
+        try:
+            if dlg.isVisible():
+                dlg.raise_()
+                dlg.activateWindow()
+                return dlg, dlg.values()
+        except Exception:
+            dlg = None
+    if dlg is None:
+        dlg = _themed(SourceDialog(parent))
+        _SOURCE_DLG["dlg"] = dlg
+    if dlg.exec() != QDialog.Accepted:
+        return dlg, None
+    return dlg, dlg.values()
 
 
 def _open_in_explorer(path):

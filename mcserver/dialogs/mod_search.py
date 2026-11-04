@@ -536,10 +536,11 @@ class ModrinthDialog(BaseDialog):
 
     def ask_mirror(self):
         """下载源 + CurseForge API Key 设置。"""
-        dlg = _themed(SourceDialog(self))
-        if not dlg.exec():
+        from .common import show_source_dialog
+        dlg, vals = show_source_dialog(self)
+        if vals is None:
             return
-        mirror, key = dlg.values()
+        mirror, key = vals
         sources.set_mirror(mirror)
         sources.set_cf_key(key)
         ok_s, err_s = sources.save()

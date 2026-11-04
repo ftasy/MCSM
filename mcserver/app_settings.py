@@ -583,11 +583,11 @@ class SettingsMixin:
         """
         try:
             from .core import sources as _src
-            from .dialogs import SourceDialog, _themed
-            dlg = _themed(SourceDialog(self))
-            if not dlg.exec():
+            from .dialogs.common import show_source_dialog
+            dlg, vals = show_source_dialog(self)
+            if vals is None:
                 return
-            mirror, key = dlg.values()
+            mirror, key = vals
             _src.set_mirror(mirror)
             _src.set_cf_key(key)
             ok_s, err_s = _src.save()

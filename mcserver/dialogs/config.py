@@ -790,6 +790,18 @@ class ServerConfigDialog(BaseDialog):
         保证弹窗在顶层。
         """
         try:
+            # ★ V2.3.4：已经开着就把它顶到前面，别再叠一个新窗口 ——
+            #   以前每点一次就 new 一个模组浏览窗口，窗口越开越多，
+            #   看着像"每次都弹窗"。
+            _dlg = getattr(self, "_plugin_dialog", None)
+            if _dlg is not None:
+                try:
+                    if _dlg.isVisible():
+                        _dlg.raise_()
+                        _dlg.activateWindow()
+                        return
+                except Exception:
+                    pass
             self._plugin_dialog = _themed(ModBrowseDialog(
                 self.entry, self, mode="plugins"))
             self._plugin_dialog.show()
@@ -1175,6 +1187,16 @@ class ServerConfigDialog(BaseDialog):
                     "Paper 装的是插件不是模组。\n\n"
                     "要用模组的话，得把核心换成 Fabric / Forge。")
                 return
+            # ★ V2.3.4：已开着就激活，不叠新窗口（见 _add_plugin_here）
+            _dlg = getattr(self, "_mod_dialog", None)
+            if _dlg is not None:
+                try:
+                    if _dlg.isVisible():
+                        _dlg.raise_()
+                        _dlg.activateWindow()
+                        return
+                except Exception:
+                    pass
             self._mod_dialog = _themed(ModBrowseDialog(self.entry, self))
             self._mod_dialog.show()
             self._mod_dialog.raise_()

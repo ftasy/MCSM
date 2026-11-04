@@ -175,9 +175,22 @@ class ModBrowseDialog(BaseDialog):
         w_rec = QWidget()
         vr = QVBoxLayout(w_rec)
         vr.setContentsMargins(2, 2, 2, 2)
+        hh = QHBoxLayout()
         self.lbl_view_hint = QLabel("")
         self.lbl_view_hint.setStyleSheet(_muted())
-        vr.addWidget(self.lbl_view_hint)
+        hh.addWidget(self.lbl_view_hint, 1)
+        # ★ V2.3.4：版本隔离开关。
+        #   后台会按当前 MC 版本逐个探测推荐模组是否适配，
+        #   默认只显示适配本版本的 —— 以前不适配的只是标红字，
+        #   照样占着列表（1.16 的服也满屏 1.21 才有的模组）。
+        self.chk_only_fit = QCheckBox("只显示适配本版本的")
+        self.chk_only_fit.setChecked(True)
+        self.chk_only_fit.setToolTip(
+            "后台按当前 MC 版本逐个探测推荐模组是否适配；\n"
+            "不适配的直接从列表去掉（取消勾选可看全部）。")
+        self.chk_only_fit.toggled.connect(self._on_only_fit_toggled)
+        hh.addWidget(self.chk_only_fit)
+        vr.addLayout(hh)
         self.list_builtin = QListWidget()
         self.list_builtin.setViewMode(QListView.ListMode)
         self.list_builtin.setSelectionMode(QAbstractItemView.NoSelection)
@@ -395,6 +408,58 @@ class ModBrowseDialog(BaseDialog):
             else self.list_builtin
 
     # ---- 推荐安装 Tab：纯本地、零网络、内存分页 ----
+    def _icon_url_for(self, slug, source="modrinth"):
+        """内置清单条目的图标地址。
+
+        ★ V2.3.4：以前内置清单的 icon_url 恒为 None，
+          卡片只能画首字母色块（mcserver/icons 目录是空的，
+          本地图几乎永远命中不了）—— 用户看到的全是首字母图标。
+          Modrinth 的 CDN 支持按 slug 取图，这里拼规范地址，
+          由 IconWorker 异步下载，回来替换首字母占位。
+          ★ CurseForge 发布的项目也照样给 Modrinth 地址试一下：
+            大多 CF 项目在 Modrinth 有镜像页（能出图），
+            没有的下载失败就自动保留首字母色块，不报错。
+        """
+        if not slug:
+            return ""
+        return "https://cdn.modrinth.com/data/%s/icon.png" % slug
+
+    def _is_incompatible(self, slug):
+        """该 slug 是否有"明确不适配"的结论。"""
+        if not slug:
+            return False
+        ck = self._compat.get(self._compat_key(slug))
+        return bool(ck and ck[0] is False)
+
+    def _filter_builtin_hits(self):
+        """★ V2.3.4：按适配结论过滤内置清单（= 版本隔离）。
+
+        以前不适配的模组只是标红字、照样占着列表，
+        1.16 的服也能看到一屏只支持 1.21 的模组 —— 版本隔离形同虚设。
+        现在默认（勾着"只显示适配本版本的"）不适配的直接从列表去掉。
+        网络失败（无结论）的保留 —— 不能因为一次探测失败就藏起来。
+        """
+        all_hits = getattr(self, "_builtin_all", None)
+        if all_hits is None:
+            return
+        if not self.chk_only_fit.isChecked():
+            self.builtin_hits = list(all_hits)
+        else:
+            self.builtin_hits = [
+                h for h in all_hits
+                if not self._is_incompatible(h.get("slug") or "")]
+        self.builtin_total = len(self.builtin_hits)
+        if self.builtin_offset > max(0, self.builtin_total - 1):
+            self.builtin_offset = 0
+
+    def _on_only_fit_toggled(self, on):
+        """切换"只显示适配本版本的"开关 → 重新过滤并刷新列表。"""
+        try:
+            self._filter_builtin_hits()
+            self._fill_builtin()
+        except Exception:
+            pass
+
     def _load_builtin_local(self):
         """同步渲染本地推荐清单。
 
@@ -419,7 +484,11 @@ class ModBrowseDialog(BaseDialog):
                     "description": m["desc"],
                     "categories": [], "downloads": None,
                     "group": m.get("group", ""),
-                    "req": m.get("req") or [], "icon_url": None,
+                    "req": m.get("req") or [],
+                    # ★ V2.3.4：内置清单也带图标地址（原来恒为 None，
+                    #   卡片只能画首字母色块，用户看到的全是首字母图标）
+                    "icon_url": self._icon_url_for(
+                        m["slug"], m.get("source") or "modrinth"),
                     # ★ V1.9.2：来源站（Cupboard 生态 = curseforge，
                     #   其余默认 modrinth）→ 索引按钮按来源先显示
                     "source": m.get("source") or "modrinth",
@@ -445,7 +514,11 @@ class ModBrowseDialog(BaseDialog):
                     "description": m["desc"],
                     "categories": [], "downloads": None,
                     "group": m.get("group", ""),
-                    "req": m.get("req") or [], "icon_url": None,
+                    "req": m.get("req") or [],
+                    # ★ V2.3.4：内置清单也带图标地址（原来恒为 None，
+                    #   卡片只能画首字母色块，用户看到的全是首字母图标）
+                    "icon_url": self._icon_url_for(
+                        m["slug"], m.get("source") or "modrinth"),
                     # ★ V1.9.2：来源站（Cupboard 生态 = curseforge，
                     #   其余默认 modrinth）→ 索引按钮按来源先显示
                     "source": m.get("source") or "modrinth",
@@ -459,6 +532,9 @@ class ModBrowseDialog(BaseDialog):
         self.builtin_total = len(hits)
         self.builtin_offset = 0
         self.builtin_mode = True
+        # ★ V2.3.4：留一份全量，版本隔离过滤时随时能恢复
+        self._builtin_all = list(hits)
+        self._filter_builtin_hits()
         self.lbl_view_hint.setText(
             "本地推荐：已按 %s + %s 过滤版本，剔除纯客户端组件；"
             "标注『无适配』的模组 = 作者暂未支持该版本"
@@ -486,6 +562,10 @@ class ModBrowseDialog(BaseDialog):
             it.setSizeHint(QSize(0, 104))
             card, chk = self._make_card(
                 h, self._local_icon_for(slug), True)
+            # ★ V2.3.4：内置清单也异步拉真图标（首字母色块只是占位）
+            _u = h.get("icon_url") or ""
+            if _u:
+                self._spawn_icon_load([_u])
             it._chk = chk
             # ★ V2.0.8：跨页勾选 —— 翻页重建时恢复勾选，并写回状态字典
             chk.blockSignals(True)
@@ -659,11 +739,24 @@ class ModBrowseDialog(BaseDialog):
             pass
 
     def _fill_fail(self, msg="加载失败，请重试"):
-        """失败/超时占位：列表里放一条不可勾选的失败项，绝不白屏。"""
+        """失败/超时占位：列表里放一条不可勾选的失败项，绝不白屏。
+
+        ★ V2.3.4：搜索失败绝不弹窗（弹窗会挡住列表、还容易被当成
+          "每次搜索都弹镜像源选择"）。失败原因直接写在列表里；
+          如果是源的问题（缺 CF Key / 镜像不通），额外提示一句
+          "点右上角『镜像源设置』换源"，给用户明确出口。
+        """
         try:
+            text = str(msg or "")
+            low = text.lower()
+            src_hint = ("key" in low or "镜像" in text or "源" in text
+                        or "源不可用" in text or "mirror" in low)
+            if src_hint:
+                text += ("\n（如果和下载源有关，点右上角『镜像源设置』"
+                         "换源后重试）")
             self.list_lib.blockSignals(True)
             self.list_lib.clear()
-            it = QListWidgetItem(msg)
+            it = QListWidgetItem(text)
             it.setFlags(Qt.NoItemFlags)
             it.setTextAlignment(Qt.AlignCenter)
             it.setSizeHint(QSize(0, 96))
@@ -876,18 +969,23 @@ class ModBrowseDialog(BaseDialog):
             pass
 
     def _apply_icon(self, url, pm):
-        """遍历正在显示的卡片，把 icon_url 匹配的占位替换成真图。"""
-        for i in range(self.list_lib.count()):
-            it = self.list_lib.item(i)
-            w = self.list_lib.itemWidget(it)
-            if w is None:
-                continue
-            if getattr(w, "_icon_url", None) == url \
-                    and getattr(w, "_icon_lbl", None) is not None:
-                try:
-                    w._icon_lbl.setPixmap(pm)
-                except Exception:
-                    pass
+        """遍历正在显示的卡片，把 icon_url 匹配的占位替换成真图。
+
+        ★ V2.3.4：推荐安装 Tab 也要扫 —— 以前只扫全库 Tab，
+          内置清单下载到的图没人接收，卡片一直停在首字母色块。
+        """
+        for lst in (self.list_lib, self.list_builtin):
+            for i in range(lst.count()):
+                it = lst.item(i)
+                w = lst.itemWidget(it)
+                if w is None:
+                    continue
+                if getattr(w, "_icon_url", None) == url \
+                        and getattr(w, "_icon_lbl", None) is not None:
+                    try:
+                        w._icon_lbl.setPixmap(pm)
+                    except Exception:
+                        pass
 
     def _fill_lib(self):
         """渲染当前页。
@@ -1423,6 +1521,16 @@ class ModBrowseDialog(BaseDialog):
             self._compat_fail.pop(slug, None)
             changed = True
             self._apply_compat_text(slug, r.get("ok"), r.get("why") or "")
+        # ★ V2.3.4：探测出结论后按"只显示适配本版本的"重新过滤 ——
+        #   明确不适配的模组直接从推荐列表里去掉（这才是版本隔离）。
+        try:
+            if self.chk_only_fit.isChecked():
+                before = len(self.builtin_hits)
+                self._filter_builtin_hits()
+                if len(self.builtin_hits) != before:
+                    self._fill_builtin()
+        except Exception:
+            pass
         self._sync_count()
         # ★ V2.0.8：完成提示已隐藏（适配检测提示整体隐藏）
         try:
@@ -1505,11 +1613,12 @@ class ModBrowseDialog(BaseDialog):
         模态 exec() 关掉才返回，杜绝残留；保存后立即刷新并重搜。
         """
         try:
-            d = _themed(SourceDialog(self))
-            if d.exec() != QDialog.Accepted:
-                return
+            from .common import show_source_dialog
             from ..core import sources as _src
-            mirror, key = d.values()
+            d, vals = show_source_dialog(self)
+            if vals is None:
+                return
+            mirror, key = vals
             _src.set_mirror(mirror)
             _src.set_cf_key(key)
             ok_s, err_s = _src.save()

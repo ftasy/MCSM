@@ -286,6 +286,7 @@ class MainWindow(
         lv.setContentsMargins(0, 0, 0, 0)
         # 排序栏（★ v2.3.2：左边加了服务器搜索框）
         sh = QHBoxLayout()
+        sh.setSpacing(8)
         self.filter_text = ""
         sh.addWidget(QLabel("搜索:"))
         self.ed_filter = QLineEdit()
@@ -295,6 +296,11 @@ class MainWindow(
         self.ed_filter.textChanged.connect(self._on_filter_changed)
         self.ed_filter.installEventFilter(self)
         sh.addWidget(self.ed_filter)
+        # ★ V2.3.4：排序控件紧跟搜索框。
+        #   以前这里先 addStretch(1) 再 addWidget(cb_sort, 1)，
+        #   弹簧把排序下拉框顶到了最右边，"排序:"文字和下拉框之间
+        #   空出一大片，看着像"排序跟搜索框离得很远"。现在弹簧挪到最后。
+        sh.addSpacing(12)
         sh.addWidget(QLabel("排序:"))
         self.cb_sort = QComboBox()
         for t, d in (("自定义顺序（可拖动）", "custom"),
@@ -307,13 +313,13 @@ class MainWindow(
         i = self.cb_sort.findData(self.sort_mode)
         self.cb_sort.setCurrentIndex(i if i >= 0 else 0)
         self.cb_sort.currentIndexChanged.connect(self._on_sort_changed)
+        sh.addWidget(self.cb_sort)
         # 拖动排序是没有图标提示的隐藏操作，写一行说明，免得发现不了
         sh.addStretch(1)
         self.lb_draghint = QLabel("")
         self.lb_draghint.setStyleSheet("color:%s; font-size:9pt;"
                                   % PAL.MUTED)
         sh.addWidget(self.lb_draghint)
-        sh.addWidget(self.cb_sort, 1)
         lv.addLayout(sh)
         # ★ Ctrl+F 聚焦搜索框（控制台里按 Ctrl+F 是搜日志，见 Console）
         try:
