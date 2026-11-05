@@ -587,9 +587,11 @@ class SettingsMixin:
             dlg, vals = show_source_dialog(self)
             if vals is None:
                 return
-            mirror, key = vals
+            mirror, key, *rest = vals
+            dl = rest[0] if rest else "auto"
             _src.set_mirror(mirror)
             _src.set_cf_key(key)
+            _src.set_download(dl)
             ok_s, err_s = _src.save()
             if not ok_s:
                 QMessageBox.warning(
@@ -606,9 +608,23 @@ class SettingsMixin:
             for name, okk, ms, why in res:
                 lab = "MCIM 镜像" if name == "mcim" else "官方源"
                 if okk:
-                    self._log_console("[源] %s 可用（%d ms）" % (lab, ms))
+                    self._log_console(
+                        "[源][API 通道] %s 可用（%d ms）" % (lab, ms))
                 else:
-                    self._log_console("[源] %s 不可用（%s）" % (lab, why))
+                    self._log_console(
+                        "[源][API 通道] %s 不可用（%s）" % (lab, why))
+            # ★ V2.3.7：文件下载通道单独测 —— API 快不等于下 jar 快，
+            #   这两条链路要分开看（而不是拿一个结果代表全部）。
+            try:
+                cdn = _src.probe_cdn_all_latency(timeout=8)
+                for name, okk, ms, why in cdn:
+                    lab = "MCIM 镜像" if name == "mcim" else "官方 CDN"
+                    self._log_console(
+                        "[源][下载通道] %s %s" % (
+                            lab, ("可用（%d ms）" % ms) if okk
+                            else ("不可用（%s）" % why)))
+            except Exception:
+                pass
             if not any(r[1] for r in res):
                 QMessageBox.warning(
                     self, "都不通",

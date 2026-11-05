@@ -13,6 +13,8 @@ servers.json
 theme.json
 sources.json
 mc_versions_cache.json
+# ★ V2.3.7：模组图标的 slug->项目id 映射缓存（运行时生成，不入版本库）
+icon_map.json
 安装日志.txt
 manager.log
 *.log

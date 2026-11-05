@@ -10,6 +10,7 @@ import socket
 import time
 import zipfile
 import concurrent.futures
+import threading
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -1695,6 +1696,158 @@ def normalize_slug(text):
                 return parts[i + 1]
         return parts[-1]
     return t or None
+
+
+# ============================================================
+# ★ V2.3.7：Modrinth 图标地址（slug -> 项目 id -> 图标）
+# ============================================================
+# 为什么需要这一层：
+#   Modrinth 的 CDN **只认项目 id**（/data/<id>/icon.png），
+#   用 slug 拼出来的地址一律 400 Bad Request。
+#   而内置推荐清单里只有 slug —— 以前直接拼 slug 地址，
+#   结果每个内置模组都去撞一次 400，图标永远拿不到，
+#   还会把全库搜索的真图标挤掉（一个 URL 一个线程，全是无效请求）。
+#   这里改成：一次 API 批量问出项目 id，缓存到本地，之后直接用。
+
+_ICON_MAP_CACHE = None      # {slug: icon_url}
+_ICON_MAP_LOCK = threading.Lock()
+
+
+def _icon_map_path():
+    """图标映射缓存文件（放 exe 同目录，和 servers.json 一起）。"""
+    try:
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return os.path.join(base, "icon_map.json")
+    except Exception:
+        return os.path.join(os.getcwd(), "icon_map.json")
+
+
+def _load_icon_map_cache():
+    global _ICON_MAP_CACHE
+    if _ICON_MAP_CACHE is not None:
+        return _ICON_MAP_CACHE
+    m = {}
+    try:
+        p = _icon_map_path()
+        if os.path.isfile(p):
+            with open(p, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                for k, v in d.items():
+                    if isinstance(v, str) and v.startswith("http"):
+                        m[k] = v
+    except Exception:
+        pass
+    _ICON_MAP_CACHE = m
+    return m
+
+
+def _save_icon_map_cache(m):
+    global _ICON_MAP_CACHE
+    _ICON_MAP_CACHE = m
+    try:
+        p = _icon_map_path()
+        from . import fsutil
+        fsutil.atomic_write_json(p, m)
+    except Exception:
+        pass
+
+
+def normalize_icon_url(url):
+    """把 Modrinth 的 icon_url 规范化成 /data/<id>/icon.png。
+
+    ★ API 返回的是 ..._96.webp（带哈希文件名）：地址一换版本就失效，
+      缓存也一个项目存好几条。统一成 /data/<id>/icon.png 更稳。
+      不是 Modrinth 的地址就原样返回。
+    """
+    if not url:
+        return ""
+    try:
+        m = re.search(r"/data/([A-Za-z0-9]+)/", url)
+        if m:
+            return "https://cdn.modrinth.com/data/%s/icon.png" % m.group(1)
+    except Exception:
+        pass
+    return url
+
+
+def builtin_icon_urls(slugs, timeout=12, log=None):
+    """批量取 Modrinth 项目的图标 URL。返回 {slug: url}。
+
+    ★ 一次 /v2/projects?ids=[...] 请求问一批（slug 也认），
+      结果落到本地缓存（icon_map.json），下次开窗口直接用。
+    ★ 拿不到的 slug 就不给地址 —— 绝不拿 slug 硬拼 CDN
+      （那是 400，还白占线程）。
+    """
+    slugs = [s for s in (slugs or []) if s]
+    if not slugs:
+        return {}
+    cache = _load_icon_map_cache()
+    out = {}
+    need = []
+    for s in slugs:
+        u = cache.get(s)
+        if u:
+            out[s] = u
+        else:
+            need.append(s)
+    if not need:
+        return out
+    try:
+        q = urllib.parse.quote(json.dumps(need, separators=(",", ":")))
+        url = "%s/projects?ids=%s" % (MODRINTH, q)
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+        items = data if isinstance(data, list) else [data]
+        got = {}
+        for p in items:
+            if not isinstance(p, dict):
+                continue
+            slug = p.get("slug") or ""
+            iu = p.get("icon_url") or ""
+            pid = p.get("id") or ""
+            if slug and iu:
+                # ★ 优先用 API 返回的原图地址（_96.webp，96×96 小图，
+                #   下载快）。换成 /data/<id>/icon.png 是 512×512 大图，
+                #   一页 20 张要下很久，反而拖慢全库搜索的图标。
+                got[slug] = iu
+            elif slug and pid:
+                # 没有 icon_url 才按 id 拼（CDN 认 id）
+                got[slug] = "https://cdn.modrinth.com/data/%s/icon.png" % pid
+        if got:
+            cache.update(got)
+            _save_icon_map_cache(cache)
+            out.update(got)
+    except Exception as e:
+        if log:
+            try:
+                log("[图标] 取图标地址失败: %s" % (_brief(e),))
+            except Exception:
+                pass
+    return out
+
+
+def forget_icon_url(url):
+    """图标地址失效（404 / 下载失败）→ 从缓存里删掉，下次重新查。
+
+    ★ 内置清单缓存的是 API 返回的 _96.webp 地址（带图标哈希），
+      作者换图标后旧地址会 404。这里让缓存自愈：
+      下载失败 -> 删掉这条映射 -> 下次打开模组浏览重新批量问 API。
+    """
+    if not url:
+        return
+    try:
+        with _ICON_MAP_LOCK:
+            cache = dict(_load_icon_map_cache())
+            dead = [k for k, v in cache.items() if v == url]
+            if not dead:
+                return
+            for k in dead:
+                cache.pop(k, None)
+            _save_icon_map_cache(cache)
+    except Exception:
+        pass
+
 
 def mod_list_for(loader, mc_version=None):
     """返回精简清单，每项 dict:

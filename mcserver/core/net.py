@@ -19,7 +19,14 @@ import urllib.request
 import urllib.error
 
 # 统一 User-Agent（所有请求共用）
-UA = {"User-Agent": "MCServerManager/2.1"}
+# ★ V2.3.7：跟随版本号，不再硬编码 2.1。
+#   MCIM 等公益镜像有 UA 白名单机制，一个带正确版本号的稳定 UA
+#   才方便对方登记 / 排查；写死老版本会让后续白名单放行出问题。
+try:
+    from .. import __version__ as _MCSM_VER
+except Exception:
+    _MCSM_VER = "2.3"
+UA = {"User-Agent": "MCServerManager/%s" % _MCSM_VER}
 
 # 默认超时（秒）
 TIMEOUT = 60

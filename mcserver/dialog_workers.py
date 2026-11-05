@@ -163,8 +163,12 @@ class IconWorker(QThread, _StopMixin):
     """后台批量下载当前页的图标（一个线程遍历一批 URL）。
 
     只发 QImage（线程安全），转 QPixmap 在 GUI 线程的槽里做。
+    ★ V2.3.7：失败也发信号（img=None）—— 以前只在成功时发，
+      下载失败的 URL 会永远留在 _icon_loading 里，既不重试、
+      也会把"这一页的图标"永远卡在占位图上。
     """
-    got = Signal(str, object)   # icon_url, QImage
+
+    got = Signal(str, object)   # icon_url, QImage（None = 下载失败）
 
     def __init__(self, urls, parent=None):
         super().__init__(None)   # ★ 不传 parent，防对话框销毁连坐
@@ -176,11 +180,10 @@ class IconWorker(QThread, _StopMixin):
             if self.isInterruptionRequested():
                 break
             img = _fetch_icon_img(url)
-            if img is not None:
-                try:
-                    self.got.emit(url, img)
-                except Exception:
-                    pass
+            try:
+                self.got.emit(url, img)
+            except Exception:
+                pass
         _LIVE_THREADS.discard(self)
 
 

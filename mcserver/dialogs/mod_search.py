@@ -540,9 +540,11 @@ class ModrinthDialog(BaseDialog):
         dlg, vals = show_source_dialog(self)
         if vals is None:
             return
-        mirror, key = vals
+        mirror, key, *rest = vals
+        dl = rest[0] if rest else "auto"
         sources.set_mirror(mirror)
         sources.set_cf_key(key)
+        sources.set_download(dl)
         ok_s, err_s = sources.save()
         self._sync_src_ui()
         if not ok_s:

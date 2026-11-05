@@ -435,18 +435,25 @@ class ModBrowseDialog(BaseDialog):
     def _icon_url_for(self, slug, source="modrinth"):
         """内置清单条目的图标地址。
 
-        ★ V2.3.4：以前内置清单的 icon_url 恒为 None，
-          卡片只能画首字母色块（mcserver/icons 目录是空的，
-          本地图几乎永远命中不了）—— 用户看到的全是首字母图标。
-          Modrinth 的 CDN 支持按 slug 取图，这里拼规范地址，
-          由 IconWorker 异步下载，回来替换首字母占位。
-          ★ CurseForge 发布的项目也照样给 Modrinth 地址试一下：
-            大多 CF 项目在 Modrinth 有镜像页（能出图），
-            没有的下载失败就自动保留首字母色块，不报错。
+        ★ V2.3.4 曾经直接拼 https://cdn.modrinth.com/data/<slug>/icon.png
+          —— **这是错的**：Modrinth 的 CDN 只认项目 id，用 slug 一律
+          400 Bad Request。结果每个内置模组都去撞一次 400（一个 URL 一个
+          线程），图标永远拿不到，还把全库搜索的真图标挤掉了。
+        ★ V2.3.7：改成先查 slug -> 项目 id 的映射（install.builtin_icon_urls，
+          一次 API 批量问 + 本地缓存），再按 id 拼规范地址。
+          查不到就不给地址（用首字母色块），绝不硬拼坏地址。
         """
         if not slug:
             return ""
-        return "https://cdn.modrinth.com/data/%s/icon.png" % slug
+        try:
+            from ..core import install as _inst
+            m = _inst._load_icon_map_cache()
+            u = m.get(slug)
+            if u:
+                return u
+        except Exception:
+            pass
+        return ""
 
     def _is_incompatible(self, slug):
         """该 slug 是否有"明确不适配"的结论。"""
@@ -564,6 +571,9 @@ class ModBrowseDialog(BaseDialog):
             "标注『无适配』的模组 = 作者暂未支持该版本"
             % (self.mc_version or "?", self.loader or "?"))
         self._fill_builtin()
+        # ★ V2.3.7：后台批量取图标地址（slug -> Modrinth 项目 id）。
+        #   查回来后会自动重绘一次，卡片从首字母色块换成真图。
+        self._load_builtin_icons()
         # ★ V2.0.7：适配探测延迟到窗口显示后再启动（QTimer 单次 0ms），
         #   避免构造期后台线程与首帧绘制争抢导致"空白小窗闪现"。
         from PySide6.QtCore import QTimer as _QT
@@ -576,6 +586,7 @@ class ModBrowseDialog(BaseDialog):
         self._slug_title = {}
         page = self.builtin_hits[
             self.builtin_offset:self.builtin_offset + 20]
+        urls = []
         for h in page:
             slug = h.get("slug") or ""
             title = h.get("title") or slug
@@ -584,12 +595,18 @@ class ModBrowseDialog(BaseDialog):
             it.setData(Qt.UserRole, slug)
             it.setFlags(Qt.ItemIsEnabled)
             it.setSizeHint(QSize(0, 104))
+            # ★ V2.3.7：图标地址实时查缓存（后台批量查到项目 id 之后才有）
+            u = self._icon_url_for(slug)
+            if u and h.get("icon_url") != u:
+                h["icon_url"] = u
             card, chk = self._make_card(
                 h, self._local_icon_for(slug), True)
-            # ★ V2.3.4：内置清单也异步拉真图标（首字母色块只是占位）
+            # ★ V2.3.7：整页图标一次性交给一个 IconWorker ——
+            #   以前一个 URL 一个线程，24 个内置模组就是 24 个线程，
+            #   还会把全库搜索的真图标挤掉。
             _u = h.get("icon_url") or ""
             if _u:
-                self._spawn_icon_load([_u])
+                urls.append(_u)
             it._chk = chk
             # ★ V2.0.8：跨页勾选 —— 翻页重建时恢复勾选，并写回状态字典
             chk.blockSignals(True)
@@ -601,11 +618,43 @@ class ModBrowseDialog(BaseDialog):
             self.list_builtin.addItem(it)
             self.list_builtin.setItemWidget(it, card)
         self.list_builtin.blockSignals(False)
+        if urls:
+            self._spawn_icon_load(urls)
         self._sync_bpage()
         self.lbl_stat.setText("本地推荐 %d 个，显示 %d 个"
                               % (self.builtin_total, len(page)))
         self._sync_count()
         self._probe_sites()
+
+    def _load_builtin_icons(self):
+        """后台批量取内置清单的图标地址（slug -> Modrinth 项目 id）。
+
+        ★ V2.3.7：Modrinth 的 CDN 只认项目 id，用 slug 拼地址一律 400。
+          现在一次 /v2/projects?ids=[...] 问一批（结果缓存到
+          icon_map.json），下次打开窗口直接就有图。
+          查不到就不给地址（用首字母色块），绝不硬拼坏地址去撞墙。
+        """
+        slugs = [h.get("slug") or "" for h in self.builtin_hits]
+        slugs = [s for s in slugs if s]
+        if not slugs:
+            return
+        try:
+            from ..core import install as _inst
+            from ..dialog_workers import Worker
+
+            def job(on_log=None):
+                return _inst.builtin_icon_urls(slugs, log=on_log)
+
+            def done(ok, res):
+                if not ok or not isinstance(res, dict) or not res:
+                    return
+                self._fill_builtin()   # 重新渲染（这次带上真地址）
+
+            w = _track(self, Worker(job, {}, self))
+            w.done.connect(done)
+            w.start()
+        except Exception:
+            pass
 
     def _bpage(self, d):
         """推荐 Tab 内存分页（不发网络）。"""
@@ -936,16 +985,21 @@ class ModBrowseDialog(BaseDialog):
 
         开关关 → None（纯文字）；有缓存 → 真实图；
         有 icon_url → 灰底占位（并触发异步下载）；否则 None。
+
+        ★ V2.3.7：地址必须原样使用 —— 和 _make_card 记录在卡片上的
+          _icon_url 一致，_apply_icon 才能匹配上并把占位换成真图。
+          （试过把 API 的 _96.webp 统一改成 /data/<id>/icon.png，
+          那是 512×512 的大图，20 张要下很久，反而更慢，已回退。）
         """
         if not self.show_icons:
             return None
         url = h.get("icon_url") or ""
-        if url and url in self._icon_cache:
+        if not url:
+            return None
+        if url in self._icon_cache:
             return self._icon_cache[url]
-        if url:
-            self._spawn_icon_load([url])
-            return self._placeholder()
-        return None
+        self._spawn_icon_load([url])
+        return self._placeholder()
 
     def _local_icon_for(self, slug):
         """推荐安装：本地 icons/<slug>.png，没有则首字母色块。"""
@@ -977,9 +1031,23 @@ class ModBrowseDialog(BaseDialog):
         w.start()
 
     def _on_icon(self, url, img):
-        """图标下载完成：转 QPixmap 入缓存，替换对应卡片占位图。"""
+        """图标下载完成：转 QPixmap 入缓存，替换对应卡片占位图。
+
+        ★ V2.3.7：失败（img=None）也要把 URL 从 _icon_loading 里摘掉 ——
+          以前只在成功时发信号，失败的 URL 永远留在里面，
+          既不会重试，还会把这一页的图标永久卡在占位图上。
+        """
         try:
             self._icon_loading.discard(url)
+            if img is None:
+                # 下载失败：释放 loading，并让内置清单的图标映射自愈
+                # （作者换图标后旧的 _96.webp 会 404，下次重新查 API）
+                try:
+                    from ..core import install as _inst
+                    _inst.forget_icon_url(url)
+                except Exception:
+                    pass
+                return
             if not self.show_icons:
                 return
             pm = QPixmap.fromImage(img)
@@ -1132,6 +1200,9 @@ class ModBrowseDialog(BaseDialog):
             lbl_icon.setFixedSize(48, 48)
             lbl_icon.setPixmap(icon_pm)
             lay.addWidget(lbl_icon)
+            # ★ V2.3.7：这里记的地址必须和 _icon_pm_for 下载用的地址
+            #   完全一致（都原样），否则 _apply_icon 匹配不上，
+            #   图标会永远停在占位图上。
             card._icon_url = h.get("icon_url") or ""
             card._icon_lbl = lbl_icon
         else:
@@ -1642,9 +1713,11 @@ class ModBrowseDialog(BaseDialog):
             d, vals = show_source_dialog(self)
             if vals is None:
                 return
-            mirror, key = vals
+            mirror, key, *rest = vals
+            dl = rest[0] if rest else "auto"
             _src.set_mirror(mirror)
             _src.set_cf_key(key)
+            _src.set_download(dl)
             ok_s, err_s = _src.save()
             self._sync_src_ui()
             if not ok_s:
@@ -1699,9 +1772,19 @@ class ModBrowseDialog(BaseDialog):
             for name, okk, ms, why in res:
                 lab = names.get(name, name)
                 if okk:
-                    self._log("[探测] %s 可用（%d ms）" % (lab, ms))
+                    self._log("[探测][API 通道] %s 可用（%d ms）" % (lab, ms))
                 else:
-                    self._log("[探测] %s 不可用（%s）" % (lab, why))
+                    self._log("[探测][API 通道] %s 不可用（%s）" % (lab, why))
+            # ★ V2.3.7：下载通道单独测速 —— API 通不代表能下 jar
+            try:
+                cdn = _src.probe_cdn_all_latency(timeout=8)
+                for name, okk, ms, why in cdn:
+                    lab = "MCIM 镜像" if name == "mcim" else "官方 CDN"
+                    self._log("[探测][下载通道] %s %s" % (
+                        lab, ("可用（%d ms）" % ms) if okk
+                        else ("不可用（%s）" % why)))
+            except Exception:
+                pass
             if not good:
                 QMessageBox.warning(
                     self, "都不通（测速结果）",

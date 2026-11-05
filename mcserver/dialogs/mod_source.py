@@ -36,10 +36,14 @@ class SourceDialog(BaseDialog):
         self.setWindowTitle("下载源设置")
         v = QVBoxLayout(self)
         tip = QLabel(
-            "MCIM 是国内公益镜像，会时不时挂（实测有过 503）。\n"
-            "『自动』= 先试镜像，不通就退回官方。\n\n"
-            "CurseForge 官方 API 需要免费申请一个 key；\n"
-            "走 MCIM 镜像时不需要。这里留空就只用镜像搜 CF。")
+            "★ API 信息（搜索 / 版本列表）和文件下载是两条独立链路，"
+            "分别选源效果最好：\n"
+            "  国内常见情况：API 走 MCIM 更快，但下 jar 官方 CDN 反而更快。\n"
+            "  『自动』= 分别测两条通道的延迟，各挑最快的。\n\n"
+            "MCIM 是国内公益镜像，偶尔会挂（实测有过 503），"
+            "不通会自动退回官方。\n"
+            "CurseForge 官方 API 需要免费申请一个 key；"
+            "走 MCIM 时不需要，留空即可。")
         tip.setWordWrap(True)
         v.addWidget(tip)
 
@@ -50,7 +54,18 @@ class SourceDialog(BaseDialog):
         self.cb.addItem("官方源（Modrinth / CurseForge）", "official")
         i = self.cb.findData(sources.get_mirror())
         self.cb.setCurrentIndex(i if i >= 0 else 0)
-        f.addRow("下载源:", self.cb)
+        f.addRow("API 信息源:", self.cb)
+
+        self.cb_dl = QComboBox()
+        self.cb_dl.addItem("自动（按测速挑最快的）", "auto")
+        self.cb_dl.addItem("MCIM 镜像 CDN", "mcim")
+        self.cb_dl.addItem("官方 CDN", "official")
+        self.cb_dl.setToolTip(
+            "只影响实际下载 .jar / 核心 / 安装器文件，不影响搜索。\n"
+            "国内网络下官方 CDN 常常比镜像更快，建议保持『自动』。")
+        j = self.cb_dl.findData(sources.get_download())
+        self.cb_dl.setCurrentIndex(j if j >= 0 else 0)
+        f.addRow("文件下载源:", self.cb_dl)
 
         self.ed_key = QLineEdit(sources.get_cf_key())
         self.ed_key.setPlaceholderText(
@@ -60,6 +75,7 @@ class SourceDialog(BaseDialog):
         v.addLayout(f)
 
         self.lbl_now = QLabel("当前：%s" % sources.describe())
+        self.lbl_now.setWordWrap(True)
         self.lbl_now.setStyleSheet(_muted())
         v.addWidget(self.lbl_now)
 
@@ -68,10 +84,11 @@ class SourceDialog(BaseDialog):
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         v.addWidget(btns)
-        self.resize(470, 280)
+        self.resize(520, 330)
 
     def values(self):
         return (self.cb.currentData() or "auto",
-                self.ed_key.text().strip())
+                self.ed_key.text().strip(),
+                self.cb_dl.currentData() or "auto")
 
 

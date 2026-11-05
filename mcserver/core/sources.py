@@ -67,12 +67,20 @@ CF_SEARCH_ALIAS = {
 
 # ---- 当前配置（运行时可改） ----
 _cfg = {
+    # API 信息源：搜索 / 浏览 / 版本列表
     # auto = 自动挑（先试 MCIM，挂了退回官方）
     # official / mcim = 手动锁死
     "mirror": "auto",
+    # ★ V2.3.7：文件下载源 —— 和 API 源**独立**。
+    #   实测同一台机器：API 走 MCIM 快（273ms vs 541ms），
+    #   但下文件官方 CDN 反而快（164ms vs 370ms）。
+    #   以前一个 mirror 同时决定两者，选不了这个最优组合。
+    "download": "auto",
     "cf_key": "",
-    "health": {},       # {"mcim": True/False, "official": ...}
-    "_active": None,    # auto 模式下实际生效的那个
+    "health": {},       # {"mcim": True/False, "official": ...}  API 通道
+    "health_dl": {},    # 下载通道
+    "_active": None,    # auto 模式下 API 实际生效的那个
+    "_dl_active": None, # auto 模式下下载实际生效的那个
 }
 
 # auto 模式的尝试顺序
@@ -98,6 +106,7 @@ def load():
             d = json.load(f)
         if isinstance(d, dict):
             set_mirror(d.get("mirror", "official"))
+            set_download(d.get("download", "auto"))
             set_cf_key(d.get("cf_key", ""))
     except Exception:
         pass
@@ -113,8 +122,10 @@ def save():
         d0 = os.path.dirname(p)
         if d0:
             os.makedirs(d0, exist_ok=True)
-        fsutil.atomic_write_json(p, {"mirror": _cfg["mirror"],
-                                     "cf_key": _cfg["cf_key"]})
+        fsutil.atomic_write_json(
+            p, {"mirror": _cfg["mirror"],
+                "download": _cfg["download"],
+                "cf_key": _cfg["cf_key"]})
         return (True, p)
     except Exception as e:
         return (False, "%s  (%s)" % (repr(e), p))
@@ -132,6 +143,36 @@ def set_mirror(name):
 
 def get_mirror():
     return _cfg["mirror"]
+
+
+def set_download(name):
+    """文件下载源：auto / mcim / official（与 API 源相互独立）。"""
+    n = (name or "").strip().lower()
+    if n not in ("auto", "mcim", "official"):
+        n = "auto"
+    _cfg["download"] = n
+    if n in ("mcim", "official"):
+        _cfg["_dl_active"] = n
+
+
+def get_download():
+    return _cfg["download"]
+
+
+def _resolve_download():
+    """下载通道该用哪个源。
+
+    ★ auto：优先用 CDN 测速（probe_cdn_all_latency）里最快的那个；
+      没测过就跟随 API 源（老行为），不会比现状差。
+    """
+    d = _cfg["download"]
+    if d in ("official", "mcim"):
+        return d
+    scored = [(n, ms) for n, (ok, ms) in _cfg["health_dl"].items()
+              if ok and ms >= 0]
+    if scored:
+        return min(scored, key=lambda x: x[1])[0]
+    return _cfg.get("_dl_active") or _resolve()
 
 
 def set_cf_key(key):
@@ -168,10 +209,14 @@ def curseforge_base():
 
 
 def mirror_cdn(url):
-    """把 Modrinth CDN 链接换到镜像（下载加速）。"""
+    """把 Modrinth CDN 链接换到镜像（下载加速）。
+
+    ★ V2.3.7：改看**下载源**（get_download），不再跟着 API 源走。
+      这样"API 走 MCIM、文件走官方 CDN"这种最优组合才选得出来。
+    """
     if not url:
         return url
-    if _resolve() != "mcim":
+    if _resolve_download() != "mcim":
         return url
     if url.startswith(MODRINTH_CDN):
         return MCIM_CDN + url[len(MODRINTH_CDN):]
@@ -179,7 +224,7 @@ def mirror_cdn(url):
 
 
 def describe():
-    """给用户看的一句话状态。"""
+    """给用户看的一句话状态（API 源 / 下载源分开显示）。"""
     m = _cfg["mirror"]
     if m == "auto":
         a = _resolve()
@@ -189,11 +234,21 @@ def describe():
             tail = "（MCIM 不通，已退回官方）"
         elif h.get("mcim") is True:
             tail = "（MCIM 可用）"
-        return "自动 —— 当前 %s%s" % (
+        api = "自动 —— 当前 %s%s" % (
             "MCIM 国内镜像" if a == "mcim" else "官方源", tail)
-    if m == "mcim":
-        return "MCIM 国内镜像（Modrinth + CurseForge）"
-    return "官方源（Modrinth）"
+    elif m == "mcim":
+        api = "MCIM 国内镜像（Modrinth + CurseForge）"
+    else:
+        api = "官方源（Modrinth）"
+
+    d = _cfg["download"]
+    if d == "auto":
+        a2 = _resolve_download()
+        dl = "自动 —— 当前 %s" % (
+            "MCIM 镜像" if a2 == "mcim" else "官方 CDN")
+    else:
+        dl = "MCIM 镜像" if d == "mcim" else "官方 CDN"
+    return "API: %s ｜ 下载: %s" % (api, dl)
 
 
 def mark_bad(name, err=None):
@@ -276,6 +331,49 @@ def probe_all_latency(timeout=8):
             if okk:
                 _cfg["_active"] = name
                 break
+    return out
+
+
+def probe_cdn_all_latency(timeout=8):
+    """★ V2.3.7：单独测「文件下载」通道的延迟。
+
+    以前只测 API（GET /project/sodium）就用它代表整条链路 ——
+    但 API 信息镜像和文件下载镜像是两回事：API 快不代表 CDN 快，
+    反过来也一样。这里用一张 35KB 的小图当探针，分别测两个下载域。
+    返回 [(name, ok, delay_ms, why)]，name 为 mcim / official。
+
+    ★ 不用 HEAD：实测 MCIM 对部分路径的 HEAD 直接 404，
+      用轻量 GET 才准。
+    """
+    import concurrent.futures
+    path = "/data/AANobbMI/icon.png"     # sodium 图标，常驻且很小
+
+    def one(name):
+        base = MCIM_CDN if name == "mcim" else MODRINTH_CDN
+        import time
+        t0 = time.time()
+        try:
+            data = net.request(base + path, timeout=timeout)
+            if not data:
+                raise RuntimeError("空响应")
+            return (name, True, int((time.time() - t0) * 1000), "通")
+        except Exception as e:
+            return (name, False, -1, "下载失败: %s" % _brief(e))
+
+    out = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+        futs = [ex.submit(one, n) for n in AUTO_ORDER]
+        for f in concurrent.futures.as_completed(futs):
+            out.append(f.result())
+    out.sort(key=lambda r: AUTO_ORDER.index(r[0]))
+    # ★ 记下测速结果，auto 模式下 _resolve_download() 会挑最快的那个
+    for name, okk, ms, _why in out:
+        _cfg["health_dl"][name] = (bool(okk), int(ms) if okk else -1)
+    if _cfg["download"] == "auto":
+        good = [(n, ms) for n, (ok, ms) in _cfg["health_dl"].items()
+                if ok and ms >= 0]
+        if good:
+            _cfg["_dl_active"] = min(good, key=lambda x: x[1])[0]
     return out
 
 
