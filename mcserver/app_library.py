@@ -207,8 +207,15 @@ class LibraryMixin:
 
     # ---------------- 数据 ----------------
     def _data_path(self):
-        return os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "..", DATA_FILE)
+        """服务器列表位置。
+
+        ★ V2.4.0：以前是 `mcserver/../servers.json` —— 打包后落进
+          `_internal/servers.json`。用户换台电脑、或把新版解压覆盖时
+          很容易整个 _internal 一起删掉，服务器列表就"凭空消失"。
+          现在统一放软件目录（不可写则回落 %LOCALAPPDATA%\\MCSM）。
+        """
+        from . import paths
+        return paths.data_file(DATA_FILE)
 
     def _load_data(self):
         try:

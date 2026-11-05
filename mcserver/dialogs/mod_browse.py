@@ -138,9 +138,15 @@ class ModBrowseDialog(BaseDialog):
         self._builtin_checked = {}
         # ★ V2.0.9：全库搜索页跨页勾选状态（slug -> bool）
         self._lib_checked = {}
-        self._icons_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "icons")
+        # ★ V2.4.0：本地图标目录放到软件目录（用户能自己往里丢自定义图标），
+        #   不再指向包内的只读路径。
+        try:
+            from .. import paths as _paths
+            _icon_base = _paths.app_dir()
+        except Exception:
+            _icon_base = os.path.dirname(
+                os.path.dirname(os.path.abspath(__file__)))
+        self._icons_dir = os.path.join(_icon_base, "icons")
 
         v = QVBoxLayout(self)
 
@@ -192,6 +198,14 @@ class ModBrowseDialog(BaseDialog):
             "不适配的直接从列表去掉（取消勾选可看全部）。")
         self.chk_only_fit.toggled.connect(self._on_only_fit_toggled)
         hh.addWidget(self.chk_only_fit)
+        # ★ V2.4.0：只看未装 —— 已装的模组在列表里只标 ✓，一屏装过的
+        #   还是占着位置；勾上就只剩没装的（全库页同样有这个开关）。
+        self.chk_hide_installed = QCheckBox("只看未装")
+        self.chk_hide_installed.setToolTip(
+            "隐藏已经装在 mods/ 里的模组，只留还能装的。")
+        self.chk_hide_installed.toggled.connect(
+            lambda _on: self._on_hide_installed_toggled(True))
+        hh.addWidget(self.chk_hide_installed)
         vr.addLayout(hh)
         self.list_builtin = QListWidget()
         self.list_builtin.setViewMode(QListView.ListMode)
@@ -260,6 +274,13 @@ class ModBrowseDialog(BaseDialog):
         if i >= 0:
             self.cb_sort.setCurrentIndex(i)
         h.addWidget(self.cb_sort)
+        # ★ V2.4.0：全库页同样能"只看未装"
+        self.chk_hide_installed_lib = QCheckBox("只看未装")
+        self.chk_hide_installed_lib.setToolTip(
+            "隐藏已经装在 mods/（插件服是 plugins/）里的，只留还能装的。")
+        self.chk_hide_installed_lib.toggled.connect(
+            lambda _on: self._on_hide_installed_toggled(False))
+        h.addWidget(self.chk_hide_installed_lib)
         self.btn_go = QPushButton("搜索")
         self.btn_go.clicked.connect(self.search)
         h.addWidget(self.btn_go)
@@ -332,6 +353,15 @@ class ModBrowseDialog(BaseDialog):
             "4 线程并发下载 + CDN 加速 + 断点续传 + 木马扫描")
         self.btn_inst.clicked.connect(self.do_install)
         hb.addWidget(self.btn_inst)
+        # ★ V2.4.0：安装中的"取消"——以前点了开始只能干等
+        #   （4 线程 + 每次 180 秒超时），网络差时非常难受。
+        self.btn_cancel = QPushButton("取消安装")
+        self.btn_cancel.setToolTip(
+            "停止继续下载。已经下完的文件会保留（都经过哈希校验，是完整的）；\n"
+            "正在下的那几个会在 1MB 内停下。")
+        self.btn_cancel.clicked.connect(self._on_install_cancel)
+        self.btn_cancel.hide()
+        hb.addWidget(self.btn_cancel)
         self.btn_all = QPushButton("全选")
         self.btn_all.clicked.connect(lambda: self._set_all(True))
         hb.addWidget(self.btn_all)
@@ -485,12 +515,17 @@ class ModBrowseDialog(BaseDialog):
         all_hits = getattr(self, "_builtin_all", None)
         if all_hits is None:
             return
-        if not self.chk_only_fit.isChecked():
-            self.builtin_hits = list(all_hits)
-        else:
-            self.builtin_hits = [
-                h for h in all_hits
-                if not self._is_incompatible(h.get("slug") or "")]
+        hits = list(all_hits)
+        if self.chk_only_fit.isChecked():
+            hits = [h for h in hits
+                    if not self._is_incompatible(h.get("slug") or "")]
+        # ★ V2.4.0：只看未装（已装的从推荐列表里去掉）
+        if getattr(self, "chk_hide_installed", None) is not None \
+                and self.chk_hide_installed.isChecked():
+            hits = [h for h in hits
+                    if not _inst_hit(h.get("slug") or "",
+                                     h.get("title") or "", self.installed)]
+        self.builtin_hits = hits
         self.builtin_total = len(self.builtin_hits)
         if self.builtin_offset > max(0, self.builtin_total - 1):
             self.builtin_offset = 0
@@ -500,6 +535,27 @@ class ModBrowseDialog(BaseDialog):
         try:
             self._filter_builtin_hits()
             self._fill_builtin()
+        except Exception:
+            pass
+
+    def _on_hide_installed_toggled(self, builtin):
+        """切换"只看未装" → 重新扫一遍已装列表并刷新对应视图。
+
+        builtin=True 作用于推荐页，False 作用于全库页。
+        每次都重扫：用户可能在别的窗口装了/删了模组。
+        """
+        try:
+            self.installed = self._installed_slugs()
+        except Exception:
+            pass
+        try:
+            if builtin:
+                self._filter_builtin_hits()
+                self._fill_builtin()
+            else:
+                self.global_page = 1
+                self._fill_lib()
+                self._sync_page()
         except Exception:
             pass
 
@@ -721,23 +777,49 @@ class ModBrowseDialog(BaseDialog):
         self._run()
 
     # ---- 安全切片（start 越界兜底，绝不越界/串数据）----
+    def _lib_visible(self):
+        """全库列表里实际要显示的条目（应用『只看未装』过滤）。
+
+        ★ V2.4.0：过滤必须放在**切片之前** —— 否则"这一页 20 个全装过"
+          会显示成一页空白，用户以为搜索坏了。
+          结果按 (批次, 已装集合) 缓存，翻页时不用每次重算。
+        """
+        chk = getattr(self, "chk_hide_installed_lib", None)
+        if chk is None or not chk.isChecked():
+            return self.current_batch
+        key = (id(self.current_batch), len(self.current_batch),
+               id(self.installed))
+        cache = getattr(self, "_lib_vis_cache", None)
+        if cache and cache[0] == key:
+            return cache[1]
+        out = [h for h in self.current_batch
+               if not _inst_hit(h.get("slug") or "",
+                                h.get("title") or "", self.installed)]
+        self._lib_vis_cache = (key, out)
+        return out
+
     def _slice_page(self):
         """按 global_page 切出当前 20 条。
 
         start 已超出已加载数据 → 返回 None（调用方显示"正在加载..."
         并触发 _load_next_batch()）；否则 start/end 用 min 截断，
         末批不足 20 条也不会越界。
+        ★ V2.4.0：在"只看未装"过滤后的列表上切片；全部过滤完且没有
+          更多可拉的数据时返回空列表（= 没有可装的），不是 None。
         """
+        vis = self._lib_visible()
         start = (self.global_page - 1) * self.page_size
-        if start >= len(self.current_batch):
-            return None
-        end = min(start + self.page_size, len(self.current_batch))
-        return self.current_batch[start:end]
+        if start >= len(vis):
+            if len(self.current_batch) < self.total_hits:
+                return None
+            return []
+        end = min(start + self.page_size, len(vis))
+        return vis[start:end]
 
     def _max_local_page(self):
         """已加载数据最多能切出几页（随 append 不断增长）。"""
-        return max(1, (len(self.current_batch) + self.page_size - 1)
-                   // self.page_size)
+        n = len(self._lib_visible())
+        return max(1, (n + self.page_size - 1) // self.page_size)
 
     def _page(self, d):
         """翻页（★ V1.9.1：全局页码，向前纯本地，向后按需拉批）。
@@ -750,7 +832,8 @@ class ModBrowseDialog(BaseDialog):
         """
         if d > 0:
             nxt = self.global_page + 1
-            if (nxt - 1) * self.page_size < len(self.current_batch):
+            # ★ V2.4.0：判断"下一页有没有数据"要看过滤后的可见列表
+            if (nxt - 1) * self.page_size < len(self._lib_visible()):
                 self.global_page = nxt
                 self.local_page = nxt
                 self._fill_lib()
@@ -1137,8 +1220,24 @@ class ModBrowseDialog(BaseDialog):
             self.lbl_stat.setText("暂无数据")
             self._sync_count()
             return
-        self.lbl_stat.setText("共 %d 个结果，显示 %d 个"
-                              % (self.total_hits, shown))
+        # ★ V2.4.0：开了"只看未装"而这一批全装过 → 说清楚原因，
+        #   别再"暂无数据"让人以为搜索坏了
+        if not shown and page is not None and not page:
+            if getattr(self, "chk_hide_installed_lib", None) is not None \
+                    and self.chk_hide_installed_lib.isChecked():
+                self.lbl_stat.setText(
+                    "这批都已经装了（已加载 %d/%d）"
+                    % (len(self.current_batch), self.total_hits))
+            else:
+                self.lbl_stat.setText("暂无数据")
+            self._sync_count()
+            return
+        vis = len(self._lib_visible())
+        self.lbl_stat.setText(
+            "共 %d 个结果，显示 %d 个%s"
+            % (self.total_hits, shown,
+               ("（已过滤掉已装的）" if vis != len(self.current_batch)
+                else "")))
         self._sync_count()
         self._probe_sites()
 
@@ -1700,8 +1799,9 @@ class ModBrowseDialog(BaseDialog):
         """
         self.lbl_page.setText("第 %d 页" % self.global_page)
         self.btn_prev.setEnabled(self.global_page > 1)
+        # ★ V2.4.0：下一页看"过滤后还剩多少"，否则开了只看未装会翻到空页
         self.btn_next.setEnabled(
-            self.global_page * self.page_size < len(self.current_batch)
+            self.global_page * self.page_size < len(self._lib_visible())
             or len(self.current_batch) < self.total_hits)
 
     # ---------- 操作 ----------
@@ -1856,6 +1956,10 @@ class ModBrowseDialog(BaseDialog):
         if r != QMessageBox.Yes:
             return
         self.btn_inst.setEnabled(False)
+        self.btn_cancel.setEnabled(True)
+        self.btn_cancel.setText("取消安装")
+        self.btn_cancel.show()
+        self._bytes_txt = ""       # 清掉上一轮的网速，别串到这次
         # ★ V2.3.9：显示进度条（先按勾选数占位，实际总数含自动补的前置）
         self.pb_inst.setRange(0, max(1, len(slugs)))
         self.pb_inst.setValue(0)
@@ -1865,8 +1969,62 @@ class ModBrowseDialog(BaseDialog):
             self._do_install, {"slugs": slugs}, self))
         self.worker.log.connect(self._log)
         self.worker.progress.connect(self._on_install_progress)
+        # ★ V2.4.0：字节进度（网速 / 已下载量）
+        self.worker.bytes_prog.connect(self._on_install_bytes)
         self.worker.done.connect(self._on_install)
         self.worker.start()
+
+    def _on_install_cancel(self):
+        """点了「取消安装」：只置标志位，由下载线程自己停。
+
+        绝不强杀线程 —— 那会把 .tmp 写成半截、甚至留下锁死的文件。
+        """
+        w = getattr(self, "worker", None)
+        if w is None or not w.isRunning():
+            return
+        try:
+            w.request_cancel()
+        except Exception:
+            pass
+        self.btn_cancel.setEnabled(False)
+        self.btn_cancel.setText("正在取消…")
+        self.lbl_stat.setText("正在取消（已下完的文件会保留）…")
+        self._log("")
+        self._log("· 正在取消安装，等当前几个文件停下…")
+
+    def _apply_prog_format(self):
+        """把 "n/m（%）· 网速/大小" 拼成进度条文字。
+
+        ★ V2.4.0：两个回调（按个数 / 按字节）都要改同一行文字，
+          以前后到的那个会把前一个覆盖掉 —— 于是"网速"一闪就没。
+          这里统一从 _bytes_txt 取，谁更新都不会丢。
+        """
+        txt = getattr(self, "_bytes_txt", "")
+        try:
+            self.pb_inst.setFormat("%v/%m（%p%）" + ((" · " + txt) if txt else ""))
+        except Exception:
+            pass
+
+    def _on_install_bytes(self, done, total, speed):
+        """下载字节进度（★ V2.4.0）：把网速拼进进度条文字。
+
+        总大小未知（服务器没给 Content-Length）时不显示 MB 数，
+        只显示速度，避免 "3.2 MB / 0 B" 这种怪数字。
+        """
+        try:
+            sp = "%.1f MB/s" % ((speed or 0) / 1048576.0) \
+                if speed and speed > 0 else ""
+            if total and total > 0:
+                got = min(done, total)
+                extra = "%s / %s" % (install._size_text(got),
+                                     install._size_text(total))
+                txt = ("%s · %s" % (extra, sp)) if sp else extra
+            else:
+                txt = sp
+            self._bytes_txt = txt
+            self._apply_prog_format()
+        except Exception:
+            pass
 
     def _on_install_progress(self, done, total, label):
         """安装进度（★ V2.3.9）：n/N + 当前模组名。"""
@@ -1874,34 +2032,41 @@ class ModBrowseDialog(BaseDialog):
             if total > 0:
                 self.pb_inst.setRange(0, total)
             self.pb_inst.setValue(done)
-            self.pb_inst.setFormat("%v/%m（%p%）")
+            self._apply_prog_format()
             if label:
                 self.lbl_stat.setText("已处理 %d/%d：%s"
                                       % (done, total, label))
         except Exception:
             pass
 
-    def _do_install(self, slugs=None, on_log=None, on_progress=None):
+    def _do_install(self, slugs=None, on_log=None, on_progress=None,
+                    on_bytes=None, cancel=None):
         """复用 install_mods / install_plugins（V1.2.0 插件分流）。
 
         ★ V2.3.9：把 on_progress 传下去，进度条才有数据。
+        ★ V2.4.0：把 on_bytes / cancel 也传下去（网速 + 取消）。
         """
         if self.is_plugins:
             return install.install_plugins(
                 self.server_dir, self.mc_version,
                 loader=self.loader or "paper",
                 on_log=on_log, only=slugs or [],
-                on_progress=on_progress)
+                on_progress=on_progress,
+                on_bytes=on_bytes, cancel=cancel)
         r = install.install_mods(
             self.server_dir, self.mc_version, self.loader,
             on_log=on_log, only=slugs or [],
-            on_progress=on_progress)
+            on_progress=on_progress,
+            on_bytes=on_bytes, cancel=cancel)
         return r
 
     def _on_install(self, ok, res):
         self.btn_inst.setEnabled(True)
         try:
             self.pb_inst.hide()
+            self.btn_cancel.hide()
+            self.btn_cancel.setEnabled(True)
+            self.btn_cancel.setText("取消安装")
         except Exception:
             pass
         if not ok:
@@ -1910,9 +2075,14 @@ class ModBrowseDialog(BaseDialog):
         ok_l = res.get("ok") or []
         fail_l = res.get("fail") or []
         skip_l = res.get("skipped") or []
+        cancelled = bool(res.get("cancelled"))
         self._log("")
-        self._log("★ 完成：成功 %d，失败 %d，跳过 %d"
-                  % (len(ok_l), len(fail_l), len(skip_l)))
+        if cancelled:
+            self._log("★ 已取消：完成 %d 个，失败 %d，跳过 %d"
+                      % (len(ok_l), len(fail_l), len(skip_l)))
+        else:
+            self._log("★ 完成：成功 %d，失败 %d，跳过 %d"
+                      % (len(ok_l), len(fail_l), len(skip_l)))
         for f in fail_l:
             self._log("  [失败] %s - %s" % (f.get("name"), f.get("reason")))
         self.installed = self._installed_slugs()

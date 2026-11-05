@@ -570,11 +570,16 @@ def _q(s):
 
 
 def install_from_project(slug, mc_version, loader, mods_dir,
-                         on_log=None, source="modrinth"):
+                         on_log=None, source="modrinth",
+                         on_bytes=None, cancel=None):
     """把一个项目装到 mods_dir（modrinth 或 curseforge）。
 
     返回 {"ok":True,"file":...,"version":...} 或
          {"ok":False,"reason":...}
+
+    ★ V2.4.0：CurseForge 也做哈希校验（CF 只给 sha1/md5），
+      并支持字节进度与取消 —— 以前 CF 这条路是"下完就算成功"，
+      半截文件照样进 mods/，启动才报 ZipException。
     """
     def log(m):
         if on_log:
@@ -604,7 +609,13 @@ def install_from_project(slug, mc_version, loader, mods_dir,
         name = r.get("filename") or ("%s.jar" % slug)
         dest = os.path.join(mods_dir, name)
         try:
-            install._download(r["url"], dest, on_log=on_log)
+            # ★ V2.4.0：CF 同样走"镜像优先 + 失败回退官方 + 哈希校验"
+            install._download_with_fallback(
+                r["url"], dest, on_log=on_log,
+                hashes=r.get("hashes") or {},
+                on_bytes=on_bytes, cancel=cancel)
+        except install.InstallCancelled:
+            raise
         except Exception as e:
             return {"ok": False,
                     "reason": "下载失败：%s" % (install._brief(e),)}
@@ -625,14 +636,20 @@ def install_from_project(slug, mc_version, loader, mods_dir,
         if not u:
             continue
         name = None
+        hashes = {}
         for f in (v.get("files") or []):
             if f.get("url") == u:
                 name = f.get("filename")
+                # ★ V2.4.0：这条分支以前不带哈希，坏文件直接落地
+                hashes = f.get("hashes") or {}
         if not name:
             name = "%s-%s.jar" % (slug, v.get("version_number") or "0")
         dest = os.path.join(mods_dir, name)
         try:
-            _dl(u, dest, on_log)
+            _dl(u, dest, on_log, hashes=hashes,
+                on_bytes=on_bytes, cancel=cancel)
+        except install.InstallCancelled:
+            raise
         except Exception as e:
             last_err = e
             continue
@@ -647,10 +664,15 @@ def install_from_project(slug, mc_version, loader, mods_dir,
     return {"ok": False, "reason": "找不到可下载的 jar"}
 
 
-def _dl(url, dest, on_log=None):
-    """下载，走 install 的统一实现（带 3 次重试 + 退避）。"""
+def _dl(url, dest, on_log=None, hashes=None, on_bytes=None, cancel=None):
+    """下载，走 install 的统一实现（镜像回退 + 重试退避 + 哈希校验）。"""
     from . import install
-    return install._download(url, dest, on_log=on_log)
+    if hashes:
+        return install._download_with_fallback(
+            url, dest, on_log=on_log, hashes=hashes,
+            on_bytes=on_bytes, cancel=cancel)
+    return install._download(url, dest, on_log=on_log,
+                             on_bytes=on_bytes, cancel=cancel)
 
 
 def _brief_dl_err(e):

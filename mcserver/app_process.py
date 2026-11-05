@@ -440,7 +440,7 @@ class ProcessMixin:
         box.setText(
             "自动扫描没找到 Java %s，无法启动。\n\n"
             "可以手动指定 java.exe 的位置，\n"
-            "例如：D:\\JDK\\JDK25\\bin\\java.exe\n\n"
+            "它一般在自己解压/安装的 JDK 目录下的 bin 里。\n\n"
             "选择后会自动记住，下次直接使用。" % (need or "（任意版本）"))
         pick = box.addButton("手动选择 java.exe ...", QMessageBox.AcceptRole)
         box.addButton("取消", QMessageBox.RejectRole)
@@ -448,9 +448,13 @@ class ProcessMixin:
         if box.clickedButton() is not pick:
             return False
         from PySide6.QtWidgets import QFileDialog
+        # ★ V2.4.0：起始目录别再假设 C 盘 —— 有些精简系统/改盘符的
+        #   机器没有 ProgramFiles 或 C:，会直接弹到"此电脑"甚至报错。
+        _start = os.environ.get("ProgramFiles") or os.path.expanduser("~")
+        if not os.path.isdir(_start):
+            _start = os.path.expanduser("~")
         jp, _ = QFileDialog.getOpenFileName(
-            self, "选择 java.exe",
-            os.environ.get("ProgramFiles", "C:\\"),
+            self, "选择 java.exe", _start,
             "Java 可执行文件 (java.exe);;所有文件 (*)")
         if not jp:
             return False

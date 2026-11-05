@@ -109,12 +109,12 @@ def bump():
 
 
 def path():
-    try:
-        base = os.path.dirname(os.path.dirname(
-            os.path.dirname(os.path.abspath(__file__))))
-    except Exception:
-        base = os.getcwd()
-    return os.path.join(base, "theme.json")
+    """theme.json 的位置。
+
+    ★ V2.4.0：统一走 paths（打包后是 EXE 目录，不是 _internal/）。
+    """
+    from .. import paths
+    return paths.data_file("theme.json")
 
 
 def load():

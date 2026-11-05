@@ -89,13 +89,13 @@ AUTO_ORDER = ["mcim", "official"]
 
 # ---- 持久化 ----
 def cfg_path():
-    """配置文件路径（和 servers.json 同目录）。"""
-    try:
-        base = os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__))))
-    except Exception:
-        base = os.getcwd()
-    return os.path.join(base, "sources.json")
+    """配置文件路径（和 servers.json 同目录）。
+
+    ★ V2.4.0：以前靠 __file__ 往上数 3 层 —— 打包后正好落进
+      `_internal/`，升级覆盖或只读安装位就丢配置。统一走 paths。
+    """
+    from .. import paths
+    return paths.data_file("sources.json")
 
 
 def load():
@@ -635,8 +635,33 @@ def cf_download_url(cf_id, mc_version=None, loader=None):
         u = f.get("downloadUrl")
         if u:
             return {"url": u, "filename": f.get("fileName") or "",
-                    "date": f.get("fileDate")}
+                    "date": f.get("fileDate"),
+                    "hashes": _cf_hashes(f),
+                    "size": f.get("fileLength") or 0}
     return {"err": "文件列表里没有直链（CurseForge 有些文件要跳转）"}
+
+
+def _cf_hashes(f):
+    """把 CurseForge 的 hashes 数组转成 {sha1|md5: 值}（★ V2.4.0）。
+
+    CF v1 的文件对象里是 [{"value": "...", "algo": 1}]，
+    algo: 1 = SHA1，2 = MD5（官方文档定义，别再猜）。
+    没有哈希信息就返回 {}，校验层会直接放行，不影响老数据。
+    """
+    out = {}
+    for h in (f.get("hashes") or []):
+        try:
+            algo = int(h.get("algo"))
+        except Exception:
+            continue
+        v = (h.get("value") or "").strip().lower()
+        if not v:
+            continue
+        if algo == 1:
+            out["sha1"] = v
+        elif algo == 2:
+            out["md5"] = v
+    return out
 
 
 def cf_file_url(project_id, file_id):

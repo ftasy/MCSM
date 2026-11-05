@@ -4,7 +4,7 @@
 扫描本机服务端 → 初始化新服（下核心 / 下模组 / 下插件）→ 启停服务器并看控制台
 → 改 `server.properties` → 备份/恢复存档 → 装/删模组 → 分析崩溃日志 → 换主题。
 
-> 不是命令行工具，打开点按钮就能用。当前版本 **v2.3.9**，支持在线检查更新。
+> 不是命令行工具，打开点按钮就能用。当前版本 **v2.4.0**，支持在线检查更新。
 
 ---
 
@@ -19,6 +19,7 @@
 - **日志搜索**：控制台 `Ctrl+F` 搜索、命中高亮与数量统计；「只看问题」一键筛出 WARN / ERROR 与报错堆栈
 - **列表搜索**：服务器多时按名称 / 版本 / 加载器筛选（多关键字空格分隔，如 `fabric 1.20`）
 - **数据安全**：所有配置与列表落盘走"临时文件 + fsync + 原子替换"，断电或强杀不会写出空文件；保留 3 份 `.bak` 快照，主文件损坏自动恢复
+- **绿色可搬运**：`servers.json` / `sources.json` / `theme.json` 等全部写在 **EXE 同级目录**（源码运行则是项目根），整个文件夹拷到别的电脑/U 盘就能接着用；若软件放在 Program Files 等只读位置，自动回落 `%LOCALAPPDATA%\MCSM`，不会静默丢配置
 - **配置可视化**：`server.properties`、核心参数、模组与插件配置、语音聊天、白名单、备份、启动参数、性能优化——全图形化编辑
 - **崩溃分析**：崩溃日志自动解析（规则库 + 可选 AI 深度诊断），给出可能原因
 - **更新检测**：内置"检查更新"直达 GitHub Releases
@@ -76,6 +77,7 @@ MCSM/
 │   ├── widgets.py               # 可复用控件：Console / FloatConsole / NavButton / 主题助手
 │   ├── dialog_workers.py        # 对话框用的后台线程（Worker / IconWorker / LoaderVerWorker）
 │   ├── const.py                 # 跨模块共享常量（servers.json、-Xmx 正则）
+│   ├── paths.py                 # 统一路径解析：软件目录 / 只读回落 / 老位置自动迁移
 │   ├── updater.py               # 检查更新
 │   ├── dialogs/                 # 各种对话框
 │   │   ├── __init__.py          # 门面：统一导出，旧写法 from .dialogs import CreateDialog 仍可用
@@ -174,6 +176,7 @@ python -c "import pack; pack.pack()"
 
 | 版本 | 亮点 |
 |---|---|
+| **v2.4.0** | 安装体验 + 可移植性：① 安装可**取消**（下载线程每 1MB 自查，1 秒内停，已下文件保留）；② 进度条显示**网速与已下载量**（`8.4 MB / 30.1 MB · 2.3 MB/s`）；③ 推荐页/全库页新增**只看未装**；④ **CurseForge 也做哈希校验**（algo 1=SHA1 / 2=MD5）；⑤ **配置路径统一** —— 以前 5 个模块各按 `__file__` 数不同层数，打包后全落进 `_internal/`，换机器/覆盖升级就丢服务器列表、主题、镜像源，现在统一到 `mcserver/paths.py`（EXE 目录，不可写回落 `%LOCALAPPDATA%\MCSM`，老文件自动迁移）；⑥ 修掉搬迁目标写死 `G:\MCServers`、路径检查用 CWD、GitHub 插件 `UnboundLocalError` 等本机假设 |
 | **v2.3.9** | 模组安装链路整修：① 修「全库搜索装的模组一个都装不上」（meta 为 None 时 `effective_slug` 抛异常/返回空 slug）；② **自动补前置** —— 读 Modrinth 版本元数据的 required 依赖，递归 2 层、已装与纯客户端跳过，装 Create 会自动带 Fabric API；③ 下载完按 **sha512/sha1 校验**，坏文件删掉换源重下，不允许坏 jar 落进 mods；④ 安装**进度条** n/N + 当前模组名；⑤ 同 mod id 的旧版 jar **自动归档**到 `.mcsm_replaced/`（只搬家不删）；⑥ 推荐页装完「✓已装」立即刷新 |
 | **v2.3.1** | 结构拆分：`app.py` 5168 行 → 7 个 mixin（主窗口仅 569 行）；`dialogs.py` 8762 行 → `dialogs/` 6 个子模块；修掉拆分遗留的启动崩溃（`QSizePolicy` 等未导入）与 4 处隐藏 NameError（备份回调 `k`、整合包导入 `select_new`、run.bat 兜底 `bat`、下载重试 `RETRY`）、选模组对话框 `KeyError: 'default'` |
 | **v2.3.8** | 两条通道都能**自己选 + 当场测**：下载源设置里新增「测一下两条通道」按钮，分别显示 API 搜索 / 文件下载各两个源的延迟与可用性，并告诉用户自动模式在当前网络下会选哪个组合；启动后自动模式下后台自动重测一次（结果只在内存，换 VPN / 换网络会重新测，不沿用旧结论）|

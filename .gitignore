@@ -15,6 +15,9 @@ sources.json
 mc_versions_cache.json
 # ★ V2.3.7：模组图标的 slug->项目id 映射缓存（运行时生成，不入版本库）
 icon_map.json
+# ★ V2.4.0：适配探测缓存 / AI 配置（都是运行时生成的本机数据）
+compat_cache.json
+ai.json
 安装日志.txt
 manager.log
 *.log
@@ -36,6 +39,8 @@ _create_v173.png
 # PyInstaller 打包产物
 build/
 dist/
+build240/
+dist240/
 build_new/
 dist_new/
 build_log.txt

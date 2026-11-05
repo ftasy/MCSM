@@ -12,6 +12,7 @@
 import os
 import json
 import inspect
+import threading
 
 from PySide6.QtCore import (Qt, QThread, Signal)
 from PySide6.QtGui import (QImage, QPixmap, QPainter, QColor,
@@ -32,6 +33,11 @@ class _StopMixin:
 
     def stop(self, soft_ms=600, hard_ms=1500):
         try:
+            # ★ V2.4.0：先置取消位（下载循环每 1MB 自查一次），
+            #   否则"关窗口"要等 180 秒超时才会真的停。
+            c = getattr(self, "_cancel", None)
+            if c is not None:
+                c.set()
             if not self.isRunning():
                 _LIVE_THREADS.discard(self)
                 return True
@@ -56,6 +62,9 @@ class Worker(QThread, _StopMixin):
     # ★ V2.3.9：进度（已完成, 总数, 当前项名字）。
     #   只有被调函数签名里有 on_progress 才会接上，其它 Worker 行为不变。
     progress = Signal(int, int, str)
+    # ★ V2.4.0：下载字节进度（已下载字节, 总字节, 字节/秒）。
+    #   同样是"被调函数有 on_bytes 才接"，老任务零影响。
+    bytes_prog = Signal(int, int, float)
 
     def __init__(self, fn, kwargs=None, parent=None):
         # ★ parent 不传给 QThread：传了之后对话框一销毁，
@@ -66,18 +75,36 @@ class Worker(QThread, _StopMixin):
         self.kwargs = kwargs or {}
         self._owner = parent
         self._accepts_progress = False
+        self._accepts_bytes = False
+        self._accepts_cancel = False
+        # ★ V2.4.0：取消信号。用 Event 而不是"杀线程"——
+        #   下载循环每个分块自查一次，能干净地停下来（文件不写坏）。
+        self._cancel = threading.Event()
         try:
-            self._accepts_progress = (
-                "on_progress" in inspect.signature(fn).parameters)
+            params = inspect.signature(fn).parameters
+            self._accepts_progress = "on_progress" in params
+            self._accepts_bytes = "on_bytes" in params
+            self._accepts_cancel = "cancel" in params
         except (TypeError, ValueError):
             pass
         _LIVE_THREADS.add(self)
+
+    def request_cancel(self):
+        """请求取消（合作式中断，界面用）。"""
+        try:
+            self._cancel.set()
+        except Exception:
+            pass
 
     def run(self):
         try:
             extra = {}
             if self._accepts_progress:
                 extra["on_progress"] = self.progress.emit
+            if self._accepts_bytes:
+                extra["on_bytes"] = self.bytes_prog.emit
+            if self._accepts_cancel:
+                extra["cancel"] = self._cancel
             res = self.fn(on_log=self.log.emit, **extra, **self.kwargs)
             if not self.isInterruptionRequested():
                 self.done.emit(True, res)
@@ -243,16 +270,15 @@ def _make_placeholder_pixmap(size=64):
 
 
 def _global_show_icons():
-    """读 servers.json 的 display.show_icons（★ V1.9.0：默认 False=纯文字极速）。"""
+    """读 servers.json 的 display.show_icons（★ V1.9.0：默认 False=纯文字极速）。
+
+    ★ V2.4.0：路径统一走 paths —— 以前先找 os.getcwd()，从快捷方式/
+      别的目录启动时 CWD 不是软件目录，读到的永远是默认值。
+    """
     try:
         import json as _json
-        cand = [os.path.join(os.getcwd(), "servers.json")]
-        try:
-            cand.append(os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                "servers.json"))
-        except Exception:
-            pass
+        from . import paths
+        cand = [paths.data_file("servers.json")]
         for p in cand:
             if not os.path.isfile(p):
                 continue

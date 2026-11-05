@@ -507,8 +507,11 @@ def check_environment():
     Java 的 -cp 参数对路径里的 ! / # 极其敏感，
     尤其是生成/加载 jar 包时会被 Windows 命令行破坏，
     轻则启动失败，重则执行到一半崩。
+    ★ V2.4.0：检查的是**软件自己的位置**，不是 CWD —— 从快捷方式启动
+      时 CWD 可能是 System32，那样永远检查不到真正的问题目录。
     """
-    current_dir = os.path.abspath(os.getcwd())
+    from . import paths
+    current_dir = paths.app_dir()
     if "!" in current_dir or "#" in current_dir:
         msg = (
             "警告：当前软件所在路径包含特殊字符（如 ! 或 #）。\n\n"
@@ -522,14 +525,11 @@ def check_environment():
 def get_base_dir():
     """获取软件基目录（日志 / 用户数据都落在这里）。
 
-    - 打包环境（PyInstaller --noconsole EXE）：
-      sys.executable 是 EXE 本身，__file__ 则指向只读的 _internal，
-      所以返回 EXE 所在的最外层目录。
-    - 开发环境：返回 app.py 所在目录。
+    ★ V2.4.0：实现挪到 mcserver/paths.py —— 全项目只留一套
+      目录判定逻辑（所有 json 配置也用它），别处不再各数各的层数。
     """
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
+    from . import paths
+    return paths.app_dir()
 
 
 def main():
@@ -540,10 +540,10 @@ def main():
     urllib.request.install_opener(
         urllib.request.build_opener(urllib.request.ProxyHandler()))
     # ★ 2. 全局文件日志：写入软件基目录下的 manager.log
-    #   （用 get_base_dir() 定位，而不是 CWD / __file__ ——
-    #     打包后 __file__ 指向 _internal 只读目录，CWD 也不可靠。）
-    base_dir = get_base_dir()
-    log_file = os.path.join(base_dir, "manager.log")
+    #   ★ V2.4.0：用 paths.data_dir() —— 软件目录不可写时（Program Files、
+    #     只读 U 盘）自动回落 %LOCALAPPDATA%\MCSM，日志永远写得进去。
+    from . import paths as _paths
+    log_file = os.path.join(_paths.data_dir(), "manager.log")
     try:
         logging.basicConfig(
             filename=log_file,

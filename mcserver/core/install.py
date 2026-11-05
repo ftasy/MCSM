@@ -88,12 +88,51 @@ def _get_meta_fallback(primary, fallback, timeout=15):
     raise last
 
 
-def _download(url, dest, timeout=180, on_retry=None, on_log=None):
+class InstallCancelled(Exception):
+    """用户主动取消安装（★ V2.4.0）。
+
+    独立成一个类型，是为了让上层能把它和"网络失败"区分开：
+    取消不该被当成错误写进日志，也不该触发换源重试。
+    """
+    pass
+
+
+def _check_cancel(cancel):
+    """取消信号（threading.Event）已被置位就立刻抛出。"""
+    if cancel is not None:
+        try:
+            if cancel.is_set():
+                raise InstallCancelled("已取消")
+        except AttributeError:
+            pass
+
+
+def _size_text(n):
+    """12345678 -> "11.8 MB"（给 UI 用，不参与比较）。"""
+    try:
+        n = float(n)
+    except Exception:
+        return "-"
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return ("%d %s" % (n, unit)) if unit == "B" \
+                else ("%.1f %s" % (n, unit))
+        n /= 1024.0
+    return "-"
+
+
+def _download(url, dest, timeout=180, on_retry=None, on_log=None,
+              on_bytes=None, cancel=None):
     """下载到文件（流式分块 + 断点续传，防大文件内存爆炸）。
 
     ★ 断点续传：先写 dest + ".tmp"，中途失败会留下 .tmp，
       下次重试带上 Range 从断点继续写；服务器不支持 Range
       （回 200）就从头覆盖。下载完成后 .tmp 改名成 dest。
+    ★ V2.4.0：
+      · cancel —— threading.Event，勾上就每个分块检查一次，
+        1MB 内就能停下来（不用等 180 秒超时）。
+      · on_bytes(本次增量, 该文件总大小) —— 给界面算网速/已下载量。
+        总大小未知（无 Content-Length）时传 0，界面显示"-"而不是乱跳。
     """
     if on_retry is None and on_log is not None:
         def _retry_log(attempt, e, wait):
@@ -102,9 +141,14 @@ def _download(url, dest, timeout=180, on_retry=None, on_log=None):
         on_retry = _retry_log
 
     def _do_download():
+        _check_cancel(cancel)
         req = urllib.request.Request(url, headers=UA)
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         tmp = dest + ".tmp"
+        # ★ V2.4.0：可取消时把单次 socket 等待压到 60 秒 —— 取消只能
+        #   在每个分块读取处生效，如果正卡在"连接一个死掉的主机"上，
+        #   180 秒的默认超时会让"取消"看起来没反应。
+        eff_timeout = min(timeout, 60) if cancel is not None else timeout
 
         # ★ 断点续传：有未下完的 .tmp 就带 Range 续传
         downloaded = 0
@@ -117,24 +161,44 @@ def _download(url, dest, timeout=180, on_retry=None, on_log=None):
                 req.add_header("Range", "bytes=%d-" % downloaded)
 
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with urllib.request.urlopen(req, timeout=eff_timeout) as r:
                 # 206 = 服务器支持 Range，接着 .tmp 往后写；
                 # 200 = 不支持 Range（或重定向），从头写覆盖。
                 mode = "ab" if r.status == 206 else "wb"
                 if mode == "wb":
                     downloaded = 0
+                # 该文件的完整大小（用于算百分比/剩余时间）
+                try:
+                    clen = int(r.headers.get("Content-Length") or 0)
+                except Exception:
+                    clen = 0
+                total = (downloaded + clen) if (clen and mode == "ab") \
+                    else clen
                 with open(tmp, mode) as f:
                     # ★ 分块读取写入，每次 1MB，避免大文件（如核心 jar）撑爆内存
                     while True:
+                        _check_cancel(cancel)
                         chunk = r.read(1024 * 1024)
                         if not chunk:
                             break
                         f.write(chunk)
+                        if on_bytes:
+                            try:
+                                on_bytes(len(chunk), total)
+                            except InstallCancelled:
+                                raise
+                            except Exception:
+                                pass
         except urllib.error.HTTPError as e:
             if e.code != 416:
                 raise
             # 416 = Range 越界，说明 .tmp 其实已经下完了，直接改名即可
+        except BaseException:
+            # 取消/异常时保留 .tmp，下次续传用；但取消要往上抛
+            _check_cancel(cancel)
+            raise
 
+        _check_cancel(cancel)
         # 下载完成：.tmp -> dest
         if os.path.exists(dest):
             os.remove(dest)
@@ -1715,12 +1779,14 @@ _ICON_MAP_LOCK = threading.Lock()
 
 
 def _icon_map_path():
-    """图标映射缓存文件（放 exe 同目录，和 servers.json 一起）。"""
-    try:
-        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        return os.path.join(base, "icon_map.json")
-    except Exception:
-        return os.path.join(os.getcwd(), "icon_map.json")
+    """图标映射缓存文件（放软件目录，和 servers.json 一起）。
+
+    ★ V2.4.0：以前往上数 2 层 —— 源码运行落到 mcserver/ 里、
+      打包后落到 _internal/mcserver/，各机器各版本位置都不一样。
+      统一走 paths（老位置的缓存会自动搬过来）。
+    """
+    from .. import paths
+    return paths.data_file("icon_map.json")
 
 
 def _load_icon_map_cache():
@@ -2227,11 +2293,13 @@ def verify_download(path, hashes):
     ★ V2.3.9：以前下完只做木马特征扫描，不校验内容完整性 ——
       镜像/代理返回半截文件、被中间盒替换、CDN 传坏，都会"装成功"
       然后启动报 ZipException。现在按 sha512（回退 sha1）比对。
-      没有哈希信息的源（GitHub/CF 老数据）一律放行，不影响原有流程。
+      没有哈希信息的源（GitHub 等）一律放行，不影响原有流程。
+    ★ V2.4.0：加 md5 —— CurseForge 只给 sha1/md5（algo 1/2），
+      没有 sha512。强哈希优先，弱哈希只在前者缺失时使用。
     """
     if not hashes:
         return True, ""
-    for algo in ("sha512", "sha1"):
+    for algo in ("sha512", "sha1", "md5"):
         want = (hashes.get(algo) or "").strip().lower()
         if len(want) < 32:
             continue
@@ -2247,7 +2315,7 @@ def verify_download(path, hashes):
 
 
 def _download_with_fallback(url, dest, timeout=180, on_retry=None, on_log=None,
-                            hashes=None):
+                            hashes=None, on_bytes=None, cancel=None):
     """下载文件：镜像 CDN 优先，失败/校验不过自动回退官方 CDN。
 
     ★ V1.9.4：实测官方 cdn.modrinth.com 在本机读超时、MCIM CDN 正常；
@@ -2255,6 +2323,9 @@ def _download_with_fallback(url, dest, timeout=180, on_retry=None, on_log=None,
       避免"卡在下载上转圈"。
     ★ V2.3.9：带 hashes 时每个源下完都校验，不一致就删掉换下一个源；
       两个源都拿不到正确文件就抛错（绝不让坏 jar 躺进 mods/）。
+    ★ V2.4.0：支持取消（cancel）与字节进度（on_bytes）。
+      ★ 取消必须立刻往上抛 —— 否则会被当成"这个源坏了"去试下一个源，
+        用户点了取消还在后台偷偷下一遍。
     """
     def log(m):
         if on_log:
@@ -2267,10 +2338,13 @@ def _download_with_fallback(url, dest, timeout=180, on_retry=None, on_log=None,
         cands.append(url)
     last = None
     for idx, u in enumerate(cands):
+        _check_cancel(cancel)
         tail = idx + 1 < len(cands)
         try:
             _download(u, dest, timeout=timeout, on_retry=on_retry,
-                      on_log=on_log)
+                      on_log=on_log, on_bytes=on_bytes, cancel=cancel)
+        except InstallCancelled:
+            raise
         except Exception as e:
             last = e
             if tail:
@@ -2480,12 +2554,9 @@ def probe_compat(meta, mc_version, loader):
 
 # ---- 推荐适配探测缓存（跨会话复用，TTL 24h，放项目根） ----
 def compat_cache_path():
-    try:
-        base = os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__))))
-    except Exception:
-        base = os.getcwd()
-    return os.path.join(base, "compat_cache.json")
+    """适配探测缓存（★ V2.4.0：统一走 paths，不再落进 _internal/）。"""
+    from .. import paths
+    return paths.data_file("compat_cache.json")
 
 
 def compat_cache_load(ttl=86400):
@@ -2532,8 +2603,52 @@ def _scan_jar_virus(jar_path):
     return False
 
 
+class _ByteMeter:
+    """多线程下载的总字节计量（★ V2.4.0）。
+
+    4 个线程各下一个文件，每个线程只知道自己的进度；这里汇总成
+    "整批已下载 / 整批总大小 / 实时速度"给进度条用。
+    速度每 0.5 秒采样一次并做指数平滑，避免数字乱跳。
+    """
+
+    def __init__(self, emit, interval=0.35):
+        self._emit = emit
+        self._interval = interval
+        self._lock = threading.Lock()
+        self._done = 0
+        self._totals = {}
+        self._t_last = time.time()
+        self._b_last = 0
+        self._speed = 0.0
+        self._t_emit = 0.0
+
+    def add(self, key, n, total=0):
+        with self._lock:
+            self._done += n
+            if total and total > self._totals.get(key, 0):
+                self._totals[key] = total
+            now = time.time()
+            dt = now - self._t_last
+            if dt >= 0.5:
+                inst = (self._done - self._b_last) / dt
+                self._speed = inst if self._speed <= 0 \
+                    else self._speed * 0.5 + inst * 0.5
+                self._t_last, self._b_last = now, self._done
+            if now - self._t_emit < self._interval:
+                return
+            self._t_emit = now
+            done = self._done
+            total_all = sum(self._totals.values())
+            speed = self._speed
+        try:
+            self._emit(done, total_all, speed)
+        except Exception:
+            pass
+
+
 def install_mods(server_dir, mc_version, loader, on_log=None,
-                 only=None, on_progress=None, auto_deps=True):
+                 only=None, on_progress=None, auto_deps=True,
+                 on_bytes=None, cancel=None):
     """并发下载优化模组到 server_dir/mods。
 
     ★ v5.x：4 线程并发 + MCIM CDN 加速 + Fractureiser 木马扫描，
@@ -2541,6 +2656,8 @@ def install_mods(server_dir, mc_version, loader, on_log=None,
     ★ V2.3.9：新增 on_progress(已完成, 总数, 正在装的) 进度回调；
       新增 auto_deps —— 全库搜索勾的模组按 Modrinth 元数据自动补前置。
       下载完按 sha512 校验，坏文件直接丢掉换源。
+    ★ V2.4.0：新增 on_bytes(已下载字节, 总字节, 字节/秒) 与 cancel
+      （threading.Event）—— 支持显示网速、以及中途取消。
     """
     def log(m):
         if on_log:
@@ -2606,11 +2723,18 @@ def install_mods(server_dir, mc_version, loader, on_log=None,
             except Exception as e:
                 log("  · 前置解析失败（%s），按原样安装" % _brief(e))
     ok_list, fail_list, skipped = [], [], []
+    # ★ V2.4.0：整批的字节计量（网速 / 已下载多少 MB）
+    meter = _ByteMeter(on_bytes) if on_bytes else None
 
     # ---- 单个模组的下载任务（供线程池调用）----
     def _download_task(slug):
         meta = mod_meta(loader, slug)
         desc = (meta or {}).get("name") or slug
+
+        def _bytes_cb(n, total=0):
+            if meter is not None:
+                meter.add(slug, n, total)
+
         # ★ V1.8.6：内置清单可指定 source="curseforge"（如 Cupboard 生态），
         #   只有 CF 发布的项目走 CurseForge 下载引擎，其余保持 Modrinth。
         src = (meta or {}).get("source") or "modrinth"
@@ -2619,7 +2743,8 @@ def install_mods(server_dir, mc_version, loader, on_log=None,
                 from . import modman as _mm
                 r = _mm.install_from_project(
                     slug, mc_version, loader, mods_dir,
-                    on_log=log, source="curseforge")
+                    on_log=log, source="curseforge",
+                    on_bytes=_bytes_cb, cancel=cancel)
                 if not r.get("ok"):
                     return False, slug, desc, \
                         r.get("reason") or "CurseForge 下载失败"
@@ -2658,7 +2783,8 @@ def install_mods(server_dir, mc_version, loader, on_log=None,
             # ★ CDN 加速 + 断点续传 + sha512 完整性校验（V2.3.9）
             _download_with_fallback(v["url"], dest,
                                     on_retry=_note, on_log=log,
-                                    hashes=v.get("hashes"))
+                                    hashes=v.get("hashes"),
+                                    on_bytes=_bytes_cb, cancel=cancel)
 
             # ★ 下载后安全扫描（Fractureiser 木马）
             if _scan_jar_virus(dest):
@@ -2671,6 +2797,8 @@ def install_mods(server_dir, mc_version, loader, on_log=None,
             _evict_same_mod_id(dest, os.path.dirname(dest), log)
             log("  [OK] %s" % v["name"])
             return True, slug, desc, v["name"]
+        except InstallCancelled:
+            raise
         except Exception as e:
             log("  [跳过] %s - %s" % (desc, _brief(e)))
             return False, slug, desc, _brief(e)
@@ -2690,19 +2818,28 @@ def install_mods(server_dir, mc_version, loader, on_log=None,
             valid_slugs.append(slug)
 
     # ---- 并发下载（4 线程）----
+    cancelled = False
     if valid_slugs:
         total = len(valid_slugs)
         log("开始并发下载 %d 个模组（4 线程）..." % total)
         prog(0, total, "准备下载")
         done = 0
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+        try:
             future_to_slug = {
                 executor.submit(_download_task, slug): slug
                 for slug in valid_slugs
             }
             for future in concurrent.futures.as_completed(future_to_slug):
+                # ★ V2.4.0：用户点了取消 —— 立即停止派发新结果
+                if cancel is not None and cancel.is_set():
+                    cancelled = True
+                    break
                 try:
                     success, slug, desc, result = future.result()
+                except InstallCancelled:
+                    cancelled = True
+                    break
                 except Exception as e:  # 任务本身异常也要兜住，别让 UI 崩
                     slug = future_to_slug[future]
                     success, desc, result = False, slug, _brief(e)
@@ -2714,6 +2851,15 @@ def install_mods(server_dir, mc_version, loader, on_log=None,
                                       "reason": result})
                 # 进度：已完成/总数 + 刚装完/刚失败的名字
                 prog(done, total, desc)
+        finally:
+            # 取消：不等剩下的线程（它们每个分块都会自查取消，1MB 内退出）
+            executor.shutdown(wait=not cancelled,
+                              cancel_futures=cancelled)
+
+    if cancelled:
+        log("")
+        log("★ 已取消：本次装完 %d 个，其余未下载（已下完的文件都是完整的）"
+            % len(ok_list))
 
     if skipped:
         log("")
@@ -2731,11 +2877,13 @@ def install_mods(server_dir, mc_version, loader, on_log=None,
                 "（未发布 / 无适配版本 / 需手动装），按提示处理。")
     return {"ok": ok_list, "fail": fail_list, "skipped": skipped,
             "notes": plan.get("notes") or [],
-            "conflicts": plan.get("conflicts") or []}
+            "conflicts": plan.get("conflicts") or [],
+            "cancelled": cancelled}
 
 
 def install_plugins(server_dir, mc_version, loader="paper", only=None,
-                    on_log=None, on_progress=None, auto_deps=True):
+                    on_log=None, on_progress=None, auto_deps=True,
+                    on_bytes=None, cancel=None):
     """并发下载插件到 server_dir/plugins。
 
     ★ V1.2.0：与 install_mods 逻辑一致（4 线程并发 + CDN 加速 +
@@ -2804,10 +2952,25 @@ def install_plugins(server_dir, mc_version, loader="paper", only=None,
             except Exception as e:
                 log("  · 前置解析失败（%s），按原样安装" % _brief(e))
     ok_list, fail_list, skipped = [], [], []
+    meter = _ByteMeter(on_bytes) if on_bytes else None
 
     def _download_task(slug):
         meta = plugin_meta(slug)
         desc = (meta or {}).get("name") or slug
+
+        def _bytes_cb(n, total=0):
+            if meter is not None:
+                meter.add(slug, n, total)
+
+        # ★ V2.4.0：_note 必须定义在最前面 —— 以前它写在 GitHub 分支
+        #   后面，而 GitHub 分支里就引用了它，Python 会判成
+        #   "引用了还没赋值的局部变量"(UnboundLocalError)。
+        #   于是 MultiLogin 这类只发 GitHub 的插件一装就失败，
+        #   日志只有一行看不懂的异常。
+        def _note(attempt, e, wait):
+            log("    [%s] 网络不稳（%s），%.1fs 后重试..."
+                % (desc, _brief(e), wait))
+
         # ★ V1.9.4：GitHub 发布的插件（如 MultiLogin）优先走 repo 分支
         repo = (meta or {}).get("repo")
         # ★ V1.8.6：插件清单 + paper 组（Cupboard 生态）都可指定
@@ -2825,7 +2988,8 @@ def install_plugins(server_dir, mc_version, loader="paper", only=None,
                     return False, slug, desc, \
                         r.get("err") or "GitHub 没有可用的插件 jar"
                 dest = os.path.join(plugins_dir, r["filename"])
-                _download(r["url"], dest, on_retry=_note, on_log=log)
+                _download(r["url"], dest, on_retry=_note, on_log=log,
+                          on_bytes=_bytes_cb, cancel=cancel)
                 if _scan_jar_virus(dest):
                     try:
                         os.remove(dest)
@@ -2839,7 +3003,8 @@ def install_plugins(server_dir, mc_version, loader="paper", only=None,
                 from . import modman as _mm
                 r = _mm.install_from_project(
                     slug, mc_version, loader or "paper", plugins_dir,
-                    on_log=log, source="curseforge")
+                    on_log=log, source="curseforge",
+                    on_bytes=_bytes_cb, cancel=cancel)
                 if not r.get("ok"):
                     return False, slug, desc, \
                         r.get("reason") or "CurseForge 下载失败"
@@ -2855,9 +3020,6 @@ def install_plugins(server_dir, mc_version, loader="paper", only=None,
                 log("  [OK] %s" % (r.get("file") or desc))
                 return True, slug, desc, r.get("file") or desc
 
-            def _note(attempt, e, wait):
-                log("    [%s] 网络不稳（%s），%.1fs 后重试..."
-                    % (desc, _brief(e), wait))
             # ★ V1.7.0-3：插件按服务器实际加载器过滤（不再写死 paper）
             # ★ V2.3.9：前置解析阶段查过的版本直接复用
             v = ver_cache.get(slug)
@@ -2872,7 +3034,8 @@ def install_plugins(server_dir, mc_version, loader="paper", only=None,
                 from . import modman as _mm
                 r = _mm.install_from_project(
                     slug, mc_version, loader or "paper", plugins_dir,
-                    on_log=log, source="curseforge")
+                    on_log=log, source="curseforge",
+                    on_bytes=_bytes_cb, cancel=cancel)
                 if r.get("ok"):
                     dest = os.path.join(plugins_dir, r.get("file") or "")
                     if _scan_jar_virus(dest):
@@ -2895,7 +3058,8 @@ def install_plugins(server_dir, mc_version, loader="paper", only=None,
             # ★ V2.3.9：加 sha512 完整性校验
             _download_with_fallback(v["url"], dest,
                                     on_retry=_note, on_log=log,
-                                    hashes=v.get("hashes"))
+                                    hashes=v.get("hashes"),
+                                    on_bytes=_bytes_cb, cancel=cancel)
 
             # ★ 下载后安全扫描（Fractureiser 木马）
             if _scan_jar_virus(dest):
@@ -2908,6 +3072,8 @@ def install_plugins(server_dir, mc_version, loader="paper", only=None,
             _evict_same_mod_id(dest, os.path.dirname(dest), log)
             log("  [OK] %s" % v["name"])
             return True, slug, desc, v["name"]
+        except InstallCancelled:
+            raise
         except Exception as e:
             log("  [跳过] %s - %s" % (desc, _brief(e)))
             return False, slug, desc, _brief(e)
@@ -2927,19 +3093,27 @@ def install_plugins(server_dir, mc_version, loader="paper", only=None,
             valid_slugs.append(slug)
 
     # ---- 并发下载（4 线程）----
+    cancelled = False
     if valid_slugs:
         total = len(valid_slugs)
         log("开始并发下载 %d 个插件（4 线程，前置优先）..." % total)
         prog(0, total, "准备下载")
         done = 0
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+        try:
             future_to_slug = {
                 executor.submit(_download_task, slug): slug
                 for slug in valid_slugs
             }
             for future in concurrent.futures.as_completed(future_to_slug):
+                if cancel is not None and cancel.is_set():
+                    cancelled = True
+                    break
                 try:
                     success, slug, desc, result = future.result()
+                except InstallCancelled:
+                    cancelled = True
+                    break
                 except Exception as e:  # 任务本身异常也要兜住，别让 UI 崩
                     slug = future_to_slug[future]
                     success, desc, result = False, slug, _brief(e)
@@ -2950,6 +3124,14 @@ def install_plugins(server_dir, mc_version, loader="paper", only=None,
                     fail_list.append({"slug": slug, "name": desc,
                                       "reason": result})
                 prog(done, total, desc)
+        finally:
+            executor.shutdown(wait=not cancelled,
+                              cancel_futures=cancelled)
+
+    if cancelled:
+        log("")
+        log("★ 已取消：本次装完 %d 个，其余未下载（已下完的文件都是完整的）"
+            % len(ok_list))
 
     if skipped:
         log("")
@@ -2966,7 +3148,8 @@ def install_plugins(server_dir, mc_version, loader="paper", only=None,
                 "（未发布 / 无适配版本 / 需手动装），按提示处理。")
     return {"ok": ok_list, "fail": fail_list, "skipped": skipped,
             "notes": plan.get("notes") or [],
-            "conflicts": plan.get("conflicts") or []}
+            "conflicts": plan.get("conflicts") or [],
+            "cancelled": cancelled}
 
 
 # ★ V1.3.0：多源登录组件（默认走 Modrinth 下载引擎；★ V1.9.4

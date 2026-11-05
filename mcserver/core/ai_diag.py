@@ -36,9 +36,13 @@ MAX_CHARS = 20000     # 防止日志太大把 token 烧光
 
 
 def cfg_path():
-    """AI 配置存 ai.json（与 servers.json 同目录）。"""
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "..", "ai.json")
+    """AI 配置存 ai.json（与 servers.json 同目录）。
+
+    ★ V2.4.0：以前拼成 `mcserver/../ai.json`，和 servers.json
+      不在同一层，打包后还落进 _internal/。统一走 paths。
+    """
+    from .. import paths
+    return paths.data_file("ai.json")
 
 
 def load_cfg():

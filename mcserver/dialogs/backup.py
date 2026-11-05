@@ -20,6 +20,37 @@ from .base import BaseDialog
 from ..core.palette import PAL
 
 
+def _default_migrate_dst():
+    """搬迁目标的默认值：用户目录\\MCServers。
+
+    ★ V2.4.0：原来写死 "G:\\MCServers"（作者的备份盘）。
+      别人的电脑没有 G 盘，点『执行搬迁』直接失败，还以为是软件坏了。
+      现在取"任何 Windows 都有"的用户目录；若那里所在盘恰好不可写，
+      再退到系统临时目录的上一级，保证总有一个能用的路径。
+    """
+    cands = []
+    try:
+        home = os.path.expanduser("~")
+        if home and home != "~":
+            cands.append(os.path.join(home, "MCServers"))
+    except Exception:
+        pass
+    for env in ("USERPROFILE", "LOCALAPPDATA", "TEMP", "TMP"):
+        v = os.environ.get(env)
+        if v:
+            cands.append(os.path.join(v, "MCServers"))
+    # 用户目录所在盘是不是真的存在（外接盘拔掉、漫游配置异常时会没有）
+    for p in cands:
+        try:
+            drive = os.path.splitdrive(os.path.abspath(p))[0]
+            if drive and not os.path.isdir(drive + os.sep):
+                continue
+            return p
+        except Exception:
+            continue
+    return ""
+
+
 class BackupDialog(BaseDialog):
     """备份管理：列出该服的存档和已有备份，支持备份/恢复/删除。"""
 
@@ -370,7 +401,11 @@ class MigrateDialog(BaseDialog):
 
         h2 = QHBoxLayout()
         h2.addWidget(QLabel("目标:"))
-        self.ed_dst = QLineEdit("G:\\MCServers")
+        # ★ V2.4.0：这里原来写死 "G:\\MCServers" —— 那是我这台机器的
+        #   备份盘，别人的电脑根本没有 G 盘，一点"执行搬迁"就报错。
+        #   现在默认放"用户目录\MCServers"（任何 Windows 都有），
+        #   用户也可以自己点『选择...』改成别的盘。
+        self.ed_dst = QLineEdit(_default_migrate_dst())
         h2.addWidget(self.ed_dst, 1)
         b2 = QPushButton("选择...")
         b2.clicked.connect(self.pick_dst)
