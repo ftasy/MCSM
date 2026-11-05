@@ -881,6 +881,45 @@ def _on_bg(c):
     return t.on_bg(c) if t else c
 
 
+def java_pid_alive(pid):
+    """★ V2.4.1：判断 pid 是不是一个**还活着的 java 进程**。
+
+    旧检查只看 OpenProcess 能不能拿到句柄 —— 但 Windows 对
+    "已退出但句柄还被别人握着"的僵尸进程照样返回句柄；PID 被
+    别的程序复用时更是直接误报"服务器在运行"（用户实测踩坑：
+    退出保留后 java 已死，重启却显示运行中，还停止不掉）。
+    这里三重确认：
+      1. OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) 拿到句柄
+      2. GetExitCodeProcess != STILL_ACTIVE(259)
+      3. 进程可执行文件名含 "java"（PID 复用时绝不误报/误杀）
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x1000, False, int(pid))
+        if not h:
+            return False
+        try:
+            code = wintypes.DWORD(0)
+            if not k32.GetExitCodeProcess(h, ctypes.byref(code)):
+                return False
+            if code.value != 259:      # 259 = STILL_ACTIVE
+                return False
+            # 活着 → 再确认是 java（防 PID 复用）
+            buf = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(1024)
+            if k32.QueryFullProcessImageNameW(h, 0, buf,
+                                              ctypes.byref(size)):
+                name = os.path.basename(buf.value).lower()
+                return "java" in name
+            return True
+        finally:
+            k32.CloseHandle(h)
+    except Exception:
+        return False
+
+
 class ReattachedProcess:
     """V2.1.0: Wrapper for a server process from a previous manager instance."""
     def __init__(self, pid, server_dir, name=""):
@@ -890,15 +929,8 @@ class ReattachedProcess:
         self._alive = self._check_alive()
 
     def _check_alive(self):
-        try:
-            import ctypes
-            h = ctypes.windll.kernel32.OpenProcess(0x1000, False, self._pid)
-            if h:
-                ctypes.windll.kernel32.CloseHandle(h)
-                return True
-            return False
-        except Exception:
-            return False
+        # ★ V2.4.1：改用 java_pid_alive（退出码 + 映像名双重校验）
+        return java_pid_alive(self._pid)
     def write(self, data):
         cmd = data.decode("utf-8", "replace").strip().lower()
         if cmd == "stop":

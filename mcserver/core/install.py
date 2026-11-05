@@ -2048,8 +2048,20 @@ def _pick_best(versions, prefer=None):
     上普通版 Mixin 注入崩溃（collisionShape @Shadow 找不到字段），
     官方出了 hotfix 版。传 prefer="hotfix" 时只从版本名含该关键词的
     版本里挑，避免挑回会崩的普通版。
+    ★ V2.4.1：官方 API 返回"最新在前"，但 MCIM 镜像的顺序是乱的
+      （实测 fabric-api 1.20.1：MCIM 把 2026-09 的最新版排在最后、
+      2024-05 的旧版排第一）—— 以前直接取第一个 release，
+      auto 模式（先走 MCIM）就会装到旧版本。现在显式按
+      date_published 倒序排，不再依赖接口的返回顺序。
     """
-    sorted_vs = sorted(versions, key=lambda v: 0 if v.get("version_type") == "release" else 1)
+    def _date_key(v):
+        # date_published 是 ISO8601 字符串，字典序 = 时间序；
+        # 缺失时排最后（拿不到时间的不敢当最新）。
+        return v.get("date_published") or ""
+    # 先按日期倒序（最新在前），再稳定排序把 release 提前（组内保序）。
+    sorted_vs = sorted(
+        sorted(versions, key=_date_key, reverse=True),
+        key=lambda v: 0 if v.get("version_type") == "release" else 1)
     if prefer:
         hit = [v for v in sorted_vs
                if prefer in (v.get("version_number") or "")]

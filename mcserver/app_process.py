@@ -5,6 +5,7 @@
 """
 
 import os
+import sys
 import traceback
 import logging
 
@@ -846,7 +847,21 @@ class ProcessMixin:
                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
                 if r != QMessageBox.Yes:
                     return
-                ask = False
+                # ★ V2.4.1：接管服的"停止"就是直接结束 —— 不再走
+                #   write("stop") + 等 8 秒的老路径。以前那条路对
+                #   ReattachedProcess 毫无作用（管道早断了），只能干等
+                #   3 秒一次的日志轮询才发现"其实早死了"，表现就是
+                #   "点停止卡很久才显示已退出"。现在立刻结束 + 立刻收尾。
+                self._is_stopping[k] = True
+                self._log_console(
+                    "=== 已强制结束接管的进程（PID=%s）==="
+                    % proc.processId())
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                self._finished(proc, 0)
+                return
         except Exception:
             pass
         if ask:
@@ -1067,6 +1082,22 @@ class ProcessMixin:
         except Exception:
             pass
         ev.accept()
+        # ★ V2.4.1：保留了服务器进程时必须 os._exit ——
+        #   实测 QProcess 的析构函数会 kill 子进程（哪怕已经
+        #   setParent(None) + 断信号 + 放进 _LIVE_PROCS）。
+        #   正常退出路径是：解释器关闭 → 清空全局引用 → QProcess
+        #   析构 → java 被杀 —— 这就是"选了退出并保留，后台却
+        #   看不到服务器进程"的根因。os._exit(0) 跳过一切析构，
+        #   java 才能真正留下来（.mcsm_pid 早已写好，重开可接管）。
+        #   数据都在 accept 前用原子写落盘了，这里跳过清理是安全的。
+        if getattr(ProcessMixin, "_LIVE_PROCS", None):
+            try:
+                sys.stdout.flush()
+                sys.stderr.flush()
+                logging.shutdown()
+            except Exception:
+                pass
+            os._exit(0)
 
     def _wait_stop_then_exit(self):
         """等服务器都停下再退出（最多等 _exit_wait_left 秒）。"""

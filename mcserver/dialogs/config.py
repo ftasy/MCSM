@@ -607,16 +607,16 @@ class ServerConfigDialog(BaseDialog):
         except Exception:
             self.mod_mods = []
 
-        self.mod_table = QTableWidget(0, 5)
+        self.mod_table = QTableWidget(0, 6)
         self.mod_table.setHorizontalHeaderLabels(
-            ["状态", "名称", "版本", "最新版本", "文件"])
+            ["选", "状态", "名称", "版本", "最新版本", "文件"])
         self.mod_table.verticalHeader().setVisible(False)
         self.mod_table.setEditTriggers(
             QAbstractItemView.NoEditTriggers)
         self.mod_table.setSelectionBehavior(
             QAbstractItemView.SelectRows)
         hh = self.mod_table.horizontalHeader()
-        for i, m in enumerate((80, 200, 140, 140, 1)):
+        for i, m in enumerate((36, 70, 200, 140, 140, 1)):
             hh.setSectionResizeMode(
                 i, QHeaderView.ResizeToContents if m != 1
                 else QHeaderView.Stretch)
@@ -628,21 +628,33 @@ class ServerConfigDialog(BaseDialog):
         for m in self.mod_mods:
             r = self.mod_table.rowCount()
             self.mod_table.insertRow(r)
-            self.mod_table.setItem(r, 0, QTableWidgetItem(
+            self._set_check_cell(self.mod_table, r, 0)
+            self.mod_table.setItem(r, 1, QTableWidgetItem(
                 "启用" if m.get("enabled", True) else "禁用"))
-            self.mod_table.setItem(r, 1,
-                                   QTableWidgetItem(m.get("name", "?")))
             self.mod_table.setItem(r, 2,
+                                   QTableWidgetItem(m.get("name", "?")))
+            self.mod_table.setItem(r, 3,
                                    QTableWidgetItem(m.get("version", "")))
-            self.mod_table.setItem(r, 3, QTableWidgetItem("-"))
-            self.mod_table.setItem(r, 4, QTableWidgetItem(
+            self.mod_table.setItem(r, 4, QTableWidgetItem("-"))
+            self.mod_table.setItem(r, 5, QTableWidgetItem(
                 os.path.basename(m.get("path", ""))))
 
         hb = QHBoxLayout()
-        b_en = QPushButton("启用")
+        # ★ V2.4.1：勾选列配套的全选/清空（表格是复选框多选，
+        #   一次启用/禁用/查更新/下更新 N 个，不用再一行行点）
+        b_all = QPushButton("全选")
+        b_all.setToolTip("勾选表格里全部模组（配合批量启用/禁用/检查更新）")
+        b_all.clicked.connect(lambda: self._set_all_checks(self.mod_table,
+                                                           True))
+        hb.addWidget(b_all)
+        b_none = QPushButton("清空勾选")
+        b_none.clicked.connect(lambda: self._set_all_checks(self.mod_table,
+                                                            False))
+        hb.addWidget(b_none)
+        b_en = QPushButton("启用（勾选项）")
         b_en.clicked.connect(lambda: self._toggle_mod(True))
         hb.addWidget(b_en)
-        b_dis = QPushButton("禁用")
+        b_dis = QPushButton("禁用（勾选项）")
         b_dis.clicked.connect(lambda: self._toggle_mod(False))
         hb.addWidget(b_dis)
         b_open = QPushButton("打开 mods 文件夹")
@@ -671,20 +683,50 @@ class ServerConfigDialog(BaseDialog):
         b_api.clicked.connect(self._update_fapi_here)
         hb2.addWidget(b_api)
         # ★ V2.0.9：已装模组管理的"检查更新/下载更新"移到这里
-        b_chk = QPushButton("检查更新（选中）")
-        b_chk.setToolTip("检查表格里选中的已装模组有没有新版本（结果写『最新版本』列）")
+        # ★ V2.4.1：按勾选批量操作；下载不再开浏览器，直接走源下载替换
+        b_chk = QPushButton("检查更新（勾选项）")
+        b_chk.setToolTip("检查表格里勾选的已装模组有没有新版本"
+                         "（没勾选就看当前行，结果写『最新版本』列）")
         b_chk.clicked.connect(lambda: self._check_mod_updates_here(True))
         hb2.addWidget(b_chk)
         b_chkall = QPushButton("一键检查全部更新")
         b_chkall.clicked.connect(lambda: self._check_mod_updates_here(False))
         hb2.addWidget(b_chkall)
-        b_dlupd = QPushButton("下载选中项的更新")
-        b_dlupd.setToolTip("打开表格里选中模组的更新下载页（需先检查过更新）")
+        b_dlupd = QPushButton("下载勾选项的更新")
+        b_dlupd.setToolTip("把勾选模组的新版本直接下载替换"
+                           "（走镜像源，带哈希校验，旧文件进 .mcsm_replaced）")
         b_dlupd.clicked.connect(self._download_mod_update_here)
         hb2.addWidget(b_dlupd)
         hb2.addStretch(1)
         v.addLayout(hb2)
         return w
+
+    # ---------- 勾选列工具（★ V2.4.1：模组/插件表通用） ----------
+    @staticmethod
+    def _set_check_cell(table, row, col=0):
+        """给单元格放一个可勾选的空项（三态关掉，就是普通勾选框）。"""
+        it = QTableWidgetItem()
+        it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+        it.setCheckState(Qt.Unchecked)
+        table.setItem(row, col, it)
+
+    @staticmethod
+    def _set_all_checks(table, on):
+        """全选 / 清空勾选。"""
+        for r in range(table.rowCount()):
+            it = table.item(r, 0)
+            if it is not None and (it.flags() & Qt.ItemIsUserCheckable):
+                it.setCheckState(Qt.Checked if on else Qt.Unchecked)
+
+    @staticmethod
+    def _checked_rows(table):
+        """返回勾选了的行号列表。"""
+        out = []
+        for r in range(table.rowCount()):
+            it = table.item(r, 0)
+            if it is not None and it.checkState() == Qt.Checked:
+                out.append(r)
+        return out
 
     # ---------- 插件页签（★ V1.2.0，Paper 专用） ----------
     def _plugins_dir_here(self):
@@ -699,16 +741,16 @@ class ServerConfigDialog(BaseDialog):
         except Exception:
             self.plugins = []
 
-        self.plugin_table = QTableWidget(0, 4)
+        self.plugin_table = QTableWidget(0, 5)
         self.plugin_table.setHorizontalHeaderLabels(
-            ["状态", "名称", "版本", "文件"])
+            ["选", "状态", "名称", "版本", "文件"])
         self.plugin_table.verticalHeader().setVisible(False)
         self.plugin_table.setEditTriggers(
             QAbstractItemView.NoEditTriggers)
         self.plugin_table.setSelectionBehavior(
             QAbstractItemView.SelectRows)
         hh = self.plugin_table.horizontalHeader()
-        for i, m in enumerate((80, 200, 140, 1)):
+        for i, m in enumerate((36, 70, 200, 140, 1)):
             hh.setSectionResizeMode(
                 i, QHeaderView.ResizeToContents if m != 1
                 else QHeaderView.Stretch)
@@ -718,10 +760,19 @@ class ServerConfigDialog(BaseDialog):
 
         # ---- 第一行：启用/禁用/打开目录 ----
         hb = QHBoxLayout()
-        b_en = QPushButton("启用")
+        # ★ V2.4.1：勾选列配套（与模组页一致，可批量操作）
+        b_all = QPushButton("全选")
+        b_all.clicked.connect(lambda: self._set_all_checks(self.plugin_table,
+                                                           True))
+        hb.addWidget(b_all)
+        b_none = QPushButton("清空勾选")
+        b_none.clicked.connect(lambda: self._set_all_checks(
+            self.plugin_table, False))
+        hb.addWidget(b_none)
+        b_en = QPushButton("启用（勾选项）")
         b_en.clicked.connect(lambda: self._toggle_plugin(True))
         hb.addWidget(b_en)
-        b_dis = QPushButton("禁用")
+        b_dis = QPushButton("禁用（勾选项）")
         b_dis.clicked.connect(lambda: self._toggle_plugin(False))
         hb.addWidget(b_dis)
         b_open = QPushButton("打开 plugins 文件夹")
@@ -747,13 +798,14 @@ class ServerConfigDialog(BaseDialog):
         for p in self.plugins:
             r = self.plugin_table.rowCount()
             self.plugin_table.insertRow(r)
-            self.plugin_table.setItem(r, 0, QTableWidgetItem(
+            self._set_check_cell(self.plugin_table, r, 0)
+            self.plugin_table.setItem(r, 1, QTableWidgetItem(
                 "启用" if p.get("enabled", True) else "禁用"))
-            self.plugin_table.setItem(r, 1,
-                                      QTableWidgetItem(p.get("name", "?")))
             self.plugin_table.setItem(r, 2,
+                                      QTableWidgetItem(p.get("name", "?")))
+            self.plugin_table.setItem(r, 3,
                                       QTableWidgetItem(p.get("version", "")))
-            self.plugin_table.setItem(r, 3, QTableWidgetItem(
+            self.plugin_table.setItem(r, 4, QTableWidgetItem(
                 os.path.basename(p.get("path", ""))))
 
     def _cur_plugin(self):
@@ -763,20 +815,36 @@ class ServerConfigDialog(BaseDialog):
         return None
 
     def _toggle_plugin(self, enable):
-        p = self._cur_plugin()
-        if not p:
-            QMessageBox.information(self, "提示", "先选中一个插件")
-            return
-        try:
-            modman.set_enabled(p["path"], enable)
-            self._need_rescan = True
-            self._refresh_plugins_here()
+        """★ V2.4.1：按勾选批量启用/禁用（没勾选时退回当前行）。"""
+        rows = self._checked_rows(self.plugin_table)
+        if rows:
+            pls = [self.plugins[r] for r in rows if r < len(self.plugins)]
+        else:
+            p0 = self._cur_plugin()
+            pls = [p0] if p0 else []
+        if not pls:
             QMessageBox.information(
-                self, "完成",
-                "已%s: %s\n\n重启服务器后生效。"
-                % ("启用" if enable else "禁用", p.get("name")))
-        except Exception as e:
-            QMessageBox.critical(self, "失败", repr(e))
+                self, "提示", "先勾选要%s的插件（或选中一行）"
+                % ("启用" if enable else "禁用"))
+            return
+        done, failed = 0, []
+        for p in pls:
+            try:
+                modman.set_enabled(p["path"], enable)
+                done += 1
+            except Exception as e:
+                failed.append("%s: %r" % (p.get("name") or "?", e))
+        self._need_rescan = True
+        self._refresh_plugins_here()
+        if failed:
+            QMessageBox.warning(
+                self, "部分失败",
+                "已%s %d 个，失败 %d 个：\n%s"
+                % ("启用" if enable else "禁用", done, len(failed),
+                   "\n".join(failed[:8])))
+        else:
+            self._log("已%s %d 个插件（重启服务器后生效）"
+                      % ("启用" if enable else "禁用", done))
 
     def _open_plugins_here(self):
         _open_in_explorer(self._plugins_dir_here())
@@ -1305,7 +1373,11 @@ class ServerConfigDialog(BaseDialog):
 
     # ---------- ★ V2.0.9：已装模组"检查更新/下载更新"搬到配置窗 ----------
     def _check_mod_updates_here(self, only_sel=True):
-        """检查选中/全部已装模组的更新，结果写『最新版本』列。"""
+        """检查勾选/全部已装模组的更新，结果写『最新版本』列。
+
+        ★ V2.4.1：表格改成勾选列后，"选中"以勾选为准
+          （没勾任何一项时退回当前行，行为和老版一致）。
+        """
         loader = (self.entry.get("loader") or "").lower()
         mc = (self.entry.get("version") or "").strip()
         if not mc or loader in ("", "unknown", "paper", "vanilla"):
@@ -1315,12 +1387,18 @@ class ServerConfigDialog(BaseDialog):
                 "才能查更新。当前：%s + %s" % (mc or "?", loader or "?"))
             return
         if only_sel:
-            r = self.mod_table.currentRow()
-            if r < 0 or r >= len(self.mod_mods):
-                QMessageBox.information(
-                    self, "提示", "先在表格里选中一个已装模组")
-                return
-            mods = [self.mod_mods[r]]
+            rows = self._checked_rows(self.mod_table)
+            if rows:
+                mods = [self.mod_mods[r] for r in rows
+                        if r < len(self.mod_mods)]
+            else:
+                r = self.mod_table.currentRow()
+                if r < 0 or r >= len(self.mod_mods):
+                    QMessageBox.information(
+                        self, "提示", "先在表格里勾选要检查的模组"
+                        "（或选中一行）")
+                    return
+                mods = [self.mod_mods[r]]
         else:
             mods = list(self.mod_mods)
         if not mods:
@@ -1331,7 +1409,7 @@ class ServerConfigDialog(BaseDialog):
         for m in mods:
             r = self._row_of_mod_here(m)
             if r is not None:
-                self.mod_table.setItem(r, 3, QTableWidgetItem("查询中..."))
+                self.mod_table.setItem(r, 4, QTableWidgetItem("查询中..."))
             QApplication.processEvents()
             try:
                 res = modman.check_update(
@@ -1346,14 +1424,14 @@ class ServerConfigDialog(BaseDialog):
                 if status == "update":
                     col = QTableWidgetItem("%s ←可更新" % latest)
                     col.setForeground(QColor(_on_bg(PAL.WARN_LIGHT)))
-                    self.mod_table.setItem(r, 3, col)
+                    self.mod_table.setItem(r, 4, col)
                 elif status == "latest":
                     col = QTableWidgetItem("%s [最新]" % latest)
                     col.setForeground(QColor(_on_bg(PAL.SUCCESS)))
-                    self.mod_table.setItem(r, 3, col)
+                    self.mod_table.setItem(r, 4, col)
                 else:
                     self.mod_table.setItem(
-                        r, 3, QTableWidgetItem(
+                        r, 4, QTableWidgetItem(
                             (res.get("err") or "查询失败")[:20]))
             self._log("[更新检查] %s -> %s（%s）%s"
                       % (m.get("name") or "?", latest or "?",
@@ -1364,41 +1442,118 @@ class ServerConfigDialog(BaseDialog):
 
     def _row_of_mod_here(self, m):
         for i in range(self.mod_table.rowCount()):
-            it = self.mod_table.item(i, 4)
+            it = self.mod_table.item(i, 5)
             if it and it.text() == os.path.basename(m.get("path", "")):
                 return i
         return None
 
     def _download_mod_update_here(self):
-        """打开表格里选中模组的更新下载页（需先检查过更新）。"""
-        r = self.mod_table.currentRow()
-        if r < 0 or r >= len(self.mod_mods):
-            QMessageBox.information(self, "提示", "先选中一个已装模组")
-            return
-        m = self.mod_mods[r]
-        res = self._mod_results.get(m.get("path")) or {}
-        url = res.get("url") or ""
-        if not url:
-            QMessageBox.information(
-                self, "提示",
-                "这个模组还没检查过更新，先点『检查更新（选中）』。")
-            return
-        if res.get("status") == "latest":
-            rr = QMessageBox.question(
-                self, "已是最新",
-                "已是 %s。\n仍打开它的下载页吗？"
-                % (res.get("latest") or ""),
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            if rr != QMessageBox.Yes:
+        """★ V2.4.1：把勾选模组的更新直接下载替换（不再开浏览器）。
+
+        · 没勾选 → 退回当前行（老行为）
+        · 前置：先『检查更新』拿到新版本直链
+        · 下载在后台 Worker 里跑（走镜像源 + 哈希校验），
+          旧 jar 自动挪进 .mcsm_replaced/，完成后表格刷新
+        """
+        rows = self._checked_rows(self.mod_table)
+        if rows:
+            mods = [self.mod_mods[r] for r in rows if r < len(self.mod_mods)]
+        else:
+            r = self.mod_table.currentRow()
+            if r < 0 or r >= len(self.mod_mods):
+                QMessageBox.information(
+                    self, "提示", "先勾选要更新的模组（或选中一行）")
                 return
-        import webbrowser
-        try:
-            webbrowser.open(url)
-            self._log("已打开: %s" % url)
-        except Exception as e:
-            QMessageBox.warning(
-                self, "打不开",
-                "没法自动打开浏览器：%r\n\n链接：%s" % (e, url))
+            mods = [self.mod_mods[r]]
+        jobs = []
+        for m in mods:
+            res = self._mod_results.get(m.get("path")) or {}
+            if res.get("status") != "update":
+                self._log("[更新下载] 跳过 %s：%s"
+                          % (m.get("name") or "?",
+                             "还没检查过更新" if not res
+                             else "当前已是最新（%s）" % res.get("latest")))
+                continue
+            if not (res.get("file") or {}).get("url"):
+                self._log("[更新下载] 跳过 %s：没有直链"
+                          "（重新检查一次更新试试）" % (m.get("name") or "?"))
+                continue
+            jobs.append((m, res))
+        if not jobs:
+            QMessageBox.information(
+                self, "没有可下载的更新",
+                "勾选的模组里没有『可更新』的项。\n\n"
+                "先点『检查更新（勾选项）』，出现「←可更新」"
+                "再回来下载。")
+            return
+        self._log("[更新下载] 开始下载 %d 个更新（后台执行，"
+                  "下载完自动替换并刷新列表）..." % len(jobs))
+
+        def _job(on_log=None):
+            ok, fail = [], []
+            for m, res in jobs:
+                on_log("[更新下载] %s：%s -> %s"
+                       % (m.get("name") or "?", res.get("cur") or "?",
+                          res.get("latest") or "?"))
+                try:
+                    r = modman.download_update(m, res, on_log=on_log)
+                except Exception as e:
+                    r = {"ok": False, "reason": repr(e)}
+                (ok if r.get("ok") else fail).append(
+                    {"m": m, "r": r})
+            return {"ok": ok, "fail": fail}
+
+        def _done(ok, res):
+            if not ok:
+                self._log("[更新下载][错误] %r" % (res,))
+                QMessageBox.warning(self, "更新下载失败", repr(res))
+                return
+            ok_l = res.get("ok") or []
+            fail_l = res.get("fail") or []
+            self._log("[更新下载] 完成：成功 %d，失败 %d"
+                      % (len(ok_l), len(fail_l)))
+            for f in fail_l:
+                self._log("  [失败] %s - %s"
+                          % (f["m"].get("name") or "?",
+                             f["r"].get("reason")))
+            if ok_l:
+                # 刷新模组表（重新扫 mods 目录）
+                try:
+                    self.mod_mods = modman.scan_mods(
+                        self.entry.get("server_dir")
+                        or self.entry["folder"])
+                    self._mod_results.clear()
+                    self.mod_table.setRowCount(0)
+                    for m in self.mod_mods:
+                        r = self.mod_table.rowCount()
+                        self.mod_table.insertRow(r)
+                        self._set_check_cell(self.mod_table, r, 0)
+                        self.mod_table.setItem(r, 1, QTableWidgetItem(
+                            "启用" if m.get("enabled", True) else "禁用"))
+                        self.mod_table.setItem(r, 2, QTableWidgetItem(
+                            m.get("name", "?")))
+                        self.mod_table.setItem(r, 3, QTableWidgetItem(
+                            m.get("version", "")))
+                        self.mod_table.setItem(r, 4, QTableWidgetItem("-"))
+                        self.mod_table.setItem(r, 5, QTableWidgetItem(
+                            os.path.basename(m.get("path", ""))))
+                    self._need_rescan = True
+                except Exception as e:
+                    self._log("[更新下载] 刷新列表失败：%r" % e)
+                QMessageBox.information(
+                    self, "更新完成",
+                    "成功更新 %d 个模组%s。\n\n"
+                    "旧版本都在 .mcsm_replaced/ 里（确认没问题后可删）。\n"
+                    "重启服务器后生效。"
+                    % (len(ok_l),
+                       ("，失败 %d 个（看日志）" % len(fail_l))
+                       if fail_l else ""))
+
+        self._upd_worker = _track(
+            self, Worker(_job, {}, self))
+        self._upd_worker.log.connect(self._log)
+        self._upd_worker.done.connect(_done)
+        self._upd_worker.start()
 
 
     def _log(self, m):
@@ -1440,19 +1595,39 @@ class ServerConfigDialog(BaseDialog):
         return self.mod_mods[r]
 
     def _toggle_mod(self, enable):
-        m = self._cur_mod()
-        if not m:
-            QMessageBox.information(self, "提示", "先选中一个 mod")
-            return
-        try:
-            modman.set_enabled(m["path"], enable)
-            self._need_rescan = True
+        """★ V2.4.1：按勾选批量启用/禁用（没勾选时退回当前行）。"""
+        rows = self._checked_rows(self.mod_table)
+        if rows:
+            mods = [self.mod_mods[r] for r in rows if r < len(self.mod_mods)]
+        else:
+            m0 = self._cur_mod()
+            mods = [m0] if m0 else []
+        if not mods:
             QMessageBox.information(
-                self, "完成",
-                "已%s: %s\n\n重启服务器后生效。"
-                % ("启用" if enable else "禁用", m.get("name")))
-        except Exception as e:
-            QMessageBox.critical(self, "失败", repr(e))
+                self, "提示", "先勾选要%s的模组（或选中一行）"
+                % ("启用" if enable else "禁用"))
+            return
+        done, failed = 0, []
+        for m in mods:
+            try:
+                modman.set_enabled(m["path"], enable)
+                done += 1
+                r = self._row_of_mod_here(m)
+                if r is not None:
+                    self.mod_table.setItem(r, 1, QTableWidgetItem(
+                        "启用" if enable else "禁用"))
+            except Exception as e:
+                failed.append("%s: %r" % (m.get("name") or "?", e))
+        self._need_rescan = True
+        if failed:
+            QMessageBox.warning(
+                self, "部分失败",
+                "已%s %d 个，失败 %d 个：\n%s"
+                % ("启用" if enable else "禁用", done, len(failed),
+                   "\n".join(failed[:8])))
+        else:
+            self._log("已%s %d 个模组（重启服务器后生效）"
+                      % ("启用" if enable else "禁用", done))
 
     def _open_mods_here(self):
         sd = self.entry.get("server_dir") or self.entry["folder"]

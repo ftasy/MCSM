@@ -677,8 +677,13 @@ class ModBrowseDialog(BaseDialog):
                 urls.append(_u)
             it._chk = chk
             # ★ V2.0.8：跨页勾选 —— 翻页重建时恢复勾选，并写回状态字典
+            # ★ V2.4.1：推荐页和全库页的勾选状态互通 ——
+            #   同一个模组在推荐页勾了，切到全库页（或翻页回来）
+            #   也显示勾上，不再出现"两边各勾一次"的重复状态。
             chk.blockSignals(True)
-            if slug in self._builtin_checked:
+            if slug in self._lib_checked:
+                chk.setChecked(bool(self._lib_checked[slug]))
+            elif slug in self._builtin_checked:
                 chk.setChecked(bool(self._builtin_checked[slug]))
             chk.blockSignals(False)
             chk.toggled.connect(
@@ -734,17 +739,28 @@ class ModBrowseDialog(BaseDialog):
         self._fill_builtin()
 
     def _on_builtin_toggled(self, slug, on):
-        """★ V2.0.8：推荐页勾选状态写回字典（跨页保留）。"""
+        """★ V2.0.8：推荐页勾选状态写回字典（跨页保留）。
+
+        ★ V2.4.1：同时写进全库页的状态字典 —— 两页看到的是同一个
+        勾选状态，切页/翻页都不会"同一个模组勾两次"。
+        """
         try:
             self._builtin_checked[slug] = bool(on)
+            if slug in self._lib_checked:
+                self._lib_checked[slug] = bool(on)
         except Exception:
             pass
         self._sync_count()
 
     def _on_lib_toggled(self, slug, on):
-        """★ V2.0.9：全库搜索页勾选状态写回字典（跨页保留）。"""
+        """★ V2.0.9：全库搜索页勾选状态写回字典（跨页保留）。
+
+        ★ V2.4.1：同时写进推荐页的状态字典（勾选互通，见上）。
+        """
         try:
             self._lib_checked[slug] = bool(on)
+            if slug in self._builtin_checked:
+                self._builtin_checked[slug] = bool(on)
         except Exception:
             pass
         self._sync_count()
@@ -758,11 +774,13 @@ class ModBrowseDialog(BaseDialog):
             and self.builtin_offset + 20 < self.builtin_total)
 
     # ---- 全库搜索 Tab：按批加载（★ V1.8.4 / V1.9.1 全局页码模型）----
-    def search(self):
+    def search(self, keep_checks=False):
         """显式搜索（首次/换关键词/切源/切分类）：重置全部状态，offset=0 请求首批。
 
         ★ 全局页码模型：current_batch 只增不减（append 式），
           global_page 是唯一页码状态，向前翻永远内存切片。
+        ★ V2.4.1：keep_checks=True 时保留跨页勾选 —— 切换镜像源
+          用的是同一份 Modrinth 数据，slug 不会变，勾选没必要作废。
         """
         self.offset = 0
         self.current_batch = []
@@ -773,7 +791,8 @@ class ModBrowseDialog(BaseDialog):
         self._fetching = False
         self._pending = "first"
         # ★ V2.0.9：换关键词/换源后旧勾选失效，清空跨页勾选
-        self._lib_checked.clear()
+        if not keep_checks:
+            self._lib_checked.clear()
         self._run()
 
     # ---- 安全切片（start 越界兜底，绝不越界/串数据）----
@@ -1206,9 +1225,13 @@ class ModBrowseDialog(BaseDialog):
                 h, self._icon_pm_for(h), False)
             it._chk = chk
             # ★ V2.0.9：全库搜索跨页勾选 —— 翻页重建时恢复，并写回字典
+            # ★ V2.4.1：与推荐页勾选互通（推荐页勾了这个模组，
+            #   全库页也显示勾上 —— 两边是同一个状态，不会重复装）
             chk.blockSignals(True)
             if slug in self._lib_checked:
                 chk.setChecked(bool(self._lib_checked[slug]))
+            elif slug in self._builtin_checked:
+                chk.setChecked(bool(self._builtin_checked[slug]))
             chk.blockSignals(False)
             chk.toggled.connect(
                 lambda on, s=slug: self._on_lib_toggled(s, on))
@@ -1817,11 +1840,18 @@ class ModBrowseDialog(BaseDialog):
 
         旧版非模态 show() 的 SourceDialog 会一直挂在屏幕上不消失，
         用户每次操作（搜索/翻页）都看到它，误以为"每次搜索都弹窗"。
-        模态 exec() 关掉才返回，杜绝残留；保存后立即刷新并重搜。
+        模态 exec() 关掉才返回，杜绝残留；保存后按需刷新。
+        ★ V2.4.1：不再无脑重搜 ——
+          · 只改了下载通道 / CF Key：搜索结果完全不受影响，不重搜；
+          · 改了 API 源（mcim/official/auto）：数据还是同一份 Modrinth，
+            已加载的结果继续可用，只有没加载的下一批才走新源；
+            之前"切个源就把已搜出来的内容和勾选全部清掉重来"
+            是纯浪费，现在保留当前结果和勾选。
         """
         try:
             from .common import show_source_dialog
             from ..core import sources as _src
+            old_mirror = _src.get_mirror()
             d, vals = show_source_dialog(self)
             if vals is None:
                 return
@@ -1841,8 +1871,11 @@ class ModBrowseDialog(BaseDialog):
             self._log("[源] 已切换到：%s" % _src.describe())
             if key:
                 self._log("[源] CurseForge API Key 已保存（本地 sources.json）")
-            # 保存后立即用新源重新搜索全库列表
-            self.search()
+            # ★ V2.4.1：只有 API 源真的变了才刷新，且不清空当前结果
+            #   与勾选（同一份 Modrinth 数据，翻页继续用内存里的）。
+            if mirror != old_mirror and self.current_batch:
+                self._log("[源] 后续翻页/搜索将使用新源；"
+                          "当前已加载的结果和勾选保持不变。")
         except Exception as e:
             self._log("[错误] 镜像源设置：%r" % e)
 
@@ -2251,27 +2284,51 @@ class ModDialog(BaseDialog):
         self._open_url(url)
 
     def do_download(self):
-        """打开选中 mod 的下载链接。"""
+        """★ V2.4.1：选中 mod 的更新直接下载替换（不再开浏览器）。
+
+        前置：先『检查更新』拿到新版本直链；下载在后台 Worker
+        跑（镜像源 + 哈希校验），旧 jar 挪 .mcsm_replaced/。
+        """
         m = self._cur()
         if not m:
             QMessageBox.information(self, "提示", "先选中一个 mod")
             return
         res = self.results.get(m["path"]) or {}
-        url = res.get("url") or ""
-        if not url:
+        if res.get("status") != "update":
             QMessageBox.information(
-                self, "提示",
-                "还没检查过这个 mod，先点『检查更新（选中）』。")
+                self, "没有可下载的更新",
+                "这个 mod 还没检查过更新，或已是最新（%s）。\n"
+                "先点『检查更新（选中）』。"
+                % (res.get("latest") or "?"))
             return
-        if res.get("status") == "latest":
-            r = QMessageBox.question(
-                self, "已是最新",
-                "这个 mod 已是最新版（%s）。\n\n"
-                "仍要打开它的 Modrinth 页面吗？" % res.get("latest", ""),
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            if r != QMessageBox.Yes:
+        if not (res.get("file") or {}).get("url"):
+            QMessageBox.information(
+                self, "拿不到直链",
+                "检查更新时没拿到下载直链，重新检查一次试试。")
+            return
+        self._log("[更新下载] %s：%s -> %s（后台下载中...）"
+                  % (m.get("name") or "?", res.get("cur") or "?",
+                     res.get("latest") or "?"))
+
+        def _job(on_log=None):
+            return modman.download_update(m, res, on_log=on_log)
+
+        def _done(ok, r):
+            reason = (r.get("reason") if isinstance(r, dict) else r) \
+                if (not ok or not (r or {}).get("ok")) else None
+            if reason is not None:
+                self._log("[更新下载][失败] %s" % reason)
+                QMessageBox.warning(self, "更新下载失败", str(reason))
                 return
-        self._open_url(url)
+            self._log("[更新下载] 完成：%s（旧版本在 .mcsm_replaced/）"
+                      % r.get("file"))
+            self.results.pop(m.get("path"), None)
+            self.refresh()
+
+        self._dl_worker = _track(self, Worker(_job, {}, self))
+        self._dl_worker.log.connect(self._log)
+        self._dl_worker.done.connect(_done)
+        self._dl_worker.start()
 
     def open_log_dir(self):
         """打开日志文件夹 / latest.log。"""

@@ -7,7 +7,6 @@ __pycache__/
 *.zip
 # 解压安装包测试留下的目录（不进 git）
 MCSM_v*/
-
 # 用户数据与本地日志
 servers.json
 theme.json
@@ -21,30 +20,27 @@ ai.json
 安装日志.txt
 manager.log
 *.log
-
 # 原子写入产生的快照与临时文件（运行时数据，不进库）
 *.bak
 *.bak.[0-9]
 *.tmp
-
 # 系统/编辑器
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
-
 # 开发/验收过程文件（用户本地留存，不进 git）
 _create_v173.png
-
 # PyInstaller 打包产物
 build/
 dist/
 build240/
-dist240/
+build241/
 build_new/
+dist240/
+dist241/
 dist_new/
 build_log.txt
 MCSM.spec
-
 # 本地版本归档（发布产物，由 archive_versions.py 生成，不入版本库）
 版本归档/

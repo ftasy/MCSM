@@ -8,6 +8,7 @@
 import os
 import re
 import json
+import time
 import zipfile
 
 from . import net
@@ -383,7 +384,13 @@ def project_versions(project_id, mc_version=None, loader=None,
         vs = _api_get(path)
     except Exception:
         return []
-    return vs if isinstance(vs, list) else []
+    if not isinstance(vs, list):
+        return []
+    # ★ V2.4.1：MCIM 镜像返回的版本顺序是乱的（最新版可能排最后），
+    #   官方才是"最新在前"。这里统一按 date_published 倒序，
+    #   谁调用都不用再猜顺序。
+    vs.sort(key=lambda v: v.get("date_published") or "", reverse=True)
+    return vs
 
 
 def project_info(project_id):
@@ -709,6 +716,83 @@ def search_projects(query, mc_version=None, loader=None, limit=10):
     return (d or {}).get("hits", []) if isinstance(d, dict) else []
 
 
+def _pick_file(ver):
+    """从版本对象里挑主文件（带直链/文件名/哈希，供直接下载用）。"""
+    try:
+        for f in (ver.get("files") or []):
+            if f.get("url") and f.get("primary"):
+                return {"url": _cdn(f.get("url")),
+                        "filename": f.get("filename") or "",
+                        "hashes": f.get("hashes") or {}}
+        for f in (ver.get("files") or []):
+            if f.get("url"):
+                return {"url": _cdn(f.get("url")),
+                        "filename": f.get("filename") or "",
+                        "hashes": f.get("hashes") or {}}
+    except Exception:
+        pass
+    return None
+
+
+def download_update(m, res, on_log=None):
+    """★ V2.4.1：把 check_update 查到的新版本直接下载替换（不走浏览器）。
+
+    m：本地模组（scan_mods 的条目，含 path）
+    res：check_update 的结果（status == "update" 且带 file 直链）
+    返回 {"ok": True, "file": 新文件名} 或 {"ok": False, "reason": ...}
+
+    · 下载走 install._download_with_fallback（镜像优先 + 失败回退
+      官方 + sha512/sha1 哈希校验，坏文件进不了 mods/）
+    · 旧 jar 挪进 .mcsm_replaced/（只搬不删，装错了能拿回来）
+    """
+    import os
+    from . import install
+    log = on_log or (lambda x: None)
+    f = (res or {}).get("file") or {}
+    url = f.get("url") or ""
+    if not url:
+        return {"ok": False, "reason": "没有可下载的直链（先检查更新）"}
+    old_path = m.get("path") or ""
+    if not old_path or not os.path.isfile(old_path):
+        return {"ok": False, "reason": "本地 jar 文件不在了"}
+    name = f.get("filename") or os.path.basename(url.split("?")[0])
+    if not name.lower().endswith(".jar"):
+        name += ".jar"
+    dest = os.path.join(os.path.dirname(old_path), name)
+    try:
+        install._download_with_fallback(
+            url, dest, hashes=f.get("hashes") or None,
+            on_log=lambda x: log("    " + x))
+    except Exception as e:
+        try:
+            os.remove(dest)
+        except Exception:
+            pass
+        return {"ok": False, "reason": "下载失败：%s" % install._brief(e)}
+    # 旧 jar 挪进 .mcsm_replaced/（同 id 冲突会崩服）
+    # ★ 目录约定与 install._evict_same_mod_id 一致：
+    #   <服务器根>/.mcsm_replaced/（不在 mods/ 里面，免得被扫描）
+    try:
+        mods_dir = os.path.dirname(old_path)
+        moved = install._evict_same_mod_id(dest, mods_dir, log=log)
+        if not moved and os.path.abspath(old_path) != os.path.abspath(dest):
+            trash = os.path.join(os.path.dirname(mods_dir),
+                                 ".mcsm_replaced")
+            os.makedirs(trash, exist_ok=True)
+            import shutil as _sh
+            dst = os.path.join(trash, os.path.basename(old_path))
+            if os.path.exists(dst):
+                base, ext = os.path.splitext(dst)
+                dst = "%s.%d%s" % (base, int(time.time()), ext)
+            _sh.move(old_path, dst)
+            log("    [清理] 旧版本 %s 已移到 .mcsm_replaced/" %
+                os.path.basename(old_path))
+    except Exception as e:
+        log("    [警告] 旧文件清理失败（不影响新版本）：%r" % e)
+    return {"ok": True, "file": name,
+            "version": res.get("latest") or ""}
+
+
 def check_update(m, mc_version, loader, on_log=None):
     """查 Modrinth 看有没有更新。
 
@@ -778,6 +862,9 @@ def check_update(m, mc_version, loader, on_log=None):
                         "status": "update",
                         "cur": cur_ver,
                         "method": "hash",
+                        # ★ V2.4.1：带上直链/文件名/哈希，
+                        #   『下载选中项的更新』就能直接走源下载。
+                        "file": _pick_file(up),
                     }
                 # 没更新
                 pinfo = project_info(pid) or {}
@@ -852,6 +939,8 @@ def check_update(m, mc_version, loader, on_log=None):
         "status": "update" if has else "latest",
         "cur": cur,
         "method": "name",
+        # ★ V2.4.1：名字搜索路径也带直链（有更新时可直接下载）
+        "file": _pick_file(latest) if has else None,
     }
 
 

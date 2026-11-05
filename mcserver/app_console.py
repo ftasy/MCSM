@@ -154,6 +154,7 @@ class ConsoleMixin:
             return
         import ctypes
         kernel32 = ctypes.windll.kernel32
+        from .widgets import java_pid_alive
         found = 0
         for e in self.entries:
             sd = e.get("server_dir") or e["folder"]
@@ -170,14 +171,11 @@ class ConsoleMixin:
             k = self._key(e)
             if k in self.procs:
                 continue
-            try:
-                h = kernel32.OpenProcess(0x1000, False, pid)
-                alive = bool(h)
-                if h:
-                    kernel32.CloseHandle(h)
-            except Exception:
-                alive = False
-            if alive:
+            # ★ V2.4.1：OpenProcess 拿到句柄 ≠ 进程活着（僵尸进程
+            #   照样返回句柄、PID 复用更是直接误报）。改用
+            #   java_pid_alive：退出码 + 映像名双重校验，
+            #   死了的/不是 java 的一律当"没在运行"，顺手清掉 pid 文件。
+            if java_pid_alive(pid):
                 proc = ReattachedProcess(pid, sd, e.get("name", ""))
                 self.procs[k] = proc
                 self._is_stopping[k] = False
