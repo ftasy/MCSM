@@ -11,6 +11,7 @@
 
 import os
 import json
+import inspect
 
 from PySide6.QtCore import (Qt, QThread, Signal)
 from PySide6.QtGui import (QImage, QPixmap, QPainter, QColor,
@@ -52,6 +53,9 @@ class Worker(QThread, _StopMixin):
     """后台执行任务，避免界面卡死。"""
     log = Signal(str)
     done = Signal(bool, object)
+    # ★ V2.3.9：进度（已完成, 总数, 当前项名字）。
+    #   只有被调函数签名里有 on_progress 才会接上，其它 Worker 行为不变。
+    progress = Signal(int, int, str)
 
     def __init__(self, fn, kwargs=None, parent=None):
         # ★ parent 不传给 QThread：传了之后对话框一销毁，
@@ -61,11 +65,20 @@ class Worker(QThread, _StopMixin):
         self.fn = fn
         self.kwargs = kwargs or {}
         self._owner = parent
+        self._accepts_progress = False
+        try:
+            self._accepts_progress = (
+                "on_progress" in inspect.signature(fn).parameters)
+        except (TypeError, ValueError):
+            pass
         _LIVE_THREADS.add(self)
 
     def run(self):
         try:
-            res = self.fn(on_log=self.log.emit, **self.kwargs)
+            extra = {}
+            if self._accepts_progress:
+                extra["on_progress"] = self.progress.emit
+            res = self.fn(on_log=self.log.emit, **extra, **self.kwargs)
             if not self.isInterruptionRequested():
                 self.done.emit(True, res)
         except Exception as e:

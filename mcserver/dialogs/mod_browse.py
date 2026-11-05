@@ -13,7 +13,8 @@ from PySide6.QtWidgets import (
     QComboBox, QPushButton, QCheckBox, QTextEdit, QMessageBox,
     QDialogButtonBox, QGroupBox, QListWidget, QListWidgetItem,
     QAbstractItemView, QTabWidget, QWidget, QApplication, QTableWidget,
-    QTableWidgetItem, QHeaderView, QInputDialog, QListView, QStackedLayout)
+    QTableWidgetItem, QHeaderView, QInputDialog, QListView, QStackedLayout,
+    QProgressBar)
 from ..core import versions, install, modman, sources
 from ..core import net
 from ..dialog_workers import (
@@ -344,6 +345,17 @@ class ModBrowseDialog(BaseDialog):
         self.lbl_stat.setStyleSheet(_muted())
         hb.addWidget(self.lbl_stat)
         v.addLayout(hb)
+
+        # ★ V2.3.9：安装进度条 —— 以前一批装 20 个只有滚动的日志，
+        #   不知道还剩几个、卡在哪个模组上；现在给明确的 n/N + 当前名字。
+        self.pb_inst = QProgressBar()
+        self.pb_inst.setRange(0, 1)
+        self.pb_inst.setValue(0)
+        self.pb_inst.setTextVisible(True)
+        self.pb_inst.setFormat("%v/%m")
+        self.pb_inst.setFixedHeight(16)
+        self.pb_inst.hide()
+        v.addWidget(self.pb_inst)
 
         # ---- 日志 ----
         self.log = LogView()
@@ -1844,26 +1856,54 @@ class ModBrowseDialog(BaseDialog):
         if r != QMessageBox.Yes:
             return
         self.btn_inst.setEnabled(False)
+        # ★ V2.3.9：显示进度条（先按勾选数占位，实际总数含自动补的前置）
+        self.pb_inst.setRange(0, max(1, len(slugs)))
+        self.pb_inst.setValue(0)
+        self.pb_inst.setFormat("0/%m")
+        self.pb_inst.show()
         self.worker = _track(self, Worker(
             self._do_install, {"slugs": slugs}, self))
         self.worker.log.connect(self._log)
+        self.worker.progress.connect(self._on_install_progress)
         self.worker.done.connect(self._on_install)
         self.worker.start()
 
-    def _do_install(self, slugs=None, on_log=None):
-        """复用 install_mods / install_plugins（V1.2.0 插件分流）。"""
+    def _on_install_progress(self, done, total, label):
+        """安装进度（★ V2.3.9）：n/N + 当前模组名。"""
+        try:
+            if total > 0:
+                self.pb_inst.setRange(0, total)
+            self.pb_inst.setValue(done)
+            self.pb_inst.setFormat("%v/%m（%p%）")
+            if label:
+                self.lbl_stat.setText("已处理 %d/%d：%s"
+                                      % (done, total, label))
+        except Exception:
+            pass
+
+    def _do_install(self, slugs=None, on_log=None, on_progress=None):
+        """复用 install_mods / install_plugins（V1.2.0 插件分流）。
+
+        ★ V2.3.9：把 on_progress 传下去，进度条才有数据。
+        """
         if self.is_plugins:
             return install.install_plugins(
                 self.server_dir, self.mc_version,
                 loader=self.loader or "paper",
-                on_log=on_log, only=slugs or [])
+                on_log=on_log, only=slugs or [],
+                on_progress=on_progress)
         r = install.install_mods(
             self.server_dir, self.mc_version, self.loader,
-            on_log=on_log, only=slugs or [])
+            on_log=on_log, only=slugs or [],
+            on_progress=on_progress)
         return r
 
     def _on_install(self, ok, res):
         self.btn_inst.setEnabled(True)
+        try:
+            self.pb_inst.hide()
+        except Exception:
+            pass
         if not ok:
             self._log("[错误] %r" % (res,))
             return
@@ -1880,7 +1920,18 @@ class ModBrowseDialog(BaseDialog):
         self._builtin_checked.clear()
         # ★ V2.0.9：全库搜索勾选同步清空
         self._lib_checked.clear()
-        self.search()
+        # ★ V2.3.9：只刷新当前视图。
+        #   - 在推荐页装完：本地重绘即可（以前会偷偷发一次全库请求，
+        #     而且"✓已装"标记一直不刷新，得关窗重开才看得见）
+        #   - 在全库页装完：重搜一次，卡片上的已装标记才会更新
+        try:
+            if self.tabs.currentIndex() == 1:
+                self.search()
+            else:
+                self._fill_builtin()
+        except Exception:
+            self.search()
+        self._sync_count()
 
     def _log(self, m):
         self.log.appendPlainText(m)

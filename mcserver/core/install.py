@@ -4,6 +4,7 @@
 import os
 import re
 import json
+import hashlib
 import shutil
 import subprocess
 import socket
@@ -1991,10 +1992,213 @@ def _pick_best(versions, prefer=None):
     for v in sorted_vs:
         for f in v.get("files") or []:
             if f.get("url") and f.get("filename", "").endswith(".jar"):
+                # ★ V2.3.9：把"这份文件的哈希"和"这个版本依赖谁"一起带出去 ——
+                #   下载完能校验完整性（镜像/CDN 传坏或被替换都能发现），
+                #   前置也能按官方元数据自动补齐，不用再猜。
                 return {"name": f["filename"], "url": f["url"],
                         "version": v.get("version_number"),
-                        "type": v.get("version_type")}
+                        "type": v.get("version_type"),
+                        "version_id": v.get("id") or "",
+                        "project_id": v.get("project_id") or "",
+                        "hashes": f.get("hashes") or {},
+                        "deps": v.get("dependencies") or []}
     return None
+
+
+# =============================================================
+#  ★ V2.3.9：自动补前置（按 Modrinth 版本元数据的 dependencies）
+# =============================================================
+_PROJECT_SLUG_CACHE = {}
+
+
+def _api_bases():
+    """Modrinth API 的请求顺序（跟随用户设置的信息源）。"""
+    from . import sources as _s
+    m = _s.get_mirror()
+    if m == "mcim":
+        return [_s.MCIM_MODRINTH]
+    if m == "official":
+        return [_s.MODRINTH_OFFICIAL]
+    return [_s.MCIM_MODRINTH, _s.MODRINTH_OFFICIAL]
+
+
+def project_slug(project_id, timeout=12):
+    """项目 id → slug（进程内缓存）。查不到返回空字符串。
+
+    Modrinth 的版本元数据里，依赖只给 project_id（如 P7dR8mSH），
+    下载却要 slug，所以必须先换一次。
+    """
+    pid = (project_id or "").strip()
+    if not pid:
+        return ""
+    if pid in _PROJECT_SLUG_CACHE:
+        return _PROJECT_SLUG_CACHE[pid]
+    for base in _api_bases():
+        try:
+            d = json.loads(_get("%s/project/%s" % (base, pid), timeout=timeout))
+            slug = ((d or {}).get("slug") or "").strip()
+            if slug:
+                _PROJECT_SLUG_CACHE[pid] = slug
+                return slug
+        except Exception:
+            continue
+    return ""
+
+
+def installed_norms(md):
+    """mods/plugins 目录里已装条目的归一化名字集合。
+
+    三个来源都收：jar 里的 mod id、显示名、文件名（去 .jar/.disabled）。
+    """
+    out = set()
+    try:
+        from . import modman as _mm
+        for m in _mm.scan_mods_dir(md):
+            for k in (m.get("id"), m.get("name")):
+                if k:
+                    out.add(_mm._norm(k))
+            fn = (m.get("filename") or "").lower()
+            for suf in (".jar.disabled", ".jar"):
+                if fn.endswith(suf):
+                    fn = fn[:-len(suf)]
+                    break
+            if fn:
+                out.add(_mm._norm(fn))
+    except Exception:
+        pass
+    return out
+
+
+def _looks_installed(slug, norms):
+    """slug 是否已装在目录里（归一化精确匹配，或"文件名=slug+版本号"）。
+
+    ★ 只认"后面紧跟数字"的情况：create-fabric-6.0.8.jar 算 create-fabric，
+      但 sodium-extra-1.0.jar 不算 sodium（避免把扩展模组当成主体）。
+    """
+    try:
+        from . import modman as _mm
+        n = _mm._norm(slug)
+    except Exception:
+        return False
+    if not n:
+        return False
+    if n in norms:
+        return True
+    for k in norms:
+        if k.startswith(n):
+            rest = k[len(n):]
+            if rest and rest[0].isdigit():
+                return True
+    return False
+
+
+def expand_required_deps(slugs, md, mc_version, loader, log=None,
+                         ver_cache=None, max_depth=2):
+    """把"必装前置"从 Modrinth 元数据里展开，返回前置在前的 slug 列表。
+
+    ★ V2.3.9：以前只有内置清单（MOD_TARGETS 的 req 字段）会补前置，
+      从全库搜索勾 Create 不会带 Fabric API / Flywheel → 启动即崩。
+      现在直接读版本元数据的 dependencies（dependency_type=required），
+      解析 project_id → slug，已经装过的、纯客户端的、本身就是当前项目的
+      一律跳过；最多递归 max_depth 层。
+
+    ver_cache：slug → modrinth_pick 结果，顺手把查到的版本缓存下来给
+      下载阶段复用，避免同一版本查两遍。
+    """
+    def _log(m):
+        if log:
+            log(m)
+
+    cache = ver_cache if ver_cache is not None else {}
+    norms = installed_norms(md)
+    base = [s for s in (slugs or []) if s]
+    seen = set(base)
+    added = []      # [(slug, 谁需要它)]，BFS 顺序 = 由近到远
+    queue = [(s, 0) for s in base]
+    i = 0
+    while i < len(queue):
+        slug, depth = queue[i]
+        i += 1
+        if depth >= max_depth or not slug or str(slug).isdigit():
+            continue    # CurseForge 数字 id 没有这套元数据
+        v = cache.get(slug)
+        if v is None:
+            try:
+                v = modrinth_pick(slug, mc_version, loader or "paper")
+            except Exception:
+                v = None
+            if v:
+                cache[slug] = v
+        if not v:
+            continue
+        self_pid = v.get("project_id") or ""
+        for d in (v.get("deps") or []):
+            if (d or {}).get("dependency_type") != "required":
+                continue
+            pid = (d or {}).get("project_id") or ""
+            if not pid or pid == self_pid:
+                continue
+            ds = project_slug(pid)
+            if not ds or ds in seen:
+                continue
+            if _looks_installed(ds, norms):
+                _log("  · 前置 %s 已装，跳过" % ds)
+                continue
+            if ds in CLIENT_ONLY_MODS:
+                _log("  · 前置 %s 是纯客户端组件，跳过" % ds)
+                continue
+            seen.add(ds)
+            added.append((ds, slug))
+            queue.append((ds, depth + 1))
+    if added:
+        _log("  · 自动补前置 %d 个：%s"
+             % (len(added), "、".join(a for a, _w in added)))
+    # 反序 = 深的前置排最前（BFS 顺序里越后越深）
+    return [a for a, _w in reversed(added)] + base
+
+
+def _evict_same_mod_id(new_path, md, log=None):
+    """装好新版后，把"同一个 mod id 的旧 jar"挪到 <server>/.mcsm_replaced/。
+
+    ★ V2.3.9：同一个模组新旧两个 jar 同时躺在 mods/ 里，Fabric/Forge
+      会报 duplicate mod / Mixin 冲突，服务器直接起不来。以前装新版
+      从不清理旧版（文件名带版本号，覆盖不到），用户只能自己找。
+      这里按 jar 内 mod id 判断是不是同一个模组，确认后才搬走 ——
+      而且只搬进 .mcsm_replaced/ 不删除，删错了还能拿回来。
+    返回被搬走的文件名列表。
+    """
+    def _log(m):
+        if log:
+            log(m)
+    try:
+        from . import modman as _mm
+        mid, _name, _ver = _mm._read_jar_meta(new_path)
+    except Exception:
+        return []
+    if not mid:
+        return []          # 读不出 id 就不敢动别人的文件
+    trash = os.path.join(os.path.dirname(md), ".mcsm_replaced")
+    moved = []
+    for m in _mm.scan_mods_dir(md):
+        p = m.get("path") or ""
+        if not p or os.path.abspath(p) == os.path.abspath(new_path):
+            continue
+        if (m.get("id") or "") != mid:
+            continue
+        fn = m.get("filename") or os.path.basename(p)
+        try:
+            os.makedirs(trash, exist_ok=True)
+            dst = os.path.join(trash, fn)
+            if os.path.exists(dst):
+                base, ext = os.path.splitext(dst)
+                dst = "%s.%d%s" % (base, int(time.time()), ext)
+            os.replace(p, dst)
+            moved.append(fn)
+            _log("    [清理] 旧版本 %s 已移到 .mcsm_replaced/（避免同 id 冲突）"
+                 % fn)
+        except Exception:
+            continue
+    return moved
 
 
 def _mirror_download_url(url):
@@ -2008,26 +2212,82 @@ def _mirror_download_url(url):
     return url.replace("cdn.modrinth.com", "mod.mcimirror.top")
 
 
-def _download_with_fallback(url, dest, timeout=180, on_retry=None, on_log=None):
-    """下载文件：镜像 CDN 优先，失败自动回退官方 CDN。
+def _file_digest(path, algo, block=1024 * 1024):
+    """算文件摘要（流式，不整个读进内存）。"""
+    h = hashlib.new(algo)
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(block), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def verify_download(path, hashes):
+    """用 Modrinth 元数据校验下载下来的文件。返回 (ok, 说明)。
+
+    ★ V2.3.9：以前下完只做木马特征扫描，不校验内容完整性 ——
+      镜像/代理返回半截文件、被中间盒替换、CDN 传坏，都会"装成功"
+      然后启动报 ZipException。现在按 sha512（回退 sha1）比对。
+      没有哈希信息的源（GitHub/CF 老数据）一律放行，不影响原有流程。
+    """
+    if not hashes:
+        return True, ""
+    for algo in ("sha512", "sha1"):
+        want = (hashes.get(algo) or "").strip().lower()
+        if len(want) < 32:
+            continue
+        try:
+            got = _file_digest(path, algo)
+        except Exception as e:
+            return False, "读不出文件（%s）" % _brief(e)
+        if got == want:
+            return True, ""
+        return False, "%s 不一致（应为 %s…，实为 %s…）" % (
+            algo, want[:12], got[:12])
+    return True, ""
+
+
+def _download_with_fallback(url, dest, timeout=180, on_retry=None, on_log=None,
+                            hashes=None):
+    """下载文件：镜像 CDN 优先，失败/校验不过自动回退官方 CDN。
 
     ★ V1.9.4：实测官方 cdn.modrinth.com 在本机读超时、MCIM CDN 正常；
       反过来部分网络下 MCIM 也可能慢/挂。两个都试，谁先成用谁，
       避免"卡在下载上转圈"。
+    ★ V2.3.9：带 hashes 时每个源下完都校验，不一致就删掉换下一个源；
+      两个源都拿不到正确文件就抛错（绝不让坏 jar 躺进 mods/）。
     """
     def log(m):
         if on_log:
             on_log(m)
+    cands = []
     mirror = _mirror_download_url(url)
-    try:
-        _download(mirror, dest, timeout=timeout, on_retry=on_retry,
-                  on_log=on_log)
-        return
-    except Exception as e:
-        if mirror == url:
-            raise
-        log("    [回退] 镜像下载失败（%s），改用官方 CDN..." % _brief(e))
-        _download(url, dest, timeout=timeout, on_retry=on_retry, on_log=on_log)
+    if mirror:
+        cands.append(mirror)
+    if url and url not in cands:
+        cands.append(url)
+    last = None
+    for idx, u in enumerate(cands):
+        tail = idx + 1 < len(cands)
+        try:
+            _download(u, dest, timeout=timeout, on_retry=on_retry,
+                      on_log=on_log)
+        except Exception as e:
+            last = e
+            if tail:
+                log("    [回退] 下载失败（%s），改用下一个源..." % _brief(e))
+            continue
+        ok, why = verify_download(dest, hashes)
+        if ok:
+            return
+        try:
+            os.remove(dest)
+        except Exception:
+            pass
+        last = InstallError("文件校验失败（%s）" % why)
+        if tail:
+            log("    [校验] %s，已删除坏文件，改用下一个源..." % why)
+    if last:
+        raise last
 
 
 def _github_plugin_jar(repo, mc_version=None, loader=None, on_log=None):
@@ -2154,9 +2414,12 @@ def effective_slug(meta, mc_version=None):
     无 branch 的项目原样返回原 slug。
     """
     slug = (meta or {}).get("slug") or ""
-    br = meta.get("branch") or ()
+    br = (meta or {}).get("branch") or ()
     if br and len(br) >= 2 and mc_version and _ver_ge(mc_version, br[0]):
         return br[1]
+    # ★ V2.3.9：不在内置清单里的模组（全库搜索勾的）meta 为 None，
+    #   这里必须返回空让调用方回落到原 slug —— 以前调用方没兜底，
+    #   dl_slug 变成 ""，于是"永远查不到版本"，全库装的模组全失败。
     return slug
 
 
@@ -2270,15 +2533,25 @@ def _scan_jar_virus(jar_path):
 
 
 def install_mods(server_dir, mc_version, loader, on_log=None,
-                 only=None):
+                 only=None, on_progress=None, auto_deps=True):
     """并发下载优化模组到 server_dir/mods。
 
     ★ v5.x：4 线程并发 + MCIM CDN 加速 + Fractureiser 木马扫描，
       下载体验不再一个模组等一个模组。
+    ★ V2.3.9：新增 on_progress(已完成, 总数, 正在装的) 进度回调；
+      新增 auto_deps —— 全库搜索勾的模组按 Modrinth 元数据自动补前置。
+      下载完按 sha512 校验，坏文件直接丢掉换源。
     """
     def log(m):
         if on_log:
             on_log(m)
+
+    def prog(done, total, label):
+        if on_progress:
+            try:
+                on_progress(done, total, label)
+            except Exception:
+                pass
 
     if not (MOD_TARGETS.get(loader) or []):
         log("%s 是插件服/原版，不装模组" % loader)
@@ -2315,6 +2588,23 @@ def install_mods(server_dir, mc_version, loader, on_log=None,
     mods_dir = os.path.join(
         server_dir, "plugins" if loader == "paper" else "mods")
     os.makedirs(mods_dir, exist_ok=True)
+
+    # ★ V2.3.9：内置清单之外（全库搜索勾的）按 Modrinth 元数据补前置。
+    #   ver_cache 顺带把查到的版本缓存给下载阶段，不重复请求。
+    ver_cache = {}
+    if auto_deps:
+        ext = [s for s in slugs
+               if not str(s).isdigit() and mod_meta(loader, s) is None]
+        if ext:
+            try:
+                extra = expand_required_deps(
+                    ext, mods_dir, mc_version, loader, log=log,
+                    ver_cache=ver_cache)
+                front = [s for s in extra if s not in slugs]
+                if front:
+                    slugs = front + slugs
+            except Exception as e:
+                log("  · 前置解析失败（%s），按原样安装" % _brief(e))
     ok_list, fail_list, skipped = [], [], []
 
     # ---- 单个模组的下载任务（供线程池调用）----
@@ -2341,6 +2631,7 @@ def install_mods(server_dir, mc_version, loader, on_log=None,
                         pass
                     return False, slug, desc, \
                         "拦截到恶意文件（Fractureiser 特征），已删除"
+                _evict_same_mod_id(dest, os.path.dirname(dest), log)
                 log("  [OK] %s" % (r.get("file") or desc))
                 return True, slug, desc, r.get("file") or desc
 
@@ -2349,16 +2640,25 @@ def install_mods(server_dir, mc_version, loader, on_log=None,
                     % (desc, _brief(e), wait))
             # ★ V2.0.4：分支项目（如 ModernFix 1.21.5+ 社区版）按版本
             #   解析实际下载 slug，原版没适配也能装社区版。
-            dl_slug = effective_slug(meta, mc_version)
+            # ★ V2.3.9：不在内置清单的 slug（全库搜索勾的）没有 meta，
+            #   effective_slug 返回空 —— 必须回落到原始 slug。
+            dl_slug = effective_slug(meta, mc_version) or slug
             # 获取版本信息（双重兜底已在 modrinth_pick 内实现）
-            v = modrinth_pick(dl_slug, mc_version, loader, on_retry=_note)
+            # ★ V2.3.9：前置解析阶段已查过的版本直接复用，少一次请求
+            v = ver_cache.get(dl_slug)
+            if v is None:
+                v = modrinth_pick(dl_slug, mc_version, loader,
+                                  on_retry=_note)
+                if v:
+                    ver_cache[dl_slug] = v
             if not v:
                 return False, slug, desc, "无 %s+%s 版本" % (mc_version, loader)
 
             dest = os.path.join(mods_dir, v["name"])
-            # ★ CDN 加速 + 断点续传下载（V1.9.4：镜像失败自动回退官方）
+            # ★ CDN 加速 + 断点续传 + sha512 完整性校验（V2.3.9）
             _download_with_fallback(v["url"], dest,
-                                    on_retry=_note, on_log=log)
+                                    on_retry=_note, on_log=log,
+                                    hashes=v.get("hashes"))
 
             # ★ 下载后安全扫描（Fractureiser 木马）
             if _scan_jar_virus(dest):
@@ -2368,6 +2668,7 @@ def install_mods(server_dir, mc_version, loader, on_log=None,
                     pass
                 return False, slug, desc, "拦截到恶意文件（Fractureiser 特征），已删除"
 
+            _evict_same_mod_id(dest, os.path.dirname(dest), log)
             log("  [OK] %s" % v["name"])
             return True, slug, desc, v["name"]
         except Exception as e:
@@ -2390,7 +2691,10 @@ def install_mods(server_dir, mc_version, loader, on_log=None,
 
     # ---- 并发下载（4 线程）----
     if valid_slugs:
-        log("开始并发下载 %d 个模组（4 线程）..." % len(valid_slugs))
+        total = len(valid_slugs)
+        log("开始并发下载 %d 个模组（4 线程）..." % total)
+        prog(0, total, "准备下载")
+        done = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
             future_to_slug = {
                 executor.submit(_download_task, slug): slug
@@ -2402,11 +2706,14 @@ def install_mods(server_dir, mc_version, loader, on_log=None,
                 except Exception as e:  # 任务本身异常也要兜住，别让 UI 崩
                     slug = future_to_slug[future]
                     success, desc, result = False, slug, _brief(e)
+                done += 1
                 if success:
                     ok_list.append({"name": result, "slug": slug})
                 else:
                     fail_list.append({"slug": slug, "name": desc,
                                       "reason": result})
+                # 进度：已完成/总数 + 刚装完/刚失败的名字
+                prog(done, total, desc)
 
     if skipped:
         log("")
@@ -2428,7 +2735,7 @@ def install_mods(server_dir, mc_version, loader, on_log=None,
 
 
 def install_plugins(server_dir, mc_version, loader="paper", only=None,
-                    on_log=None):
+                    on_log=None, on_progress=None, auto_deps=True):
     """并发下载插件到 server_dir/plugins。
 
     ★ V1.2.0：与 install_mods 逻辑一致（4 线程并发 + CDN 加速 +
@@ -2446,6 +2753,13 @@ def install_plugins(server_dir, mc_version, loader="paper", only=None,
     def log(m):
         if on_log:
             on_log(m)
+
+    def prog(done, total, label):
+        if on_progress:
+            try:
+                on_progress(done, total, label)
+            except Exception:
+                pass
 
     # ★ V1.8.0：未指定时默认装内置推荐清单全部（与 install_mods 一致）
     if only is not None:
@@ -2472,6 +2786,23 @@ def install_plugins(server_dir, mc_version, loader="paper", only=None,
 
     plugins_dir = os.path.join(server_dir, "plugins")
     os.makedirs(plugins_dir, exist_ok=True)
+
+    # ★ V2.3.9：插件同样按 Modrinth 元数据补必装前置（如 Vault / ProtocolLib）
+    ver_cache = {}
+    if auto_deps:
+        ext = [s for s in slugs
+               if not str(s).isdigit() and plugin_meta(s) is None
+               and mod_meta(loader, s) is None]
+        if ext:
+            try:
+                extra = expand_required_deps(
+                    ext, plugins_dir, mc_version, loader or "paper",
+                    log=log, ver_cache=ver_cache)
+                front = [s for s in extra if s not in slugs]
+                if front:
+                    slugs = front + slugs
+            except Exception as e:
+                log("  · 前置解析失败（%s），按原样安装" % _brief(e))
     ok_list, fail_list, skipped = [], [], []
 
     def _download_task(slug):
@@ -2520,6 +2851,7 @@ def install_plugins(server_dir, mc_version, loader="paper", only=None,
                         pass
                     return False, slug, desc, \
                         "拦截到恶意文件（Fractureiser 特征），已删除"
+                _evict_same_mod_id(dest, os.path.dirname(dest), log)
                 log("  [OK] %s" % (r.get("file") or desc))
                 return True, slug, desc, r.get("file") or desc
 
@@ -2527,8 +2859,13 @@ def install_plugins(server_dir, mc_version, loader="paper", only=None,
                 log("    [%s] 网络不稳（%s），%.1fs 后重试..."
                     % (desc, _brief(e), wait))
             # ★ V1.7.0-3：插件按服务器实际加载器过滤（不再写死 paper）
-            v = modrinth_pick(slug, mc_version, loader or "paper",
-                              on_retry=_note)
+            # ★ V2.3.9：前置解析阶段查过的版本直接复用
+            v = ver_cache.get(slug)
+            if v is None:
+                v = modrinth_pick(slug, mc_version, loader or "paper",
+                                  on_retry=_note)
+                if v:
+                    ver_cache[slug] = v
             # ★ V1.8.6：全库搜索切到 CurseForge 源时勾选的是 CF 数字 id，
             #   Modrinth 查不到就回落到 CurseForge 下载引擎。
             if not v and str(slug).isdigit():
@@ -2555,8 +2892,10 @@ def install_plugins(server_dir, mc_version, loader="paper", only=None,
 
             dest = os.path.join(plugins_dir, v["name"])
             # ★ V1.9.4：镜像 CDN 失败自动回退官方 CDN
+            # ★ V2.3.9：加 sha512 完整性校验
             _download_with_fallback(v["url"], dest,
-                                    on_retry=_note, on_log=log)
+                                    on_retry=_note, on_log=log,
+                                    hashes=v.get("hashes"))
 
             # ★ 下载后安全扫描（Fractureiser 木马）
             if _scan_jar_virus(dest):
@@ -2566,6 +2905,7 @@ def install_plugins(server_dir, mc_version, loader="paper", only=None,
                     pass
                 return False, slug, desc, "拦截到恶意文件（Fractureiser 特征），已删除"
 
+            _evict_same_mod_id(dest, os.path.dirname(dest), log)
             log("  [OK] %s" % v["name"])
             return True, slug, desc, v["name"]
         except Exception as e:
@@ -2588,8 +2928,10 @@ def install_plugins(server_dir, mc_version, loader="paper", only=None,
 
     # ---- 并发下载（4 线程）----
     if valid_slugs:
-        log("开始并发下载 %d 个插件（4 线程，前置优先）..."
-            % len(valid_slugs))
+        total = len(valid_slugs)
+        log("开始并发下载 %d 个插件（4 线程，前置优先）..." % total)
+        prog(0, total, "准备下载")
+        done = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
             future_to_slug = {
                 executor.submit(_download_task, slug): slug
@@ -2601,11 +2943,13 @@ def install_plugins(server_dir, mc_version, loader="paper", only=None,
                 except Exception as e:  # 任务本身异常也要兜住，别让 UI 崩
                     slug = future_to_slug[future]
                     success, desc, result = False, slug, _brief(e)
+                done += 1
                 if success:
                     ok_list.append({"name": result, "slug": slug})
                 else:
                     fail_list.append({"slug": slug, "name": desc,
                                       "reason": result})
+                prog(done, total, desc)
 
     if skipped:
         log("")
