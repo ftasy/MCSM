@@ -115,8 +115,36 @@ class MainWindow(
         #   现在主路径改成"扫描完成后再接管"（见 _on_scan_done），
         #   这里只留一个兜底定时器。
         QTimer.singleShot(2500, self._detect_running_servers)
+        # ★ V2.3.8：自动模式下，启动后后台测一次两条通道。
+        #   挂 VPN 和直连的最优源可能完全相反，不能拿一次开发机
+        #   测速写死；也不能沿用上次会话的旧结果。
+        QTimer.singleShot(3500, self._auto_probe_sources)
 
     # ---------------- UI ----------------
+    def _auto_probe_sources(self):
+        """★ V2.3.8：后台按当前网络测两条通道，让「自动」名副其实。
+
+        只发 4 个很小的请求（API 查一个项目 + CDN 下一张 35KB 图标），
+        结果只留在内存里，换网络 / 重开程序都会重新测。
+        手动锁死某个源的用户不做这一步，避免无谓请求。
+        """
+        try:
+            from .core import sources as _src
+            if _src.get_mirror() != "auto" and _src.get_download() != "auto":
+                return
+            from .dialogs import Worker
+            from .dialog_workers import _track
+
+            def job(on_log=None):
+                a = _src.probe_all_latency(timeout=6)
+                d = _src.probe_cdn_all_latency(timeout=6)
+                return (a, d)
+
+            w = _track(self, Worker(job, {}, self))
+            w.start()
+        except Exception:
+            pass
+
     def _build_ui(self):
         tb = self.addToolBar("主")
         tb.setMovable(False)
