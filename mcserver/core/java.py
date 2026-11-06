@@ -50,10 +50,23 @@ def _java_exe(name):
     return name + (".exe" if sys.platform == "win32" else "")
 
 
+_PROBE_CACHE = {}   # ★ V2.5.0：java -version 是子进程，别每次点启动都跑
+
+
 def probe(path):
     """探测一个 java 可执行文件，返回 (major, version_string) 或 None。"""
     if not path or not os.path.isfile(path):
         return None
+    key = None
+    try:
+        st = os.stat(path)
+        key = (os.path.normcase(os.path.abspath(path)),
+               st.st_mtime_ns, st.st_size)
+        hit = _PROBE_CACHE.get(key)
+        if hit is not None:
+            return hit
+    except Exception:
+        pass
     try:
         r = subprocess.run([path, "-version"], capture_output=True,
                            timeout=15,
@@ -68,7 +81,10 @@ def probe(path):
     if major is None:
         return None
     first = out.strip().splitlines()[0] if out.strip() else ""
-    return (major, first[:80])
+    result = (major, first[:80])
+    if key:
+        _PROBE_CACHE[key] = result
+    return result
 
 
 _SCAN_CACHE = None  # ★ V1.9.10：扫描结果缓存 —— 启动不再反复全盘扫描

@@ -253,6 +253,16 @@ class ServerOpsMixin:
                 ed = getattr(self, "ed_filter", None)
                 if ed is not None:
                     ed.clear()          # 触发 _on_filter_changed 重填视图
+                    # ★ V2.5.0：搜索框有 160ms 防抖，光 clear() 会让
+                    #   重填晚到、把下面这次定位选中又冲掉。程序化
+                    #   清空必须立刻生效，并取消挂着的定时器。
+                    try:
+                        t = getattr(self, "_filter_timer", None)
+                        if t is not None:
+                            t.stop()
+                        self._apply_filter_now()
+                    except Exception:
+                        pass
                 else:
                     self.filter_text = ""
                     self._fill_views()

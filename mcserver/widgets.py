@@ -88,6 +88,20 @@ class Console(QWidget):
         self.btn_find.setAutoDefault(False)
         self.btn_find.clicked.connect(self.show_search)
         h.addWidget(self.btn_find)
+        # ★ V2.5.0：以前想把报错发给别人，要连开三个对话框导出"诊断包"，
+        #   得到的还是一堆文件，不是单个 .log。这里直接给两个按钮。
+        self.btn_export = QPushButton("导出")
+        self.btn_export.setToolTip(
+            "把本控制台的完整日志另存为 .log（包含被『只看问题』隐藏的行）")
+        self.btn_export.setAutoDefault(False)
+        self.btn_export.clicked.connect(self.export_log)
+        h.addWidget(self.btn_export)
+        self.btn_clear = QPushButton("清空")
+        self.btn_clear.setToolTip(
+            "清空屏幕上的日志显示，不影响磁盘上的服务端日志文件")
+        self.btn_clear.setAutoDefault(False)
+        self.btn_clear.clicked.connect(self.clear)
+        h.addWidget(self.btn_clear)
         v.addLayout(h)
 
         self.proc = None
@@ -491,6 +505,39 @@ class Console(QWidget):
             return self.out.toPlainText()
         except Exception:
             return ""
+
+    def export_log(self):
+        """★ V2.5.0：把本控制台的完整日志另存为单个 .log 文件。
+
+        用 toPlainText()（内部优先读原始缓冲），所以开了"只看问题"
+        也不会把正常行漏掉；默认存到用户目录，文件名带服务器名和时间。
+        """
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        import os as _os
+        import time as _t
+        text = self.toPlainText()
+        if not text or not text.strip():
+            QMessageBox.information(self, "没有内容",
+                                    "当前控制台还没有日志可导出")
+            return
+        tag = "".join(
+            c for c in (getattr(self, "proc_name", "") or "console")
+            if c not in '\\/:*?"<>|').strip()[:40] or "console"
+        default = _os.path.join(
+            _os.path.expanduser("~"),
+            "MCSM_%s_%s.log" % (tag, _t.strftime("%Y%m%d-%H%M%S")))
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出控制台日志", default,
+            "日志文件 (*.log);;文本文件 (*.txt);;所有文件 (*)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(text.rstrip("\n") + "\n")
+        except Exception as e:
+            QMessageBox.warning(self, "导出失败", repr(e))
+            return
+        self.append("[导出] 日志已保存到 %s" % path)
 
     def clear(self):
         try:

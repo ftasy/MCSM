@@ -23,6 +23,37 @@ class ViewsMixin:
     """列表视图：图标卡片、表格、拖动排序、右键菜单与图标预取。"""
 
     # ---------------- 列表视图：图标 / 表格 / 排序 ----------------
+    def _cached_pixmap(self, path, px):
+        """★ V2.5.0：按 (路径, mtime, 大小, 尺寸) 缓存解码+缩放结果。
+
+        老实现每次 _fill_views() 都把每张图片重新 QPixmap() 解码并
+        做一次 SmoothTransformation 高质量缩放；配合搜索框无防抖，
+        连续输入时 CPU 全耗在重复解码同一张图上。
+        """
+        from PySide6.QtGui import QPixmap
+        key = None
+        try:
+            st = os.stat(path)
+            key = (os.path.normcase(os.path.abspath(path)),
+                   st.st_mtime_ns, st.st_size, px)
+        except Exception:
+            pass
+        cache = getattr(self, "_pm_cache", None)
+        if cache is None:
+            cache = self._pm_cache = {}
+        if key and key in cache:
+            return cache[key]
+        pm = QPixmap(path)
+        if pm.isNull():
+            return pm
+        pm = pm.scaled(px, px, Qt.KeepAspectRatio,
+                       Qt.SmoothTransformation)
+        if key:
+            if len(cache) > 200:
+                cache.clear()
+            cache[key] = pm
+        return pm
+
     def _icon_for(self, e, px=64):
         """给服务器做图标：优先用存档里的 icon.png。
 
@@ -33,10 +64,9 @@ class ViewsMixin:
         #    优先级最高 —— 自己选的当然要盖过自动识别的
         custom = (self._saved(e).get("icon") or "").strip()
         if custom and os.path.isfile(custom):
-            pm = QPixmap(custom)
+            pm = self._cached_pixmap(custom, px)
             if not pm.isNull():
-                return pm.scaled(px, px, Qt.KeepAspectRatio,
-                                Qt.SmoothTransformation)
+                return pm
         # 1) 服务器根目录的 server-icon.png
         for base in (e.get("server_dir"), e.get("folder")):
             if not base:
@@ -44,19 +74,17 @@ class ViewsMixin:
             for nm in ("server-icon.png", "icon.png"):
                 p = os.path.join(base, nm)
                 if os.path.isfile(p):
-                    pm = QPixmap(p)
+                    pm = self._cached_pixmap(p, px)
                     if not pm.isNull():
-                        return pm.scaled(px, px, Qt.KeepAspectRatio,
-                                        Qt.SmoothTransformation)
+                        return pm
         # 2) 存档目录里的 icon.png
         wd = e.get("world_dir")
         if wd:
             p = os.path.join(wd, "icon.png")
             if os.path.isfile(p):
-                pm = QPixmap(p)
+                pm = self._cached_pixmap(p, px)
                 if not pm.isNull():
-                    return pm.scaled(px, px, Qt.KeepAspectRatio,
-                                    Qt.SmoothTransformation)
+                    return pm
         # 3) 画一个
         col = LOADER_DOT_COLORS.get(
             (e.get("loader") or "").lower(), "#607d8b")
@@ -128,6 +156,12 @@ class ViewsMixin:
             L.append("端口：%s" % port)
         if e.get("regions"):
             L.append("Region：%s 个" % e["regions"])
+        try:
+            sz = self._size_text(e)
+            if sz and sz != "-":
+                L.append("占用：%s" % sz)
+        except Exception:
+            pass
         if self._key(e) in self.procs:
             L.append("● 运行中")
         elif e.get("notes"):
@@ -271,9 +305,46 @@ class ViewsMixin:
             pass
 
     def _on_filter_changed(self, text):
-        """搜索框内容变化 -> 重建两个视图。"""
+        """★ V2.5.0：160ms 防抖。
+
+        老实现 textChanged 每敲一个字符就重建图标+表格两套视图
+        （最多 60 张卡片、每行 7 个 item 外加图标解码）。
+        连续输入时逐字符掉帧，现在停下来才刷新一次。
+        """
         self.filter_text = (text or "").strip()
+        try:
+            t = getattr(self, "_filter_timer", None)
+            if t is None:
+                from PySide6.QtCore import QTimer
+                t = QTimer(self)
+                t.setSingleShot(True)
+                t.timeout.connect(self._apply_filter_now)
+                self._filter_timer = t
+            t.start(160)
+        except Exception:
+            self._apply_filter_now()
+
+    def _apply_filter_now(self):
+        # ★ V2.5.0：防抖刷新是"迟到的"，_fill_table() 末尾会
+        #   selectRow(0)，把用户/程序刚选中的服务器冲掉。刷新前后
+        #   记住并恢复选中的 key。
+        cur_key = None
+        try:
+            e = self._cur_entry()
+            if e:
+                cur_key = self._key(e)
+        except Exception:
+            pass
         self._fill_views()
+        if cur_key:
+            try:
+                for r in range(self.table.rowCount()):
+                    it = self.table.item(r, 0)
+                    if it is not None and it.data(Qt.UserRole) == cur_key:
+                        self.table.selectRow(r)
+                        break
+            except Exception:
+                pass
         n = self.icon_view.count() if self.view_mode == "icon" \
             else self.table.rowCount()
         total = len(self.entries)
@@ -736,10 +807,15 @@ class ViewsMixin:
         """按大小排序时，后台计算所有服务器目录大小（写进 _size_cache）。"""
         if getattr(self, "_size_worker_running", False):
             return
+        import time as _t
+        # ★ V2.5.0：表格新增『占用』列后扫描完成会无条件触发一次，
+        #   加 5 分钟节流，避免每次刷新都把每个服整棵树遍历一遍。
+        if _t.time() - getattr(self, "_last_size_scan", 0) < 300:
+            return
+        self._last_size_scan = _t.time()
         self._size_worker_running = True
         self.statusBar().showMessage("正在计算各服务器大小 ...")
         entries = list(self.entries)
-        import time as _t
 
         def job(on_log=None):
             from .core import install as _inst
@@ -774,7 +850,9 @@ class ViewsMixin:
                 self._size_cache[k] = {"s": s, "t": t}
             self._fill_views()
             self.statusBar().showMessage(
-                "大小计算完成，已按大小排序", 4000)
+                "大小计算完成" + ("，已按大小排序"
+                                 if getattr(self, "sort_mode", "") == "size"
+                                 else "，『占用』列已更新"), 4000)
         else:
             self.statusBar().showMessage(
                 "大小计算失败，保持当前顺序", 4000)

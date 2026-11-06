@@ -24,6 +24,52 @@ def mcstatus_available():
         return False
 
 
+def port_busy(port):
+    """本机 TCP 端口是否已被占用（含**不是本软件管理**的程序）。
+
+    ★ V2.5.0：启动前的端口预检。两个角度一起判：
+      ① 能否 bind 通配地址 —— 已有监听者时 Windows 返回 WSAEADDRINUSE；
+      ② 能否连上本机回环 —— 抓住只绑 127.0.0.1 / 用了 SO_REUSEADDR
+         的程序。bind 时不设 SO_REUSEADDR（Windows 上设了反而能共存，
+         检测会漏报）。
+    全程几毫秒，不 listen、不发数据，没有副作用。
+    """
+    try:
+        p = int(port)
+    except Exception:
+        return False
+    for fam, addr in ((socket.AF_INET, ("0.0.0.0", p)),
+                      (socket.AF_INET6, ("::", p))):
+        s = None
+        try:
+            s = socket.socket(fam, socket.SOCK_STREAM)
+            s.bind(addr)
+        except OSError:
+            return True
+        except Exception:
+            pass
+        finally:
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+    for host in ("127.0.0.1", "::1"):
+        s = None
+        try:
+            s = socket.create_connection((host, p), timeout=0.25)
+            return True
+        except Exception:
+            pass
+        finally:
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+    return False
+
+
 def live_status(port, timeout=3):
     """探测本机 MC 服状态。耗时网络操作，调用方放 Worker 线程。"""
     # 1) socket 连通性 + 延迟（连接耗时即延迟）

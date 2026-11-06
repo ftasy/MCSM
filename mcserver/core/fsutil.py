@@ -181,14 +181,45 @@ def read_text_fallback(path, encoding="utf-8"):
     return None
 
 
-def read_json_fallback(path):
-    """读 JSON；主文件损坏时退回 .bak。都失败返回 None。"""
-    for p in (path, path + ".bak"):
+def read_json_fallback(path, validate=None, keep=DEFAULT_KEEP):
+    """读 JSON；主文件损坏时依次回退 .bak / .bak.2 / .bak.3。
+
+    ★ V2.5.0：以前只退 .bak 一份，而 snapshot 明明留了 keep 份；
+      且不校验结构 —— 合法的 `null` / `[]` 会被当成正常数据返回。
+    validate 可选：func(obj) -> bool，用于拒绝"能解析但语义不对"的内容。
+    全部候选都失败返回 None。
+    """
+    base = path + ".bak"
+    candidates = [path, base] + [
+        "%s.%d" % (base, i) for i in range(2, max(2, keep) + 1)]
+    for p in candidates:
         try:
             if not os.path.isfile(p):
                 continue
             with open(p, "r", encoding="utf-8") as f:
-                return json.load(f)
+                obj = json.load(f)
+            if validate is not None and not validate(obj):
+                raise ValueError("结构不符合预期: %s" % type(obj).__name__)
+            return obj
         except Exception:
             continue
     return None
+
+
+def quarantine_corrupt(path):
+    """把损坏的主文件复制一份留证（不删原件），返回留证路径。
+
+    用于"读失败但绝不能让空数据写回覆盖"的场景。已有留证时不重复生成。
+    """
+    import glob
+    import time as _t
+    try:
+        if glob.glob(path + ".corrupt-*"):
+            return None
+        if not os.path.isfile(path):
+            return None
+        dst = "%s.corrupt-%s" % (path, _t.strftime("%Y%m%d-%H%M%S"))
+        shutil.copy2(path, dst)
+        return dst
+    except Exception:
+        return None

@@ -124,15 +124,51 @@ def _cleanup_auto_backups(bdir, keep=5, on_log=None):
         except Exception as e:
             log("  [跳过] 删不掉 %s: %r" % (n, e))
 
+class BackupCancelled(Exception):
+    """用户点了『取消备份』；抛它时半成品会被清掉。"""
+
+
+def _backup_file_count(world_path):
+    """先数一遍要处理的文件（纯遍历，很快），让进度条有真实分母。"""
+    n = 0
+    try:
+        for dp, dn, fn in os.walk(world_path):
+            dn[:] = [x for x in dn if x != "session.lock"]
+            n += sum(1 for f in fn if f != "session.lock")
+    except Exception:
+        pass
+    return n
+
+
 def backup_world(world_path, server_dir, note="", compress=False,
-                 on_log=None):
+                 on_log=None, on_progress=None, cancel=None):
     """备份一个存档。
     compress=False -> 直接复制文件夹（快，占空间）
     compress=True  -> 打成 zip（慢，省空间）
+
+    ★ V2.5.0：加 on_progress(已完成, 总数, 当前文件名) 和
+      cancel(threading.Event)。取消或失败都会删掉半成品 —— 半截 zip
+      留在 backups/ 里会被当成一份"可用备份"，恢复时才发现是坏的。
     """
     log = on_log or (lambda m: None)
     if not is_world_dir(world_path):
         raise ValueError("不是有效存档: %s" % world_path)
+
+    total = _backup_file_count(world_path)
+    n = 0
+    dest = None
+
+    def tick(next_n, label=""):
+        if cancel is not None and cancel.is_set():
+            raise BackupCancelled()
+        # 每 10 个文件报一次，别让 Qt 信号把 UI 淹了
+        if on_progress and (next_n % 10 == 0 or next_n == 1):
+            try:
+                on_progress(next_n, total, label)
+            except BackupCancelled:
+                raise
+            except Exception:
+                pass
 
     bdir = os.path.join(server_dir, BACKUP_DIRNAME)
     os.makedirs(bdir, exist_ok=True)
@@ -141,40 +177,60 @@ def backup_world(world_path, server_dir, note="", compress=False,
     tag = ("_" + _safe(note)) if note else ""
     base = "%s_%s%s" % (wname, stamp, tag)
 
-    if compress:
-        dest = os.path.join(bdir, base + ".zip")
-        log("压缩备份 %s ..." % world_path)
-        n = 0
-        with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED,
-                             compresslevel=6) as z:
-            for dp, dn, fn in os.walk(world_path):
-                dn[:] = [x for x in dn
-                         if x not in ("session.lock",)]
-                for f in fn:
-                    if f == "session.lock":
-                        continue
-                    full = os.path.join(dp, f)
-                    try:
-                        z.write(full, os.path.relpath(full, world_path))
-                        n += 1
-                    except Exception:
-                        pass
-        log("已写入 %d 个文件" % n)
-        size = os.path.getsize(dest)
-    else:
-        dest = os.path.join(bdir, base)
-        log("复制 %s ..." % world_path)
-        shutil.copytree(world_path, dest,
-                        ignore=shutil.ignore_patterns("session.lock"))
-        size = _dir_size(dest)
+    try:
+        if compress:
+            dest = os.path.join(bdir, base + ".zip")
+            log("压缩备份 %s（共 %d 个文件）..." % (world_path, total))
+            with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED,
+                                 compresslevel=6) as z:
+                for dp, dn, fn in os.walk(world_path):
+                    dn[:] = [x for x in dn if x != "session.lock"]
+                    for f in fn:
+                        if f == "session.lock":
+                            continue
+                        tick(n + 1, f)
+                        full = os.path.join(dp, f)
+                        try:
+                            z.write(full, os.path.relpath(full, world_path))
+                            n += 1
+                        except BackupCancelled:
+                            raise
+                        except Exception:
+                            pass
+            log("已写入 %d 个文件" % n)
+            size = os.path.getsize(dest)
+        else:
+            dest = os.path.join(bdir, base)
+            log("复制 %s（共 %d 个文件）..." % (world_path, total))
+
+            def _copy2(src, dst):
+                nonlocal n
+                tick(n + 1, os.path.basename(src))
+                n += 1
+                return shutil.copy2(src, dst)
+
+            shutil.copytree(world_path, dest,
+                            ignore=shutil.ignore_patterns("session.lock"),
+                            copy_function=_copy2)
+            size = _dir_size(dest)
+    except BaseException:
+        # 取消 / 出错都不留半成品
+        try:
+            if dest and os.path.isfile(dest):
+                os.remove(dest)
+            elif dest and os.path.isdir(dest):
+                shutil.rmtree(dest, ignore_errors=True)
+        except Exception:
+            pass
+        raise
 
     mb = round(size / 1048576.0, 1)
     log("[OK] 备份完成: %s (%.1f MB)" % (os.path.basename(dest), mb))
-    
+
     # ★ 如果是自动备份，则触发清理，只保留最新 5 个
     if note == "auto":
         _cleanup_auto_backups(bdir, keep=5, on_log=log)
-        
+
     return {"path": dest, "size_mb": mb, "stamp": stamp,
             "world": wname, "kind": "zip" if compress else "dir"}
 
@@ -444,10 +500,33 @@ def restore_backup(backup_path, target_world, on_log=None,
                 "恢复后 %s 里没有 level.dat，可能备份有问题"
                 % os.path.basename(target_world))
     except Exception as e:
+        # ★ V2.5.0：老回滚是 rmtree(ignore_errors=True) 后直接
+        #   os.rename(tmp, target_world)。存档被 java / 杀软占用时删不干净，
+        #   rename 会抛 OSError 冒泡 —— 结果旧世界卡在 world_old_*，
+        #   原目录里是"恢复一半 + 残留旧文件"的混合存档。
+        #   现在改成：先把半成品整体挪走 → 无条件把旧存档放回 → 再清理。
         log("恢复失败，正在回滚 ...")
-        if os.path.isdir(target_world):
-            shutil.rmtree(target_world, ignore_errors=True)
-        os.rename(tmp, target_world)
+        half = target_world + "_failed_%s" % safe_stamp()
+        rollback_err = None
+        try:
+            if os.path.isdir(target_world):
+                os.rename(target_world, half)
+        except Exception as re_:
+            rollback_err = re_
+        try:
+            os.rename(tmp, target_world)
+        except Exception as re_:
+            rollback_err = re_
+        if rollback_err is not None:
+            raise RuntimeError(
+                "恢复失败且自动回滚未完成：%r\n"
+                "原始存档仍在：%s\n残留的新数据在：%s\n"
+                "请停止服务器后手动把原始存档改回原名。"
+                % (e, tmp, half))
+        try:
+            shutil.rmtree(half, ignore_errors=True)
+        except Exception:
+            pass
         raise RuntimeError("恢复失败已回滚: %r" % e)
 
     # 把旧存档挪进 backups/，不留在根目录

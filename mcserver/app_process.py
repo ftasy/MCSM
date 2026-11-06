@@ -96,22 +96,27 @@ class ProcessMixin:
         self._prepare_auth(e, lambda: self._finish_start(e, auto_restart))
 
     def _start_batch(self, entries, auto_restart=False):
-        """★ V2.3.3：批量启动。逐个排队启动，跳过已在运行/磁盘空间不足。"""
-        started = skipped = 0
+        """★ V2.3.3 批量启动；★ V2.5.0 跳过原因逐台点名。"""
+        started = 0
+        skipped = []
         for e in entries:
+            name = e.get("name") or e.get("folder") or "?"
             if self._key(e) in self.procs:
-                skipped += 1
+                skipped.append("%s：已在运行" % name)
                 continue
             if not self._check_disk_space(e):
-                skipped += 1
+                skipped.append("%s：磁盘可用空间不足" % name)
                 continue
             self._start_one(e, auto_restart)
             started += 1
         self._log_console(
             "[批量启动] 已在队列启动 %d 个，跳过 %d 个"
-            "（已在运行 / 磁盘空间不足）" % (started, skipped))
+            % (started, len(skipped)))
+        for line in skipped:
+            self._log_console("  [跳过] " + line)
         self.statusBar().showMessage(
-            "批量启动：启动 %d，跳过 %d" % (started, skipped), 4000)
+            "批量启动：启动 %d，跳过 %d（详情看输出）"
+            % (started, len(skipped)), 5000)
 
     def _disk_free_gb(self, e):
         """服务器所在盘的剩余可用空间（GB），取不到返回 None。
@@ -300,6 +305,19 @@ class ProcessMixin:
         #   软件内右下角控制台页签（用户明确要的形态：主页点启动 →
         #   右下角输出窗口新建该服务器的监控页签并滚动显示服务器日志）。
         proc = QProcess(self)
+        # ★ V2.5.0：实测 FailedToStart 是在 proc.start() 返回【之前】
+        #   同步 emit 的。以前 self.procs[k] = proc 写在 start() 之后，
+        #   _start_failed 反查不到 key，随后又把失败的 proc 写进字典 ——
+        #   这台服就永久卡在"运行中"，点停止还会访问已 deleteLater 的对象。
+        #   现在：进程一创建就登记 + 带上 key，失败清理不再依赖遍历反查。
+        try:
+            proc._mcsm_key = k
+            proc._mcsm_failed = False
+            proc._auto_restart = bool(auto_restart)
+        except Exception:
+            pass
+        self.procs[k] = proc
+        self._is_stopping[k] = False
         proc.setWorkingDirectory(sd)
         proc.setProcessChannelMode(QProcess.MergedChannels)
         proc.readyRead.connect(lambda p=proc: self._read(p))
@@ -355,20 +373,25 @@ class ProcessMixin:
             # 兜底：实在判断不出来才走 bat
             proc.start(bat, [])
         else:
+            # ★ V2.5.0：进程已经提前登记进 procs，这个"没核心"的早退
+            #   分支必须把登记撤销，否则同样会留下永久"运行中"的假状态。
+            self.procs.pop(k, None)
+            self._cleanup_proc_state(proc, k)
+            try:
+                proc.deleteLater()
+            except Exception:
+                pass
             QMessageBox.warning(self, "无法启动",
                                 "没找到可启动的核心，"
                                 "请先『初始化服务端』")
             self._restore_start_btn(e)
             return
 
-        # ★ 隐患 3：把"是不是自动重启"记在 proc 上，
-        #   _start_failed 据此决定是否弹窗（自动重启失败不弹）
-        try:
-            proc._auto_restart = bool(auto_restart)
-        except Exception:
-            pass
-        self.procs[k] = proc
-        self._is_stopping[k] = False
+        # ★ V2.5.0：start() 返回后先确认没有启动失败。
+        #   _start_failed 已在同步 emit 里完成清理并 deleteLater，
+        #   这里绝不能继续往下把控制台设成"运行中"（老 bug 的核心）。
+        if bool(getattr(proc, "_mcsm_failed", False)):
+            return
         try:
             _pid = proc.processId()
             if _pid:
@@ -729,6 +752,50 @@ class ProcessMixin:
         except Exception:
             pass
 
+    def _cleanup_proc_state(self, proc, key):
+        """启动失败时清掉所有按 key 挂着的状态（与 _finished 对齐）。
+
+        ★ V2.5.0：老 _start_failed 只删了 procs 和 auto_backup_timers，
+          定时重启 QTimer、.mcsm_pid、_is_stopping、pending_backups
+          全留着 —— 定时器空转到窗口关闭，残留的 _is_stopping 还会把
+          下一次真崩溃误判成"主动停止"。
+        """
+        if not key:
+            return
+        for attr in ("_restart_timers", "auto_backup_timers"):
+            d = getattr(self, attr, None) or {}
+            t = d.pop(key, None)
+            if t is not None:
+                try:
+                    t.stop()
+                except Exception:
+                    pass
+        d = getattr(self, "_log_tailers", None) or {}
+        t = d.pop(key, None)
+        if t is not None:
+            try:
+                t.stop()
+            except Exception:
+                pass
+        for attr in ("_is_stopping", "_port_cache", "_ping_text",
+                     "_restart_countdown", "_plan_restart", "_mon_extra",
+                     "pending_backups"):
+            try:
+                (getattr(self, attr, None) or {}).pop(key, None)
+            except Exception:
+                pass
+        for en in list(getattr(self, "entries", []) or []):
+            try:
+                if self._key(en) == key:
+                    _sd = en.get("server_dir") or en.get("folder", "")
+                    try:
+                        os.remove(os.path.join(_sd, ".mcsm_pid"))
+                    except Exception:
+                        pass
+                    break
+            except Exception:
+                pass
+
     def _start_failed(self, proc, err):
         """QProcess 启动失败（java 路径失效 / 权限不足 / 被安全软件拦）。
 
@@ -743,27 +810,22 @@ class ProcessMixin:
         except Exception:
             return
 
-        # ★ 隐患 3 前置：先读完 _auto_restart 再 deleteLater ——
-        #   虽然 PySide6 现在允许 deleteLater 后读 Python 属性，
-        #   但这是隐含行为，提前读保证不依赖它。
+        # ★ V2.5.0：属性在 proc 创建时就写好了（_auto_restart 也提前），
+        #   不依赖 deleteLater 之后还能不能读 Python 属性。
         is_auto = bool(getattr(proc, "_auto_restart", False))
-
-        key = None
-        for k, p in list(self.procs.items()):
-            if p is proc:
-                key = k
-                del self.procs[k]
-                break
-
-        # ★ 隐患 2：do_start 在 procs[k] = proc 之后、errorOccurred
-        #   之前就建了 auto_backup timer，这里不清，timer 会挂到下次
-        #   触发（30 分钟）才被 _do_auto_backup 的 k not in procs 挡住。
-        if key and key in self.auto_backup_timers:
-            try:
-                self.auto_backup_timers[key].stop()
-                del self.auto_backup_timers[key]
-            except Exception:
-                pass
+        key = getattr(proc, "_mcsm_key", None)
+        if key is None:
+            for k, p in list(self.procs.items()):
+                if p is proc:
+                    key = k
+                    break
+        try:
+            proc._mcsm_failed = True
+        except Exception:
+            pass
+        if key and self.procs.get(key) is proc:
+            self.procs.pop(key, None)
+        self._cleanup_proc_state(proc, key)
 
         c = self._console_of(proc) or self.console
         c.append("[!] 服务器未能启动：java 找不到 / 权限不足 / 被拦截")
@@ -1062,7 +1124,21 @@ class ProcessMixin:
         except Exception:
             pass
 
-        # ★ 停掉所有还在跑的后台线程
+        # ★ V2.5.0：分析日志等窗口是 NonModal 顶层窗口，和浮动控制台
+        #   一样会挡住 QApplication 退出。老收尾只关 float_consoles，
+        #   开着分析窗口点关闭会"窗口没了但进程还在"。
+        try:
+            for _d in list(getattr(self, "_dlg_refs", []) or []):
+                try:
+                    _d.close()
+                except Exception:
+                    pass
+            self._dlg_refs = []
+        except Exception:
+            pass
+
+        # ★ 停掉所有还在跑的后台线程（os._exit 不会走 aboutToQuit，
+        #   所以这一步必须在下面显式做完）
         try:
             from .dialogs import _stop_all_threads
             _stop_all_threads()
@@ -1077,10 +1153,14 @@ class ProcessMixin:
                 pass
         self.auto_backup_timers.clear()
 
+        # ★ V2.5.0：保存结果要看一眼，失败至少落日志，
+        #   别让"明明没存上却安静退出"。
         try:
-            self._save_data()
-        except Exception:
-            pass
+            _ok, _err = self._save_data()
+            if not _ok and not getattr(self, "_block_autosave", False):
+                logging.warning("[退出] 数据没保存上：%s", _err)
+        except Exception as e:
+            logging.warning("[退出] 保存异常：%r", e)
         ev.accept()
         # ★ V2.4.1：保留了服务器进程时必须 os._exit ——
         #   实测 QProcess 的析构函数会 kill 子进程（哪怕已经

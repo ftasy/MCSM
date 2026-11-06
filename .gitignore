@@ -36,9 +36,11 @@ build/
 dist/
 build240/
 build241/
+build250/
 build_new/
 dist240/
 dist241/
+dist250/
 dist_new/
 build_log.txt
 MCSM.spec

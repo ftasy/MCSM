@@ -218,18 +218,64 @@ class LibraryMixin:
         return paths.data_file(DATA_FILE)
 
     def _load_data(self):
+        """★ V2.5.0：读失败绝不再静默。
+
+        老实现 `except Exception: pass` + 只回退 .bak 一份：主文件被截断
+        成 `null`/[] 时界面照常用，退出时又把空数据原子写回、把好的
+        .bak 轮转走 —— 用户全程零提示，服务器列表就这么没了。
+        现在：依次回退 3 份快照、校验结构、留证损坏原文件、
+        **暂停自动保存**（_block_autosave）并明确告知用户。
+        """
+        p = self._data_path()
+        if not os.path.isfile(p):
+            return
+
+        def _valid(d):
+            return (isinstance(d, dict)
+                    and isinstance(d.get("servers", {}), dict)
+                    and isinstance(d.get("display", {}), dict))
+
+        d = None
         try:
-            p = self._data_path()
-            if os.path.isfile(p):
-                # 主文件损坏（半截/空）时自动退回 .bak，别让用户白丢列表
-                d = fsutil.read_json_fallback(p)
-                if d is None:
-                    raise ValueError("servers.json 与 .bak 都无法解析")
+            d = fsutil.read_json_fallback(p, validate=_valid)
+        except Exception as e:
+            logging_msg = repr(e)
+        else:
+            logging_msg = ""
+        if d is not None:
+            try:
                 self.data = d
                 if "display" in self.data:
                     self.disp.update(self.data["display"])
                 if "servers" not in self.data:
                     self.data["servers"] = {}
+                return
+            except Exception as e:
+                logging_msg = repr(e)
+
+        # ---- 到这里：主文件 + 3 份快照都读不出来 ----
+        keep = None
+        try:
+            keep = fsutil.quarantine_corrupt(p)
+        except Exception:
+            pass
+        self._block_autosave = True
+        msg = ("服务器列表读取失败：servers.json 和它的备份都无法解析"
+               "（%s）。\n\n"
+               "已暂停自动保存，防止把空列表写回覆盖原数据。\n"
+               "原始文件已留证%s；请从 .bak 手动恢复后重启软件。"
+               % (logging_msg or "结构损坏/被截断",
+                  ("：%s" % os.path.basename(keep)) if keep else ""))
+        try:
+            import logging as _lg
+            _lg.warning("[数据] %s", msg)
+        except Exception:
+            pass
+        try:
+            from PySide6.QtCore import QTimer
+            self.statusBar().showMessage("⚠ 服务器列表读取失败，已暂停自动保存", 20000)
+            QTimer.singleShot(
+                0, lambda: QMessageBox.warning(self, "服务器列表读取失败", msg))
         except Exception:
             pass
 
@@ -243,6 +289,10 @@ class LibraryMixin:
           重启一看全没了。
           现在写失败会在状态栏红字提示，并弹一次窗说明原因。
         """
+        # ★ V2.5.0：读都读坏了，绝不能让空数据写回覆盖原文件。
+        #   这种情况下用户改的设置本次运行不会保存，提示已在 _load_data 给出。
+        if getattr(self, "_block_autosave", False):
+            return (False, "服务器列表读取失败，已暂停自动保存以防覆盖原数据")
         p = self._data_path()
         try:
             d0 = os.path.dirname(p)
@@ -357,8 +407,12 @@ class LibraryMixin:
         self._fill_views()
         self.statusBar().showMessage(
             "扫描完成，共 %d 个" % len(self.entries))
-        if self.sort_mode == "size":
-            self._prefetch_sizes()  # ★ 扫描完若在按大小排序，后台补算
+        # ★ V2.5.0：表格有『占用』列，扫描完成后无条件后台算一次。
+        #   _prefetch_sizes 内部有 5 分钟节流，不会每次刷新都全盘遍历。
+        try:
+            self._prefetch_sizes()
+        except Exception:
+            pass
         # ★ V2.3.6：扫描完成后再做"接管上次仍在运行的服务器"。
         #   以前是在启动后固定 500ms 调接管，那会儿扫描还没完，
         #   entries 空着 → 什么服都接管不了（用户反馈"没自动接管"）。
@@ -396,6 +450,13 @@ class LibraryMixin:
           而默认视图是图标 -> 用户看到的就是一个空面板。
           现在统一走这里，不会再漏。
         """
+        # ★ V2.5.0：首次使用引导卡，只在没设总目录且没有服务器时出现
+        try:
+            self.welcome.setVisible(
+                not bool(getattr(self, "root", ""))
+                and not bool(getattr(self, "entries", [])))
+        except Exception:
+            pass
         self._fill_icons()
         self._fill_table()
         self._update_draghint()
@@ -410,6 +471,16 @@ class LibraryMixin:
                     "图标视图渲染异常，已自动退回表格视图")
         except Exception:
             pass
+
+    def _size_text(self, e):
+        """『占用』列 / 悬停提示：只从后台缓存取，绝不在这里扫盘。"""
+        try:
+            from .core import install
+            hit = (getattr(self, "_size_cache", {}) or {}).get(self._key(e))
+            s = (hit or {}).get("s") or 0
+            return install.human_size(s) if s else "-"
+        except Exception:
+            return "-"
 
     def _fill_table(self):
         self.table.setRowCount(0)
@@ -429,6 +500,7 @@ class LibraryMixin:
                 e.get("world_name") or "-",
                 str(e.get("regions") or 0),
                 "未初始化" if e.get("notes") else "就绪",
+                self._size_text(e),
             ]
             for c, v in enumerate(vals):
                 it = QTableWidgetItem(v)

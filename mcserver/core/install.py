@@ -150,15 +150,38 @@ def _download(url, dest, timeout=180, on_retry=None, on_log=None,
         #   180 秒的默认超时会让"取消"看起来没反应。
         eff_timeout = min(timeout, 60) if cancel is not None else timeout
 
-        # ★ 断点续传：有未下完的 .tmp 就带 Range 续传
+        # ★ 断点续传：有未下完的 .tmp 就带 Range 续传。
+        # ★ V2.5.0：续传只在【同一个 URL】上有效。镜像 CDN 和官方 CDN
+        #   是两个主机，换源时若还从旧 .tmp 的字节数往后追加，可能把
+        #   两份不同字节流拼成一个损坏 jar（无哈希的 GitHub/CF 老数据
+        #   会直接落地）。这里用 .tmp.src 记住来源，不一致就重新下。
+        srcmark = tmp + ".src"
         downloaded = 0
         if os.path.exists(tmp):
             try:
-                downloaded = os.path.getsize(tmp)
+                with open(srcmark, "r", encoding="utf-8") as f:
+                    prev_url = f.read().strip()
             except Exception:
-                downloaded = 0
-            if downloaded > 0:
-                req.add_header("Range", "bytes=%d-" % downloaded)
+                prev_url = ""
+            if prev_url != url:
+                if on_log:
+                    on_log("    [续传] 下载源变了，丢弃上次的半截文件")
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+            else:
+                try:
+                    downloaded = os.path.getsize(tmp)
+                except Exception:
+                    downloaded = 0
+        try:
+            with open(srcmark, "w", encoding="utf-8") as f:
+                f.write(url)
+        except Exception:
+            pass
+        if downloaded > 0:
+            req.add_header("Range", "bytes=%d-" % downloaded)
 
         try:
             with urllib.request.urlopen(req, timeout=eff_timeout) as r:
@@ -199,10 +222,13 @@ def _download(url, dest, timeout=180, on_retry=None, on_log=None,
             raise
 
         _check_cancel(cancel)
-        # 下载完成：.tmp -> dest
-        if os.path.exists(dest):
-            os.remove(dest)
-        os.rename(tmp, dest)
+        # 下载完成：.tmp -> dest（★ V2.5.0 用 os.replace 一步原子覆盖，
+        #   以前先 remove 再 rename 中间有窗口，并发时会撞 FileNotFoundError）
+        os.replace(tmp, dest)
+        try:
+            os.remove(srcmark)
+        except Exception:
+            pass
 
     _retry(_do_download, on_retry=on_retry)
     return os.path.getsize(dest)

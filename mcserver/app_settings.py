@@ -511,6 +511,32 @@ class SettingsMixin:
         except Exception:
             pass
 
+    def do_toggle_theme(self):
+        """★ V2.5.0：工具栏一键深浅切换。
+
+        README 早就写了"深色/浅色主题：一键切换"，实际却要
+        打开显示设置 → 切到外观页 → 挑预设 → 点 OK 共 4 步。
+        这里按当前背景亮度挑一组对比度合规的预设，立即应用并落盘。
+        """
+        from .core import theme as _th
+        dark = _th.is_dark_bg()
+        fg, bg, ac, idle = _th.preset_apply(
+            "浅灰白（默认）" if dark else "深灰")
+        ok, err = _th.save({"fg": fg, "bg": bg, "accent": ac,
+                            "item_idle_mode": idle})
+        if not ok:
+            QMessageBox.warning(
+                self, "主题没保存上",
+                "配色没能写入文件，重启后会回到旧的样子。\n\n%s" % err)
+            return
+        self._apply_theme()
+        try:
+            self._fill_views()
+        except Exception:
+            pass
+        self.statusBar().showMessage(
+            "已切换到%s主题" % ("浅色" if dark else "深色"), 4000)
+
     def _apply_theme(self):
         """把主题套到整个程序上。"""
         from .core import theme as _th

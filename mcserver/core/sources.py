@@ -786,7 +786,7 @@ def github_latest_jar(repo, mc_version=None, loader=None):
 _SITE_PROBE_CACHE = {}
 
 
-def probe_site_exists(slug, name, kind, timeout=6):
+def probe_site_exists(slug, name, kind, timeout=4):
     """探测某模组在指定站点上是否真的有信息。
 
     kind: "modrinth" / "curseforge" / "mcmod"

@@ -282,49 +282,65 @@ class ConsoleMixin:
 
     # ---------------- V0.5.0：实时状态监控 ----------------
     def _ping_round(self):
-        """每 10 秒：对所有运行中的服务器做一次状态探测（Worker 线程）。
+        """每 10 秒：并发探测所有运行中的服务器状态（一个后台 Worker）。
 
-        ★ 探测是网络 IO，绝不能卡主线程；busy 集合防止 10 秒轮次
-          没跑完就堆积新一轮。
+        ★ V2.5.0：老实现每台服创建一个 QThread，10 台服就是每 10 秒
+          创建/销毁 10 个线程。现在只提交一个任务，内部 4 线程池并发；
+          _ping_round_busy 防止上一轮没跑完就堆新一轮。
         """
-        if not self.procs:
+        if not self.procs or getattr(self, "_ping_round_busy", False):
             return
-        by_key = {}
-        for en in self.entries:
-            by_key[self._key(en)] = en
-        for k, e in list(by_key.items()):
-            if k not in self.procs or k in self._ping_busy:
+        by_key = {self._key(en): en for en in self.entries}
+        targets = []
+        for k, proc in list(self.procs.items()):
+            if k in self._ping_busy or k not in by_key:
                 continue
-            self._ping_busy.add(k)
-            port = self._port_of(e)
-            proc = self.procs.get(k)
             pid = 0
             try:
                 if proc is not None and proc.state() == QProcess.Running:
                     pid = int(proc.processId() or 0)
             except Exception:
                 pid = 0
+            targets.append((k, self._port_of(by_key[k]), pid))
+        if not targets:
+            return
+        self._ping_round_busy = True
+        for k, _, _ in targets:
+            self._ping_busy.add(k)
 
-            def job(port=port, pid=pid, on_log=None):
+        def job(on_log=None):
+            from concurrent.futures import ThreadPoolExecutor
+
+            def one(t):
+                k, port, pid = t
                 r = monitor.live_status(port)
-                # ★ V2.0.1：进程 CPU/内存（只对真在跑的 java 进程）
                 if r.get("online") and pid > 0:
                     st = monitor.proc_stats(pid)
                     r["cpu_pct"] = st.get("cpu_pct")
                     r["mem_mb"] = st.get("mem_mb")
-                return r
+                return k, r
 
-            w = _track(self, Worker(job, {}, self))
-            # ★ V2.0.1.1：ping 线程异常打到总输出，便于排查"无响应"
+            out = {}
+            with ThreadPoolExecutor(max_workers=4) as ex:
+                for k, r in ex.map(one, targets):
+                    out[k] = r
+            return out
+
+        w = _track(self, Worker(job, {}, self))
+        w.done.connect(self._on_ping_round_done)
+        w.start()
+
+    def _on_ping_round_done(self, ok, res):
+        self._ping_round_busy = False
+        data = res if isinstance(res, dict) else {}
+        for k in list(self._ping_busy):
+            if k not in data:
+                self._ping_busy.discard(k)
+        for k, r in data.items():
             try:
-                w.log.connect(
-                    lambda m, kk=k: self._log_console(
-                        "[ping:%s] %s" % (kk, m)))
+                self._on_ping_done(k, ok, r)
             except Exception:
                 pass
-            w.done.connect(
-                lambda ok, res, kk=k: self._on_ping_done(kk, ok, res))
-            w.start()
 
     def _on_ping_done(self, key, ok, res):
         self._ping_busy.discard(key)
@@ -531,6 +547,28 @@ class ConsoleMixin:
                 self._suggest_port(e)
                 return False
             return True  # 用户坚持，让他试
+
+        # ★ V2.5.0：老逻辑只比较"本软件管理的服务器之间"是否撞端口。
+        #   25565 被外部 MC 服 / 别的程序占着时毫无预警，等 Java 报
+        #   Address already in use 崩了才去翻日志。这里补一次系统级探测。
+        try:
+            from .core import monitor
+            if monitor.port_busy(port):
+                r = QMessageBox.warning(
+                    self, "端口被占用",
+                    "端口 %d 已经被本机上的其它程序占用了。\n"
+                    "『%s』现在启动一定会失败"
+                    "（Address already in use）。\n\n"
+                    "要自动换一个空闲端口吗？"
+                    % (port, e.get("name") or e.get("folder")),
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes)
+                if r == QMessageBox.Yes:
+                    self._suggest_port(e)
+                    return False
+                return True
+        except Exception:
+            pass
         return True
 
     def _firewall_allow(self, e):
@@ -607,8 +645,20 @@ class ConsoleMixin:
             if self._key(en) in self.procs:
                 used.add(self._port_of(en))
         port = self._port_of(e)
-        while port in used:
+
+        def _busy(p):
+            # ★ V2.5.0：建议端口不能只看本软件内部，外部程序占着的
+            #   也要跳过，否则"自动换端口"会换到一个照样起不来的端口。
+            try:
+                from .core import monitor
+                return monitor.port_busy(p)
+            except Exception:
+                return False
+
+        guard = 0
+        while (port in used or _busy(port)) and guard < 200:
             port += 1
+            guard += 1
         sd = e.get("server_dir") or e.get("folder") or ""
         p = os.path.join(sd, "server.properties")
         try:

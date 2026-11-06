@@ -402,11 +402,31 @@ class ModBrowseDialog(BaseDialog):
         self._load_builtin_local()
 
     # ---------- 数据 ----------
+    def _mods_signature(self):
+        """轻量签名：只列目录不打开 jar，变了才需要重新解析元数据。"""
+        try:
+            items = []
+            for n in sorted(os.listdir(self.target_dir)):
+                if not n.lower().endswith((".jar", ".disabled")):
+                    continue
+                st = os.stat(os.path.join(self.target_dir, n))
+                items.append((n, st.st_size, st.st_mtime_ns))
+            return tuple(items)
+        except Exception:
+            return None
+
     def _installed_slugs(self):
         """已装模组/插件的名字集合（用来打『已装』标记）。
 
         ★ V1.7.3-1：归一化存储，判定端 _inst_hit 子串包含。
+        ★ V2.5.0：打开、翻页、重搜、装完刷新会调 5~6 次，每次都把
+          mods/ 里每个 jar 打开读一遍元数据。目录没变就复用上次结果。
         """
+        sig = self._mods_signature()
+        if (sig is not None
+                and sig == getattr(self, "_installed_sig", None)
+                and getattr(self, "_installed_cache", None) is not None):
+            return set(self._installed_cache)
         out = set()
         try:
             for m in modman.scan_mods_dir(self.target_dir):
@@ -419,6 +439,8 @@ class ModBrowseDialog(BaseDialog):
                         fn.replace(".jar", "").replace(".disabled", "")))
         except Exception:
             pass
+        self._installed_sig = sig
+        self._installed_cache = set(out)
         return out
 
     def _params(self):
@@ -1448,6 +1470,17 @@ class ModBrowseDialog(BaseDialog):
         except Exception:
             pass
 
+    def closeEvent(self, e):
+        """★ V2.5.0：关窗时取消还在跑的站点探测，并标记已关闭。"""
+        self._closed = True
+        try:
+            w = getattr(self, "_probe_worker_", None)
+            if w is not None:
+                w.request_cancel()
+        except Exception:
+            pass
+        super().closeEvent(e)
+
     # ---------- ★ V1.9.2：站点索引存在性探测 ----------
     #   卡片上的 [Modrinth] / [MC百科] / [CurseForge] 按钮只显示
     #   该模组确实有信息的站点：来源站直接显示，其余站后台探测
@@ -1489,24 +1522,38 @@ class ModBrowseDialog(BaseDialog):
         self._probe_worker_.start()
 
     @staticmethod
-    def _probe_worker(todo, on_log=None):
-        """后台并发探测各站，返回 {slug: {kind: True/False/None}}。"""
+    def _probe_worker(todo, on_log=None, cancel=None):
+        """后台并发探测各站，返回 {slug: {kind: True/False/None}}。
+
+        ★ V2.5.0：Worker 会自动注入 cancel Event（签名里有 cancel）。
+          老实现用 `with ThreadPoolExecutor(...)`，窗口关掉、QThread
+          被停掉之后，8 个 urllib 线程还在跑最长 15 秒 —— 解释器退出
+          时和 SSL/Qt 清理撞车，实测直接 access violation 段错误。
+          现在可取消 + shutdown(wait=False, cancel_futures=True)，
+          不等已经发出的请求，也不让它们拖住退出。
+        """
         from ..core import sources as _s
         import concurrent.futures
         out = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        ex = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+        try:
             futs = [(slug, kind,
                      ex.submit(_s.probe_site_exists, slug, name, kind))
                     for slug, name, kind in todo]
             for slug, kind, fut in futs:
+                if cancel is not None and cancel.is_set():
+                    break
                 try:
-                    out.setdefault(slug, {})[kind] = fut.result(timeout=15)
+                    out.setdefault(slug, {})[kind] = fut.result(timeout=4)
                 except Exception:
                     out.setdefault(slug, {})[kind] = None
+        finally:
+            ex.shutdown(wait=False, cancel_futures=True)
         return out
 
     def _apply_site_probe(self, ok, res):
-        if not isinstance(res, dict):
+        # 窗口已关就不碰任何控件（QListWidget 可能已被 C++ 销毁）
+        if getattr(self, "_closed", False) or not isinstance(res, dict):
             return
         for slug, m in res.items():
             self._site_loading.discard(slug)
@@ -2431,6 +2478,7 @@ class ModDialog(BaseDialog):
             QMessageBox.critical(self, "失败", repr(e))
 
     def _check_one(self, m):
+        """单个模组检查（选中行时用；批量走 do_check_all 的后台 Worker）。"""
         r = self._row_of(m)
         if r is None:
             return None
@@ -2438,18 +2486,22 @@ class ModDialog(BaseDialog):
             self.table.setItem(r, 3, QTableWidgetItem("缺版本/加载器"))
             return None
         self.table.setItem(r, 3, QTableWidgetItem("查询中..."))
-        QApplication.processEvents()
-
         res = modman.check_update(m, self.mc_version, self.loader,
                                   on_log=lambda x: None)
         self.results[m["path"]] = res
+        return self._paint_update_result(m, res)
+
+    def _paint_update_result(self, m, res):
+        """把一份检查结果画到表格行（单查 / 批量共用）。"""
+        r = self._row_of(m)
+        if r is None:
+            return None
+        self.results[m.get("path", "")] = res
         status = res.get("status") or (
             "error" if res.get("err") else "unknown")
         latest = res.get("latest") or ""
         url = res.get("url") or ""
-        method = res.get("method") or ""
 
-        self.results[m.get("path", "")] = res
         if status == "update":
             txt = "%s  ← 可更新" % latest
             self.table.setItem(r, 3, QTableWidgetItem(txt))
@@ -2462,7 +2514,7 @@ class ModDialog(BaseDialog):
             if url:
                 self._log("         下载: %s" % url)
                 self._log("         （选中该行点『下载选中项的更新』"
-                          "可直接打开）")
+                          "可直接下载）")
         elif status == "latest":
             txt = "%s  [最新]" % (latest or res.get("cur", "?"))
             self.table.setItem(r, 3, QTableWidgetItem(txt))
@@ -2498,20 +2550,54 @@ class ModDialog(BaseDialog):
                 % (self.mc_version or "未知", self.loader or "未知"))
             return
         self._log("开始检查 %d 个 mod ..." % len(self.mods))
-        self._log("方式：先用文件哈希查 Modrinth（准），"
+        self._log("方式：文件哈希批量查 Modrinth（准），"
                   "查不到再按名字搜")
-        QApplication.processEvents()
+        for m in self.mods:
+            r = self._row_of(m)
+            if r is not None:
+                self.table.setItem(r, 3, QTableWidgetItem("查询中..."))
 
+        # ★ V2.5.0：批量查询放进 Worker。老实现在 GUI 线程里逐个发
+        #   3~5 个请求 + processEvents()，几十个 mod 就能让窗口僵住几分钟。
+        def job(on_log=None, on_progress=None):
+            return modman.check_updates_batch(
+                self.mods, self.mc_version, self.loader,
+                on_log=on_log, on_progress=on_progress)
+
+        try:
+            self.btn_upd_all.setEnabled(False)
+        except Exception:
+            pass
+        w = _track(self, Worker(job, {}, self))
+        w.log.connect(self._log)
+        w.progress.connect(self._on_check_all_progress)
+        w.done.connect(self._on_check_all_done)
+        w.start()
+
+    def _on_check_all_progress(self, done, total, label):
+        if done == 0 or (total and done >= total):
+            self._log("[批量检查] %d/%d：%s" % (done, total, label))
+
+    def _on_check_all_done(self, ok, res):
+        try:
+            self.btn_upd_all.setEnabled(True)
+        except Exception:
+            pass
+        if not ok:
+            self._log("[错误] %r" % (res,))
+            return
+        results = res if isinstance(res, dict) else {}
         tally = {"update": 0, "latest": 0, "unknown": 0, "error": 0}
         for m in self.mods:
             try:
-                st = self._check_one(m)
+                one = results.get(m.get("path")) or {
+                    "status": "error", "err": "没拿到结果"}
+                st = self._paint_update_result(m, one)
                 if st in tally:
                     tally[st] += 1
             except Exception as ex:
                 tally["error"] += 1
                 self._log("[异常] %s : %r" % (m.get("name"), ex))
-            QApplication.processEvents()
 
         self._log("")
         self._log("检查完毕 —— 可更新 %d，已最新 %d，没查到 %d，失败 %d"
@@ -2519,7 +2605,7 @@ class ModDialog(BaseDialog):
                      tally["unknown"], tally["error"]))
         if tally["update"]:
             self._log("黄色行 = 有新版本。")
-            self._log("打开下载：选中该行点『下载选中项的更新』，"
+            self._log("下载：选中该行点『下载选中项的更新』，"
                       "或直接双击该行。")
         if tally["unknown"]:
             self._log("灰色行 = Modrinth 文件库里没有记录"

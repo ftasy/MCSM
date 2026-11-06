@@ -131,16 +131,48 @@ def _install_exit_hook():
 
 
 def _stop_all_threads(soft_ms=600, hard_ms=1500):
-    """停掉程序里所有还在跑的后台线程（退出前兜底）。"""
-    n = 0
-    for w in list(_LIVE_THREADS):
+    """停掉程序里所有还在跑的后台线程（退出前兜底）。
+
+    ★ V2.5.0：改成两轮。老实现串行 `w.stop()`，每个线程最多等
+      soft+hard=2.1 秒，N 个线程就是 N×2.1 秒 —— 关窗口能卡十几秒。
+      现在第一轮对所有线程统一发中断，第二轮在**同一个总预算**里等。
+    """
+    import time as _t
+    live = list(_LIVE_THREADS)
+    # 第一轮：只发信号，不等
+    for w in live:
         try:
-            w.stop(soft_ms, hard_ms)
-            n += 1
+            c = getattr(w, "_cancel", None)
+            if c is not None:
+                c.set()
+            if hasattr(w, "isRunning") and w.isRunning():
+                w.requestInterruption()
+                w.quit()
         except Exception:
             pass
+    # 第二轮：统一等待，总预算固定为 soft+hard，而不是每个线程各一份
+    deadline = _t.time() + (soft_ms + hard_ms) / 1000.0
+    for w in live:
+        try:
+            if not hasattr(w, "isRunning") or not w.isRunning():
+                continue
+            left = max(1, int((deadline - _t.time()) * 1000))
+            if not w.wait(min(soft_ms, left)):
+                w.terminate()
+                # ★ terminate() 不是瞬间完成：总预算再紧也必须给它
+                #   至少 100ms 真正停下。以前这里 min(hard_ms, left)
+                #   可能被压到 1ms，解释器随后销毁 Qt 对象时线程还在
+                #   跑 urllib 请求 —— 直接 access violation 段错误。
+                left2 = max(100, min(hard_ms,
+                                     max(1, int((deadline - _t.time())
+                                                * 1000))))
+                w.wait(left2)
+        except Exception:
+            pass
+        finally:
+            _LIVE_THREADS.discard(w)
     _LIVE_THREADS.clear()
-    return n
+    return len(live)
 
 
 def _stop_threads(obj, soft_ms=600, hard_ms=1500):

@@ -793,6 +793,158 @@ def download_update(m, res, on_log=None):
             "version": res.get("latest") or ""}
 
 
+_SHA1_CACHE = {}
+
+
+def _sha1_cached(path):
+    """按 (路径, mtime, 大小) 缓存 jar 的 sha1。
+
+    ★ V2.5.0：一键检查更新、装完刷新、模组表重扫都会反复读同一批
+      jar；文件没变就不必再解压算一次哈希。
+    """
+    key = None
+    try:
+        st = os.stat(path)
+        key = (os.path.normcase(os.path.abspath(path)),
+               st.st_mtime_ns, st.st_size)
+        hit = _SHA1_CACHE.get(key)
+        if hit:
+            return hit
+    except Exception:
+        pass
+    h = file_sha1(path)
+    if h and key:
+        _SHA1_CACHE[key] = h
+    return h
+
+
+def _hash_update_result(m, h, hit, up, title, log):
+    """把批量接口返回的 hit / up 组装成 check_update 的结果字典。
+
+    check_update（单查）和 check_updates_batch（批量）共用这一份判断，
+    避免"同一个文件自己等于自己还标可更新"的假警报在两条路径里不一致。
+    """
+    pid = hit.get("project_id")
+    cur_ver = hit.get("version_number") or m.get("version") or ""
+    home = "https://modrinth.com/mod/%s" % pid
+    if not up:
+        return {"has": False, "latest": cur_ver,
+                "url": "https://modrinth.com/mod/%s" % pid,
+                "title": title, "status": "latest", "cur": cur_ver,
+                "method": "hash"}
+    nv = up.get("version_number") or ""
+    same_ver = _ver_eq(nv, cur_ver)
+    up_sha = ""
+    try:
+        for f in (up.get("files") or []):
+            hs = (f.get("hashes") or {}).get("sha1")
+            if hs:
+                up_sha = hs
+                if f.get("primary"):
+                    break
+    except Exception:
+        pass
+    same_file = bool(up_sha and up_sha.lower() == h.lower())
+    if same_file or same_ver:
+        note = "（就是同一个文件）" if same_file else "（版本号相同）"
+        log("  %s 已是最新 %s%s" % (title, cur_ver, note))
+        return {"has": False, "latest": cur_ver, "url": home,
+                "title": title, "status": "latest", "cur": cur_ver,
+                "method": "hash", "same_file": same_file}
+    return {
+        "has": True, "latest": nv,
+        "url": _pick_file_url(up) or home,
+        "title": title, "status": "update", "cur": cur_ver,
+        "method": "hash",
+        # ★ V2.4.1：带直链/文件名/哈希，『下载更新』直接走源
+        "file": _pick_file(up),
+    }
+
+
+def check_updates_batch(mods, mc_version, loader, on_log=None,
+                        on_progress=None):
+    """批量检查更新：哈希一次查全部，不再 N+1 次逐个请求。
+
+    ★ V2.5.0：老 UI 在 GUI 线程里对 N 个 mod 各跑一次 check_update，
+      每个要 3~5 个请求（/version_files、/version_files/update、
+      /project/<id>，查不到还有搜索 + 版本列表），100 个 mod 就是
+      300+ 次请求且界面全程冻结。这里两个批量接口各一次拿到全部结果；
+      只有哈希库里查不到的（多半是 CurseForge 模组）才退回逐个查询。
+
+    返回 {mod_path: result_dict}，结构与 check_update 完全一致。
+    """
+    log = on_log or (lambda x: None)
+    mods = list(mods or [])
+    total = len(mods)
+    out = {}
+
+    def prog(n, label):
+        if on_progress:
+            try:
+                on_progress(n, total, label)
+            except Exception:
+                pass
+
+    if not total:
+        return out
+
+    # ---- 1) 本地算哈希（带缓存，纯磁盘 IO）----
+    by_hash = {}
+    no_hash = []
+    for i, m in enumerate(mods):
+        path = m.get("path") or ""
+        h = _sha1_cached(path) if path and os.path.isfile(path) else None
+        if h:
+            by_hash.setdefault(h, []).append(m)
+        else:
+            no_hash.append(m)
+        if i % 20 == 0:
+            prog(0, "正在读取本地模组文件 %d/%d" % (i + 1, total))
+    log("[批量更新] %d 个模组，%d 个有哈希，%d 个要按名字查"
+        % (total, len(by_hash), len(no_hash)))
+
+    # ---- 2) 两次批量请求拿到全部结果 ----
+    hashes = list(by_hash.keys())
+    info, ups = {}, {}
+    if hashes:
+        prog(0, "正在向 Modrinth 批量查询 %d 个文件" % len(hashes))
+        try:
+            info = lookup_by_hashes(hashes) or {}
+        except Exception as e:
+            log("[批量更新] 文件查询失败：%r" % e)
+        try:
+            ups = lookup_updates(hashes, mc_version, loader) or {}
+        except Exception as e:
+            log("[批量更新] 更新查询失败：%r" % e)
+
+    done = 0
+    for h, group in by_hash.items():
+        hit = (info or {}).get(h)
+        if not hit:
+            no_hash.extend(group)   # 哈希没收录 → 退回名字搜索
+            continue
+        for m in group:
+            name = m.get("name") or m.get("id") or "?"
+            # 标题用本地名即可：批量路径不再为每个项目单独发 /project/<id>
+            out[m.get("path")] = _hash_update_result(
+                m, h, hit, (ups or {}).get(h), name, log)
+            done += 1
+    prog(done, "批量查询完成，正在处理没有哈希记录的模组")
+
+    # ---- 3) 剩下的按名字逐个查（数量通常很少）----
+    for m in no_hash:
+        try:
+            out[m.get("path")] = check_update(
+                m, mc_version, loader, on_log=log)
+        except Exception as e:
+            out[m.get("path")] = {"has": False, "status": "error",
+                                  "err": repr(e)}
+        done += 1
+        prog(done, m.get("name") or m.get("id") or "?")
+    prog(total, "完成")
+    return out
+
+
 def check_update(m, mc_version, loader, on_log=None):
     """查 Modrinth 看有没有更新。
 

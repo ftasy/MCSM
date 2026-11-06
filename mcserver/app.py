@@ -188,6 +188,9 @@ class MainWindow(
         act("下载源", self.do_sources,
             "镜像 / 官方源 / CF Key / 测速（全局生效，模组与插件下载都用它）")
         act("显示设置", self.do_display, "调整列表字号与行高")
+        act("切换主题", self.do_toggle_theme,
+            "一键在深色 / 浅色之间切换，立即生效并保存\n"
+            "（想细调配色再进『显示设置 → 外观』）")
         act("检查更新", self.do_check_update,
             "检查 GitHub 上有没有新版本（后台线程，不卡界面）")
         tb.addSeparator()
@@ -290,15 +293,17 @@ class MainWindow(
             pass
 
         # --- 表格视图（原来的）---
-        self.table = QTableWidget(0, 6)
+        # ★ V2.5.0：加一列"占用"。以前大小算过、也用来排过序，
+        #   却只在"删除服务器"确认框里露一次，想知道该清理哪个服得逐个打开。
+        self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(
-            ["名称", "版本", "加载器", "存档", "Region", "状态"])
+            ["名称", "版本", "加载器", "存档", "Region", "状态", "占用"])
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.Stretch)
-        for c in (1, 2, 3, 4, 5):
+        for c in (1, 2, 3, 4, 5, 6):
             self.table.horizontalHeader().setSectionResizeMode(
                 c, QHeaderView.ResizeToContents)
         self.table.itemSelectionChanged.connect(self.on_sel)
@@ -371,6 +376,29 @@ class MainWindow(
             self._sc_rescan.activated.connect(self.do_scan)
         except Exception:
             pass
+        # ★ V2.5.0：首次使用引导。老版第一次打开是空列表 + 只读空目录框，
+        #   没有任何"第一步"，用户容易以为软件坏了。root 为空时显示。
+        self.welcome = QFrame()
+        self.welcome.setFrameShape(QFrame.StyledPanel)
+        wh = QHBoxLayout(self.welcome)
+        wh.setContentsMargins(10, 8, 10, 8)
+        self.lbl_welcome = QLabel(
+            "第一次使用？ ① 点右上「选择...」指定存放服务器的总目录"
+            "  →  ② 用「导入」或「初始化服务端」建服"
+            "  →  ③ 选中服务器后点「启动」")
+        self.lbl_welcome.setWordWrap(True)
+        wh.addWidget(self.lbl_welcome, 1)
+        self.btn_welcome_pick = QPushButton("选择总目录")
+        self.btn_welcome_pick.clicked.connect(self.pick_and_scan)
+        wh.addWidget(self.btn_welcome_pick)
+        lv.addWidget(self.welcome)
+        # ★ 初始就要算一次：root 为空时 do_scan() 会直接提示"请先选择
+        #   总目录"而不再触发 _fill_views()，只靠那里控制的话首次打开
+        #   根本看不到这张卡（正是最需要它的场景）。
+        self.welcome.setVisible(
+            not bool(getattr(self, "root", ""))
+            and not bool(getattr(self, "entries", [])))
+
         lv.addWidget(self.icon_view, 1)
         lv.addWidget(self.table, 1)
         self.icon_view.setVisible(self.view_mode == "icon")
@@ -512,13 +540,26 @@ def check_environment():
     """
     from . import paths
     current_dir = paths.app_dir()
-    if "!" in current_dir or "#" in current_dir:
+    # ★ V2.5.0：原来只查 ! / #。补上 cmd / Java @argfile 同样敏感的字符、
+    #   超长路径（Windows MAX_PATH 260）和 UNC 网络路径。
+    #   中文/空格本身现代 Java 能处理，故意不误报。
+    bad = [c for c in "!#&%^" if c in current_dir]
+    reasons = []
+    if bad:
+        reasons.append("包含特殊字符 %s" % "、".join(bad))
+    if len(current_dir) > 200:
+        reasons.append("路径过长（%d 字符，接近 Windows 260 上限）"
+                       % len(current_dir))
+    if current_dir.startswith("\\\\"):
+        reasons.append("是 UNC 网络路径（Java / 部分工具不支持）")
+    if reasons:
         msg = (
-            "警告：当前软件所在路径包含特殊字符（如 ! 或 #）。\n\n"
-            "这极有可能导致 Minecraft 服务端核心（Java）无法正常启动或报错。\n"
+            "警告：当前软件所在路径可能导致 Java 或启动脚本异常。\n\n"
+            "原因：%s\n\n"
+            "这会让 Minecraft 服务端核心启动失败或执行到一半崩溃。\n"
             "当前路径：%s\n\n"
-            "强烈建议将软件移动到纯英文、无特殊符号的路径下运行！" % current_dir
-        )
+            "建议把软件移动到较短的纯英文路径下运行。"
+            % ("；".join(reasons), current_dir))
         QMessageBox.warning(None, "路径警告", msg)
 
 

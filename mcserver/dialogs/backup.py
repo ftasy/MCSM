@@ -6,15 +6,17 @@
 
 import os
 import sys
+import threading
 
 from PySide6.QtGui import QColor
 from PySide6.QtCore import Qt, QThread
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QCheckBox, QFileDialog, QMessageBox, QDialogButtonBox, QGroupBox,
-    QListWidget, QListWidgetItem, QApplication)
+    QListWidget, QListWidgetItem, QApplication, QProgressBar)
 from ..core import migrate, backup
-from ..dialog_workers import _stop_threads, _install_exit_hook
+from ..dialog_workers import (
+    _stop_threads, _install_exit_hook, Worker, _track)
 from .common import LogView, _muted, _open_in_explorer
 from .base import BaseDialog
 from ..core.palette import PAL
@@ -122,6 +124,24 @@ class BackupDialog(BaseDialog):
         hb.addStretch(1)
         v.addLayout(hb)
 
+        # ★ V2.5.0：备份/恢复/删除全部放后台，给进度条和取消按钮。
+        #   以前只有一句"请稍候 ..." + processEvents()，几个 GB 的存档
+        #   会让整个窗口假死，用户不知道是卡死还是在复制。
+        hp = QHBoxLayout()
+        self.pb = QProgressBar()
+        self.pb.setRange(0, 1)
+        self.pb.setValue(0)
+        self.pb.setFormat("待命")
+        self.pb.hide()
+        hp.addWidget(self.pb, 1)
+        self.btn_cancel = QPushButton("取消")
+        self.btn_cancel.setToolTip(
+            "停止当前操作；备份会清掉半成品，不留坏备份")
+        self.btn_cancel.clicked.connect(self._cancel_clicked)
+        self.btn_cancel.hide()
+        hp.addWidget(self.btn_cancel)
+        v.addLayout(hp)
+
         self.log = LogView()
         self.log.setReadOnly(True)
         self.log.setMaximumHeight(120)
@@ -194,6 +214,84 @@ class BackupDialog(BaseDialog):
     def _log(self, m):
         self.log.appendPlainText(m)
 
+    # ---------------- ★ V2.5.0：后台执行 + 进度 + 取消 ----------------
+    def _run_async(self, label, fn, on_ok=None, cancellable=True):
+        """把耗时操作放进 Worker；主线程只收 log / progress / done 信号。"""
+        if getattr(self, "_busy", False):
+            QMessageBox.information(self, "还在忙", "上一个操作还没结束")
+            return
+        self._busy = True
+        self._cancel = threading.Event()
+        self._set_busy(True, cancellable)
+        self._log("[%s] 开始 ..." % label)
+
+        def job(on_log=None, on_progress=None):
+            try:
+                return fn(on_log=on_log, on_progress=on_progress,
+                          cancel=self._cancel if cancellable else None)
+            except backup.BackupCancelled:
+                return {"cancelled": True}
+
+        self._worker = _track(self, Worker(job, {}, self))
+        self._worker.log.connect(self._log)
+        self._worker.progress.connect(self._on_progress)
+        self._worker.done.connect(
+            lambda ok, res: self._on_done(ok, res, label, on_ok))
+        self._worker.start()
+
+    def _set_busy(self, busy, cancellable=True):
+        for b in (self.btn_now, self.btn_restore, self.btn_del):
+            b.setEnabled(not busy)
+        self.pb.setVisible(busy)
+        self.btn_cancel.setVisible(busy and cancellable)
+        self.btn_cancel.setEnabled(busy and cancellable)
+        self.btn_cancel.setText("取消")
+        if busy:
+            self.pb.setRange(0, 1)
+            self.pb.setValue(0)
+            self.pb.setFormat("准备中 ...")
+
+    def _on_progress(self, done, total, label):
+        try:
+            if total and total > 0:
+                self.pb.setRange(0, total)
+                self.pb.setValue(min(done, total))
+                self.pb.setFormat("%v/%m（%p%） · " + (label or "")[:24])
+            else:
+                self.pb.setRange(0, 0)
+        except Exception:
+            pass
+
+    def _cancel_clicked(self):
+        try:
+            self._cancel.set()
+            self.btn_cancel.setText("正在取消 ...")
+            self.btn_cancel.setEnabled(False)
+            self._log("[提示] 已请求取消，正在收尾 ...")
+        except Exception:
+            pass
+
+    def _on_done(self, ok, res, label, on_ok):
+        self._busy = False
+        self._set_busy(False)
+        try:
+            self.refresh_backups()
+        except Exception:
+            pass
+        if isinstance(res, dict) and res.get("cancelled"):
+            self._log("[%s] 已取消，半成品已清理" % label)
+            return
+        if not ok:
+            self._log("[%s][失败] %r" % (label, res))
+            QMessageBox.critical(self, "失败", str(res))
+            return
+        self._log("[%s] 完成" % label)
+        if on_ok:
+            try:
+                on_ok(res)
+            except Exception as e:
+                self._log("[警告] %r" % e)
+
     def refresh_backups(self):
         """刷新备份列表，并显示备份目录在哪。"""
         self.bk_list.clear()
@@ -240,19 +338,20 @@ class BackupDialog(BaseDialog):
         if not wp:
             QMessageBox.warning(self, "提示", "先选中一个存档")
             return
-        self._log("备份中，请稍候 ...")
-        QApplication.processEvents()
-        try:
-            r = backup.backup_world(wp, self.server_dir,
-                                    compress=self.chk_zip.isChecked(),
-                                    on_log=self._log)
-            self.refresh_backups()
-            QMessageBox.information(self, "完成",
-                                    "备份完成：\n%s\n%.1f MB"
-                                    % (os.path.basename(r["path"]),
-                                       r["size_mb"]))
-        except Exception as e:
-            QMessageBox.critical(self, "失败", repr(e))
+        compress = self.chk_zip.isChecked()
+
+        def fn(on_log=None, on_progress=None, cancel=None):
+            return backup.backup_world(
+                wp, self.server_dir, compress=compress,
+                on_log=on_log, on_progress=on_progress, cancel=cancel)
+
+        def on_ok(r):
+            QMessageBox.information(
+                self, "完成",
+                "备份完成：\n%s\n%.1f MB"
+                % (os.path.basename(r["path"]), r["size_mb"]))
+
+        self._run_async("备份", fn, on_ok, cancellable=True)
 
     def do_restore(self):
         bp = self._cur_backup()
@@ -262,6 +361,16 @@ class BackupDialog(BaseDialog):
             return
         if not wp:
             QMessageBox.warning(self, "提示", "先选中要被替换的存档")
+            return
+        # ★ V2.5.0：服务器还在跑就替换世界，java 会继续往旧目录里写，
+        #   重启后读到的世界和实际写的不是同一份（新旧存档分裂）。
+        #   do_delete 早有这个检查，恢复备份却漏了。
+        if self._is_running():
+            QMessageBox.warning(
+                self, "服务器还在运行",
+                "请先停止服务器再恢复存档。\n\n"
+                "运行中替换世界目录，服务端会继续往被挪走的旧存档里写，"
+                "可能造成存档损坏或新旧数据不一致。")
             return
         bn = os.path.basename(bp)
         wn = os.path.basename(wp.rstrip("\\/"))
@@ -279,16 +388,18 @@ class BackupDialog(BaseDialog):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if r2 != QMessageBox.Yes:
             return
-        self._log("恢复中 ...")
-        QApplication.processEvents()
-        try:
-            res = backup.restore_backup(bp, wp, on_log=self._log)
+        def fn(on_log=None, **kw):
+            return backup.restore_backup(bp, wp, on_log=on_log)
+
+        def on_ok(res):
             QMessageBox.information(
                 self, "完成",
                 "已恢复。\n旧存档保留为：\n%s\n\n确认没问题后可手动删除。"
-                % os.path.basename(res["old"]))
-        except Exception as e:
-            QMessageBox.critical(self, "失败", repr(e))
+                % os.path.basename(res.get("old") or ""))
+
+        # 恢复是原子替换，中途取消风险大，不提供取消按钮；
+        # 但依旧放后台，界面不会假死。
+        self._run_async("恢复", fn, on_ok, cancellable=False)
 
     def _is_running(self):
         """这个服务器现在在不在跑。"""
@@ -322,17 +433,16 @@ class BackupDialog(BaseDialog):
         if r != QMessageBox.Yes:
             return
 
-        self._log("删除中 ...")
-        QApplication.processEvents()
-        try:
-            st = backup.delete_backup(bp, on_log=self._log)
-        except Exception as e:
-            QMessageBox.critical(self, "失败", repr(e))
-            self.refresh_backups()
-            return
+        def fn(on_log=None, **kw):
+            return backup.delete_backup(bp, on_log=on_log)
 
-        self.refresh_backups()
+        self._run_async("删除备份", fn,
+                        lambda st: self._report_delete(st, bp),
+                        cancellable=False)
 
+    def _report_delete(self, st, bp=None):
+        """删除结果报告（原来内联在 do_delete 里，抽出来供后台回调复用）。"""
+        st = st or {}
         if st.get("gone") and not st.get("failed"):
             self._log("[OK] 已删除干净")
             return
@@ -350,7 +460,8 @@ class BackupDialog(BaseDialog):
         sample = ""
         if st.get("failed_paths"):
             try:
-                rel = os.path.relpath(st["failed_paths"][0][0], bp)
+                rel = (os.path.relpath(st["failed_paths"][0][0], bp)
+                       if bp else st["failed_paths"][0][0])
             except Exception:
                 rel = st["failed_paths"][0][0]
             sample = "\n\n例如：%s\n原因：%s" % (rel,

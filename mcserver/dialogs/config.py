@@ -1410,16 +1410,46 @@ class ServerConfigDialog(BaseDialog):
             r = self._row_of_mod_here(m)
             if r is not None:
                 self.mod_table.setItem(r, 4, QTableWidgetItem("查询中..."))
-            QApplication.processEvents()
-            try:
-                res = modman.check_update(
-                    m, mc, loader, on_log=lambda x: None)
-            except Exception as e:
-                res = {"status": "error", "err": repr(e)}
-            self._mod_results[m.get("path")] = res
-            status = res.get("status")
-            latest = res.get("latest") or res.get("cur") or ""
-            url = res.get("url") or ""
+
+        # ★ V2.5.0：改成"批量查询 + 后台线程"。
+        #   老实现在 GUI 线程里对每个模组发 3~5 个请求，靠
+        #   QApplication.processEvents() 假装不卡 —— 模组一多窗口直接僵住，
+        #   而且会开启事件重入（用户还能在循环里嵌套点别的按钮）。
+        def job(on_log=None, on_progress=None):
+            return modman.check_updates_batch(
+                mods, mc, loader, on_log=on_log,
+                on_progress=on_progress)
+
+        self._check_worker = _track(self, Worker(job, {}, self))
+        self._check_worker.log.connect(self._log)
+        self._check_worker.progress.connect(self._on_mod_check_progress)
+        self._check_worker.done.connect(
+            lambda ok, res: self._on_mod_check_done(ok, res, mods))
+        self._check_worker.start()
+
+    def _on_mod_check_progress(self, done, total, label):
+        """批量查询的进度：只在起止打日志，别把输出刷屏。"""
+        try:
+            if done == 0 or (total and done >= total):
+                self._log("[更新检查] %d/%d：%s" % (done, total, label))
+        except Exception:
+            pass
+
+    def _on_mod_check_done(self, ok, res, mods):
+        """后台批量查询结束，主线程一次性回填表格。"""
+        if not ok:
+            self._log("[更新检查][失败] %r" % (res,))
+            return
+        results = res if isinstance(res, dict) else {}
+        tally = {"update": 0, "latest": 0, "unknown": 0, "error": 0}
+        for m in mods:
+            one = results.get(m.get("path")) or {
+                "status": "error", "err": "没拿到结果"}
+            self._mod_results[m.get("path")] = one
+            status = one.get("status") or "error"
+            latest = one.get("latest") or one.get("cur") or ""
+            url = one.get("url") or ""
+            r = self._row_of_mod_here(m)
             if r is not None:
                 if status == "update":
                     col = QTableWidgetItem("%s ←可更新" % latest)
@@ -1432,13 +1462,18 @@ class ServerConfigDialog(BaseDialog):
                 else:
                     self.mod_table.setItem(
                         r, 4, QTableWidgetItem(
-                            (res.get("err") or "查询失败")[:20]))
+                            (one.get("err") or "查询失败")[:20]))
+            if status in tally:
+                tally[status] += 1
             self._log("[更新检查] %s -> %s（%s）%s"
                       % (m.get("name") or "?", latest or "?",
                          status or "?",
                          ("下载: %s" % url)
                          if url and status == "update" else ""))
-        self._log("[更新检查] 完成")
+        self._log("[更新检查] 完成 —— 可更新 %d，已最新 %d，"
+                  "没查到 %d，失败 %d"
+                  % (tally["update"], tally["latest"],
+                     tally["unknown"], tally["error"]))
 
     def _row_of_mod_here(self, m):
         for i in range(self.mod_table.rowCount()):

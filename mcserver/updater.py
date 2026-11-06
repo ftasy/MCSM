@@ -13,6 +13,11 @@ from .core import net
 from . import __version__
 
 _RE_DIGITS_U = re.compile(r"\d+")
+# ★ V2.5.0：预发布后缀不能算版本位。以前 v2.4.1-rc1 被切成
+#   [2,4,1,1]、v2.4.2-beta1 被切成 [2,4,2,1]，都会误报"有更新"。
+_RE_PRE = re.compile(
+    r"(?i)[-_.]?(?:pre|rc|alpha|beta|snapshot|dev|exp)\d*\b.*$")
+_RE_V = re.compile(r"(?i)^v")
 
 # ★ 已配置：更新检测指向 ftasy/MCSM（V1.8.0：确认非空，且为官方仓库）
 GITHUB_REPO = "ftasy/MCSM"
@@ -26,18 +31,25 @@ RETRY_WAIT = 1.5    # 重试退避基数（1.5 / 3 / 6 秒）
 
 
 def _nums(s):
-    """把版本号字符串里的数字段抽出来：v1.6.0 -> [1, 6, 0]。"""
-    return [int(x) for x in _RE_DIGITS_U.findall(str(s))]
+    """抽出纯版本号数字段：v2.4.1-rc1 -> [2, 4, 1]（后缀不算版本位）。"""
+    t = _RE_V.sub("", str(s or "").strip())
+    t = _RE_PRE.sub("", t).strip()
+    return [int(x) for x in _RE_DIGITS_U.findall(t)]
 
 
 def is_newer(tag, cur):
-    """tag 是否严格大于 cur（tag 常带 v 前缀，cur 是 1.6.0）。"""
-    t = _nums(tag)
-    c = _nums(cur)
-    for a, b in zip(t, c):
-        if a != b:
-            return a > b
-    return len(t) > len(c)
+    """tag 是否严格大于 cur。
+
+    ★ V2.5.0：预发布（rc / beta / pre / snapshot...）一律不算正式更新；
+      数字位补齐到等长再比，避免 2.4 与 2.4.1 靠"谁更长"来判。
+    """
+    if _RE_PRE.search(str(tag or "")):
+        return False
+    t, c = _nums(tag), _nums(cur)
+    n = max(len(t), len(c))
+    t += [0] * (n - len(t))
+    c += [0] * (n - len(c))
+    return t > c
 
 
 def _request_once():
@@ -66,6 +78,9 @@ def check_latest(on_log=None):
             data = _request_once()
             tag = data.get("tag_name") or ""
             url = data.get("html_url") or ""
+            # ★ V2.5.0：草稿/预发布不算正式更新（双保险，is_newer 也拦）
+            if data.get("draft") or data.get("prerelease"):
+                return tag, url, False
             return tag, url, is_newer(tag, __version__)
         except Exception as e:
             last = e
